@@ -4,6 +4,7 @@ import { electronAPI } from '@electron-toolkit/preload'
 // Custom APIs for renderer
 const api = {
   // ── Audio analysis ─────────────────────────────────────────────────────
+  // TODO: return string[] when multi-folder import is built in Phase 5
   openFolder: (): Promise<string | null> => ipcRenderer.invoke('dialog:open-folder')
 }
 

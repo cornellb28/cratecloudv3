@@ -54,11 +54,12 @@ app.whenReady().then(() => {
 
   ipcMain.handle('dialog:open-folder', async () => {
     const result = await dialog.showOpenDialog({
-      properties: ['openDirectory'],
+      properties: ['openDirectory', 'multiSelections'],
       title: 'Select your music folder'
     })
 
     if (result.canceled) return null
+    console.log(result)
     return result.filePaths[0]
   })
 
