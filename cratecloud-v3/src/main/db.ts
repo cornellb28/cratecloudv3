@@ -373,10 +373,9 @@ const stmts = {
   `),
   markMissing: db.prepare(`
     UPDATE tracks SET
-    missing = 1
-    updated_at = datetime('now')
+      missing    = 1,
+      updated_at = datetime('now')
     WHERE filepath = ?
-
   `),
   markFound: db.prepare(`
     UPDATE tracks SET
@@ -546,7 +545,42 @@ const stmts = {
 // --- Track Functions ------------------------------------------
 
 export function insertTrack(track: Record<string, unknown>): unknown {
-  return stmts.insertTrack.run(track)
+  // Fill in null for any missing fields so the prepared
+  // statement never throws "Missing named parameter"
+  const safe = {
+    filepath: track.filepath ?? null,
+    filename: track.filename ?? null,
+    title: track.title ?? null,
+    artist: track.artist ?? null,
+    album: track.album ?? null,
+    genre: track.genre ?? null,
+    year: track.year ?? null,
+    remixer: track.remixer ?? null,
+    composer: track.composer ?? null,
+    comment: track.comment ?? null,
+    label: track.label ?? null,
+    grouping: track.grouping ?? null,
+    bpm: track.bpm ?? null,
+    key_camelot: track.key_camelot ?? null,
+    key_full: track.key_full ?? null,
+    camelot: track.camelot ?? null,
+    openkey: track.openkey ?? null,
+    duration_sec: track.duration_sec ?? null,
+    duration_str: track.duration_str ?? null,
+    file_size_mb: track.file_size_mb ?? null,
+    format: track.format ?? null,
+    artwork_path: track.artwork_path ?? null,
+    analyzed_at: track.analyzed_at ?? null,
+  }
+  const result = stmts.insertTrack.run(safe)
+
+  // ON CONFLICT returns lastInsertRowid 0 — fetch the real id
+  if (result.lastInsertRowid === 0n || result.lastInsertRowid === 0) {
+    const existing = stmts.getTrackByFilepath.get(safe.filepath) as { id: number } | undefined
+    return { lastInsertRowid: existing?.id ?? 0 }
+  }
+
+  return result
 }
 
 export function getAllTracks(): unknown {
@@ -606,8 +640,13 @@ export function normalizeTagValue(field: string, value: string): string {
 // is new or already existed.
 export function findOrCreateTag(field: string, value: string, color = '#7f77dd'): number {
   const normalized = normalizeTagValue(field, value)
+  console.log('findOrCreateTag:', { field, value: normalized })
   stmts.insertTag.run({ field, value: normalized, color })
-  const tag = stmts.getTagId.get(field, normalized) as { id: number }
+  const tag = stmts.getTagId.get(field, normalized) as { id: number } | undefined
+  console.log('tag result', tag)
+  if (!tag) {
+    throw new Error(`Failed to find or create tag: ${field}/${normalized}`)
+  }
   return tag.id
 }
 
