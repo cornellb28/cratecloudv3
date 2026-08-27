@@ -313,6 +313,437 @@ db.exec(`
     ON folders(parent_folder_id);
 `)
 
-// ─── Queries ─────────────────────────────────────────────
+// ─── Prepared statements/Queries ─────────────────────────────────────────────
 // Prepared statements are compiled once and run fast
 // Think of them as saved SQL commands ready to fire
+
+const stmts = {
+  // -- Tracks ------------------------------------
+
+  insertTrack: db.prepare(`
+     INSERT INTO tracks (
+      filepath, filename, title, artist, album, genre,
+      year, remixer, composer, comment, label, grouping,
+      bpm, key_camelot, key_full, camelot, openkey,
+      duration_sec, duration_str, file_size_mb, format,
+      artwork_path, analyzed_at
+     )
+      VALUES (
+       @filepath, @filename, @title, @artist, @album, @genre,
+       @year, @remixer, @composer, @comment, @label, @grouping,
+       @bpm, @key_camelot, @key_full, @camelot, @openkey,
+       @duration_sec, @duration_str, @file_size_mb, @format,
+       @artwork_path, @analyzed_at
+      )
+       ON CONFLICT(filepath) DO UPDATE SET
+         title        = excluded.title,
+         artist       = excluded.artist,
+         album        = excluded.album,
+         genre        = excluded.genre,
+         bpm          = excluded.bpm,
+         key_camelot  = excluded.key_camelot,
+         analyzed_at  = excluded.analyzed_at,
+         updated_at   = datetime('now'),
+         missing      = 0,
+         last_seen_at = datetime('now')
+    `),
+  getAllTracks: db.prepare(`
+      SELECT * FROM tracks
+      ORDER BY added_at DESC
+    `),
+  getTrackById: db.prepare(`
+      SELECT * FROM tracks WHERE id = ?
+    `),
+  getTrackByFilepath: db.prepare(`
+      SELECT * FROM tracks WHERE filepath = ?
+    `),
+  updateTrackMeta: db.prepare(`
+    UPDATE tracks SET
+      title           = @title,
+      artist          = @artist,
+      genre           = @genre,
+      bpm             = @bpm,
+      key_camelot     = @key_camelot,
+      energy          = @energy,
+      comment         = @comment,
+      updated_at      = datetime('now'),
+      needs_sync      = @needs_sync,
+      pending_changes = @pending_changes
+    WHERE id = @id
+  `),
+  markMissing: db.prepare(`
+    UPDATE tracks SET
+    missing = 1
+    updated_at = datetime('now')
+    WHERE filepath = ?
+
+  `),
+  markFound: db.prepare(`
+    UPDATE tracks SET
+      missing      = 0,
+      last_seen_at = datetime('now'),
+      updated_at   = datetime('now')
+    WHERE filepath = ?
+  `),
+
+  getNeedsSync: db.prepare(`
+    SELECT * FROM tracks WHERE needs_sync = 1
+  `),
+
+  clearSync: db.prepare(`
+    UPDATE tracks SET
+      needs_sync      = 0,
+      pending_changes = NULL,
+      updated_at      = datetime('now')
+    WHERE id = ?
+  `),
+
+  updateBoardColumn: db.prepare(`
+    UPDATE tracks SET
+      board_column = @board_column,
+      updated_at   = datetime('now')
+    WHERE id = @id
+  `),
+
+  // ── Tags ────────────────────────────────────────────
+
+  insertTag: db.prepare(`
+    INSERT OR IGNORE INTO tags (field, value, color)
+    VALUES (@field, @value, @color)
+  `),
+
+  getTagId: db.prepare(`
+    SELECT id FROM tags
+    WHERE field = ? AND value = ?
+  `),
+
+  findTag: db.prepare(`
+    SELECT * FROM tags
+    WHERE field = ? AND value = ?
+  `),
+
+  getAllTags: db.prepare(`
+    SELECT
+      tg.*,
+      COUNT(tt.track_id) as track_count
+    FROM tags tg
+    LEFT JOIN track_tags tt ON tt.tag_id = tg.id
+    GROUP BY tg.id
+    ORDER BY tg.field, tg.value
+  `),
+  getTagsByField: db.prepare(`
+    SELECT
+      tg.*,
+      COUNT(tt.track_id) as track_count
+    FROM tags tg
+    LEFT JOIN track_tags tt ON tt.tag_id = tg.id
+    WHERE tg.field = ?
+    GROUP BY tg.id
+    ORDER BY tg.value
+  `),
+
+  getTrackTags: db.prepare(`
+    SELECT tg.* FROM tags tg
+    JOIN track_tags tt ON tt.tag_id = tg.id
+    WHERE tt.track_id = ?
+    ORDER BY tg.field, tg.value
+  `),
+
+  getTagTracks: db.prepare(`
+    SELECT t.* FROM tracks t
+    JOIN track_tags tt ON tt.track_id = t.id
+    WHERE tt.tag_id = ?
+    ORDER BY t.artist, t.title
+  `),
+
+  linkTag: db.prepare(`
+    INSERT OR IGNORE INTO track_tags (track_id, tag_id)
+    VALUES (@track_id, @tag_id)
+  `),
+  unlinkTag: db.prepare(`
+    DELETE FROM track_tags
+    WHERE track_id = @track_id AND tag_id = @tag_id
+  `),
+
+  // ── Pending tag imports ──────────────────────────────
+
+  insertPending: db.prepare(`
+    INSERT INTO pending_tag_imports
+      (track_id, raw_comment, candidates)
+    VALUES
+      (@track_id, @raw_comment, @candidates)
+  `),
+
+  getPending: db.prepare(`
+    SELECT * FROM pending_tag_imports
+    ORDER BY created_at ASC
+  `),
+
+  deletePending: db.prepare(`
+    DELETE FROM pending_tag_imports WHERE id = ?
+  `),
+
+  // ── Crates ──────────────────────────────────────────
+
+  insertCrate: db.prepare(`
+    INSERT INTO crates (name, color)
+    VALUES (@name, @color)
+  `),
+  getAllCrates: db.prepare(`
+    SELECT
+      c.*,
+      COUNT(ct.track_id) as track_count
+    FROM crates c
+    LEFT JOIN crate_tracks ct ON ct.crate_id = c.id
+    GROUP BY c.id
+    ORDER BY c.name
+  `),
+
+  addTrackToCrate: db.prepare(`
+    INSERT OR IGNORE INTO crate_tracks (crate_id, track_id)
+    VALUES (@crate_id, @track_id)
+  `),
+
+  removeTrackFromCrate: db.prepare(`
+    DELETE FROM crate_tracks
+    WHERE crate_id = @crate_id AND track_id = @track_id
+  `),
+
+  getCrateTracks: db.prepare(`
+    SELECT t.* FROM tracks t
+    JOIN crate_tracks ct ON ct.track_id = t.id
+    WHERE ct.crate_id = ?
+    ORDER BY t.artist, t.title
+  `),
+
+  // ── Boards ──────────────────────────────────────────
+
+  getAllBoards: db.prepare(`
+    SELECT * FROM boards ORDER BY position ASC
+  `),
+
+  getTracksByColumn: db.prepare(`
+    SELECT * FROM tracks
+    WHERE board_column = ?
+    ORDER BY added_at DESC
+  `),
+
+  // ── App settings ────────────────────────────────────
+
+  getSetting: db.prepare(`
+    SELECT value FROM app_settings WHERE key = ?
+  `),
+
+  setSetting: db.prepare(`
+    INSERT INTO app_settings (key, value, updated_at)
+    VALUES (@key, @value, strftime('%s','now'))
+    ON CONFLICT(key) DO UPDATE SET
+      value      = excluded.value,
+      updated_at = strftime('%s','now')
+  `)
+}
+
+// --- Track Functions ------------------------------------------
+
+export function insertTrack(track: Record<string, unknown>): unknown {
+  return stmts.insertTrack.run(track)
+}
+
+export function getAllTracks(): unknown {
+  return stmts.getAllTracks.all()
+}
+
+export function getTrackById(id: number): unknown {
+  return stmts.getTrackById.get(id)
+}
+
+export function getTrackByFilepath(filepath: string): unknown {
+  return stmts.getTrackByFilepath.get(filepath)
+}
+
+export function updateTrackMeta(data: Record<string, unknown>): Database.RunResult {
+  return stmts.updateTrackMeta.run(data)
+}
+
+export function markTrackMissing(filepath: string): Database.RunResult {
+  return stmts.markMissing.run(filepath)
+}
+
+export function markTrackFound(filepath: string): Database.RunResult {
+  return stmts.markFound.run(filepath)
+}
+
+export function getTracksNeedingSync(): unknown[] {
+  return stmts.getNeedsSync.all()
+}
+
+export function clearTrackSync(id: number): Database.RunResult {
+  return stmts.clearSync.run(id)
+}
+
+export function updateBoardColumn(id: number, column: string): Database.RunResult {
+  return stmts.updateBoardColumn.run({ id, board_column: column })
+}
+
+// ─── Tag functions ────────────────────────────────────────
+
+export function normalizeTagValue(field: string, value: string): string {
+  const trimmed = value.trim()
+  if (field === 'label' || field === 'custom' || field === 'vibe' || field === 'venue') {
+    return trimmed.toUpperCase()
+  }
+  if (field === 'genre') {
+    return trimmed
+      .split(' ')
+      .map((w) => w.charAt(0).toUpperCase() + w.slice(1).toLowerCase())
+      .join(' ')
+  }
+  return trimmed
+}
+
+// Two statements because OR IGNORE returns 0 on conflict.
+// getTagId always returns the correct id whether the tag
+// is new or already existed.
+export function findOrCreateTag(field: string, value: string, color = '#7f77dd'): number {
+  const normalized = normalizeTagValue(field, value)
+  stmts.insertTag.run({ field, value: normalized, color })
+  const tag = stmts.getTagId.get(field, normalized) as { id: number }
+  return tag.id
+}
+
+export function applyTag(trackId: number, tagId: number): Database.RunResult {
+  return stmts.linkTag.run({ track_id: trackId, tag_id: tagId })
+}
+
+export function removeTag(trackId: number, tagId: number): Database.RunResult {
+  return stmts.unlinkTag.run({ track_id: trackId, tag_id: tagId })
+}
+
+export function getTrackTags(trackId: number): unknown {
+  return stmts.getTrackTags.all(trackId)
+}
+
+export function getTagTracks(tagId: number): unknown {
+  return stmts.getTagTracks.all(tagId)
+}
+
+export function getAllTags(): unknown {
+  return stmts.getAllTags.all()
+}
+
+export function getTagsByField(field: string): unknown {
+  return stmts.getTagsByField.all(field)
+}
+export function parseCommentToCandidates(comment: string): string[] {
+  return comment
+    .split(' ')
+    .map((t) => t.trim())
+    .filter((t) => t.length > 0)
+    .filter((t) => t.length <= 30)
+    .filter((t) => !/^\d{4}$/.test(t))
+}
+
+export function checkCandidates(
+  candidates: string[],
+  field = 'label'
+): { value: string; exists: boolean; trackCount: number }[] {
+  return candidates.map((value) => {
+    const normalized = normalizeTagValue(field, value)
+    const existing = stmts.findTag.get(field, normalized) as { id: number } | undefined
+    if (!existing) {
+      return { value: normalized, exists: false, trackCount: 0 }
+    }
+    const rows = stmts.getAllTags.all() as { id: number; track_count: number }[]
+    const row = rows.find((t) => t.id === existing.id)
+    return {
+      value: normalized,
+      exists: true,
+      trackCount: row?.track_count ?? 0
+    }
+  })
+}
+
+export function savePendingImport(
+  trackId: number,
+  rawComment: string,
+  candidates: string[]
+): Database.RunResult {
+  return stmts.insertPending.run({
+    track_id: trackId,
+    raw_comment: rawComment,
+    candidates: JSON.stringify(candidates)
+  })
+}
+
+export function getPendingImports(): unknown[] {
+  const rows = stmts.getPending.all() as {
+    id: number
+    track_id: number
+    raw_comment: string
+    candidates: string
+    created_at: number
+  }[]
+  return rows.map((row) => ({
+    ...row,
+    candidates: JSON.parse(row.candidates) as string[]
+  }))
+}
+
+export function confirmPendingImport(
+  pendingId: number,
+  trackId: number,
+  approvedTags: string[],
+  field = 'label'
+): void {
+  const apply = db.transaction(() => {
+    for (const value of approvedTags) {
+      const tagId = findOrCreateTag(field, value)
+      applyTag(trackId, tagId)
+    }
+    stmts.deletePending.run(pendingId)
+  })
+  return apply()
+}
+
+// ─── Crate functions ──────────────────────────────────────
+
+export function insertCrate(name: string, color = '#7f77dd'): unknown {
+  return stmts.insertCrate.run({ name, color })
+}
+
+export function getAllCrates(): unknown[] {
+  return stmts.getAllCrates.all()
+}
+
+export function addTrackToCrate(crateId: number, trackId: number): unknown {
+  return stmts.addTrackToCrate.run({ crate_id: crateId, track_id: trackId })
+}
+
+export function removeTrackFromCrate(crateId: number, trackId: number): unknown {
+  return stmts.removeTrackFromCrate.run({ crate_id: crateId, track_id: trackId })
+}
+
+export function getCrateTracks(crateId: number): unknown[] {
+  return stmts.getCrateTracks.all(crateId)
+}
+
+// ─── Board functions ──────────────────────────────────────
+
+export function getAllBoards(): unknown[] {
+  return stmts.getAllBoards.all()
+}
+
+export function getTracksByColumn(column: string): unknown[] {
+  return stmts.getTracksByColumn.all(column)
+}
+
+// ─── Settings functions ───────────────────────────────────
+
+export function getSetting(key: string): string | null {
+  const row = stmts.getSetting.get(key) as { value: string } | undefined
+  return row?.value ?? null
+}
+
+export function setSetting(key: string, value: string): Database.RunResult {
+  return stmts.setSetting.run({ key, value })
+}
