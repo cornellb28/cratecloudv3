@@ -27,6 +27,7 @@ import {
   getSetting,
   setSetting
 } from './db'
+import { analyzeFile } from './sidecar'
 
 function createWindow(): void {
   // Create the browser window.
@@ -131,6 +132,16 @@ app.whenReady().then(() => {
     }
   })
 
+  ipcMain.handle('sidecar:analyze', async (_e, filepath: string) => {
+    try {
+      const result = await analyzeFile(filepath)
+      return { ok: true, data: result }
+    } catch (err) {
+      console.error('sidecar:analyze failed:', err)
+      return { ok: false, error: (err as Error).message }
+    }
+  })
+
   // ── Tags ────────────────────────────────────────────────
 
   ipcMain.handle('tags:all', () => getAllTags())
@@ -185,13 +196,13 @@ app.whenReady().then(() => {
   })
 
   ipcMain.handle('crates:add-track', (_e, crateId: number, trackId: number) => {
-      try {
-        addTrackToCrate(crateId, trackId)
-        return { ok: true }
-      } catch (err) {
-        return { ok: false, error: (err as Error).message }
-      }
-    })
+    try {
+      addTrackToCrate(crateId, trackId)
+      return { ok: true }
+    } catch (err) {
+      return { ok: false, error: (err as Error).message }
+    }
+  })
 
   ipcMain.handle('crates:tracks', (_e, crateId: number) => getCrateTracks(crateId))
 

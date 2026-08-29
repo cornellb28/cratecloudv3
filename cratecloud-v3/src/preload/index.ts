@@ -1,12 +1,13 @@
 import { contextBridge, ipcRenderer } from 'electron'
 import { electronAPI } from '@electron-toolkit/preload'
 
+
 // Custom APIs for renderer
 const api = {
   // ── Audio analysis ─────────────────────────────────────────────────────
   // TODO: return string[] when multi-folder import is built in Phase 5
   openFolder: (): Promise<string | null> => ipcRenderer.invoke('dialog:open-folder'),
-
+  analyzeFile: (filepath: string) => ipcRenderer.invoke('sidecar:analyze', filepath),
   // Tracks
   db: {
     allTracks: () => ipcRenderer.invoke('db:all-tracks'),
@@ -14,7 +15,7 @@ const api = {
     insertTrack: (track: unknown) => ipcRenderer.invoke('db:insert-track', track),
     updateTrackMeta: (data: unknown) => ipcRenderer.invoke('db:update-track-meta', data),
     updateBoardColumn: (id: number, column: string) => ipcRenderer.invoke('db:update-board-column', id, column),
-    markMissing: (filepath: string) => ipcRenderer.invoke('db:mark-missing', filepath),
+    markMissing: (filepath: string) => ipcRenderer.invoke('db:mark-missing', filepath)
   },
 
   // Tags
@@ -25,8 +26,7 @@ const api = {
     apply: (trackId: number, tagId: number) => ipcRenderer.invoke('tags:apply', trackId, tagId),
     remove: (trackId: number, tagId: number) => ipcRenderer.invoke('tags:remove', trackId, tagId),
     checkCandidates: (candidates: string[], field: string) => ipcRenderer.invoke('tags:check-candidates', candidates, field),
-    confirmImport: (pendingId: number, trackId: number, approvedTags: string[], field: string) => ipcRenderer.invoke('tags:confirm-import',
-      pendingId, trackId, approvedTags, field),
+    confirmImport: (pendingId: number, trackId: number, approvedTags: string[], field: string) => ipcRenderer.invoke('tags:confirm-import', pendingId, trackId, approvedTags, field),
     pending: () => ipcRenderer.invoke('tags:pending')
   },
 

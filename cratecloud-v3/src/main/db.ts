@@ -1,4 +1,4 @@
-import Database from 'better-sqlite3'
+import Database, { RunResult } from 'better-sqlite3'
 import { app } from 'electron'
 import { join } from 'path'
 import { mkdirSync } from 'fs'
@@ -544,7 +544,7 @@ const stmts = {
 
 // --- Track Functions ------------------------------------------
 
-export function insertTrack(track: Record<string, unknown>): unknown {
+export function insertTrack(track: Record<string, unknown>): { lastInsertRowid: number | bigint } {
   // Fill in null for any missing fields so the prepared
   // statement never throws "Missing named parameter"
   const safe = {
@@ -570,7 +570,7 @@ export function insertTrack(track: Record<string, unknown>): unknown {
     file_size_mb: track.file_size_mb ?? null,
     format: track.format ?? null,
     artwork_path: track.artwork_path ?? null,
-    analyzed_at: track.analyzed_at ?? null,
+    analyzed_at: track.analyzed_at ?? null
   }
   const result = stmts.insertTrack.run(safe)
 
@@ -595,15 +595,15 @@ export function getTrackByFilepath(filepath: string): unknown {
   return stmts.getTrackByFilepath.get(filepath)
 }
 
-export function updateTrackMeta(data: Record<string, unknown>): Database.RunResult {
+export function updateTrackMeta(data: Record<string, unknown>): RunResult {
   return stmts.updateTrackMeta.run(data)
 }
 
-export function markTrackMissing(filepath: string): Database.RunResult {
+export function markTrackMissing(filepath: string): RunResult {
   return stmts.markMissing.run(filepath)
 }
 
-export function markTrackFound(filepath: string): Database.RunResult {
+export function markTrackFound(filepath: string): RunResult {
   return stmts.markFound.run(filepath)
 }
 
@@ -611,11 +611,11 @@ export function getTracksNeedingSync(): unknown[] {
   return stmts.getNeedsSync.all()
 }
 
-export function clearTrackSync(id: number): Database.RunResult {
+export function clearTrackSync(id: number): RunResult {
   return stmts.clearSync.run(id)
 }
 
-export function updateBoardColumn(id: number, column: string): Database.RunResult {
+export function updateBoardColumn(id: number, column: string): RunResult {
   return stmts.updateBoardColumn.run({ id, board_column: column })
 }
 
@@ -640,21 +640,19 @@ export function normalizeTagValue(field: string, value: string): string {
 // is new or already existed.
 export function findOrCreateTag(field: string, value: string, color = '#7f77dd'): number {
   const normalized = normalizeTagValue(field, value)
-  console.log('findOrCreateTag:', { field, value: normalized })
   stmts.insertTag.run({ field, value: normalized, color })
   const tag = stmts.getTagId.get(field, normalized) as { id: number } | undefined
-  console.log('tag result', tag)
   if (!tag) {
     throw new Error(`Failed to find or create tag: ${field}/${normalized}`)
   }
   return tag.id
 }
 
-export function applyTag(trackId: number, tagId: number): Database.RunResult {
+export function applyTag(trackId: number, tagId: number): RunResult {
   return stmts.linkTag.run({ track_id: trackId, tag_id: tagId })
 }
 
-export function removeTag(trackId: number, tagId: number): Database.RunResult {
+export function removeTag(trackId: number, tagId: number): RunResult {
   return stmts.unlinkTag.run({ track_id: trackId, tag_id: tagId })
 }
 
@@ -706,7 +704,7 @@ export function savePendingImport(
   trackId: number,
   rawComment: string,
   candidates: string[]
-): Database.RunResult {
+): RunResult {
   return stmts.insertPending.run({
     track_id: trackId,
     raw_comment: rawComment,
@@ -746,7 +744,7 @@ export function confirmPendingImport(
 
 // ─── Crate functions ──────────────────────────────────────
 
-export function insertCrate(name: string, color = '#7f77dd'): unknown {
+export function insertCrate(name: string, color = '#7f77dd'): RunResult {
   return stmts.insertCrate.run({ name, color })
 }
 
@@ -754,11 +752,11 @@ export function getAllCrates(): unknown[] {
   return stmts.getAllCrates.all()
 }
 
-export function addTrackToCrate(crateId: number, trackId: number): unknown {
+export function addTrackToCrate(crateId: number, trackId: number): RunResult {
   return stmts.addTrackToCrate.run({ crate_id: crateId, track_id: trackId })
 }
 
-export function removeTrackFromCrate(crateId: number, trackId: number): unknown {
+export function removeTrackFromCrate(crateId: number, trackId: number): RunResult {
   return stmts.removeTrackFromCrate.run({ crate_id: crateId, track_id: trackId })
 }
 
@@ -783,6 +781,6 @@ export function getSetting(key: string): string | null {
   return row?.value ?? null
 }
 
-export function setSetting(key: string, value: string): Database.RunResult {
+export function setSetting(key: string, value: string): RunResult {
   return stmts.setSetting.run({ key, value })
 }
