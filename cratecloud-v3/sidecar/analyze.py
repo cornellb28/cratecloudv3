@@ -16,6 +16,8 @@ import warnings # Don't show warning messages. Because your Electron process is 
 # Suppose librosa warnings - safe to ignore
 warnings.filterwarnings('ignore')
 
+import subprocess
+import numpy as np
 import librosa # analyzes the actual audio waveform
 import mutagen # reads the metadata embedded in the music file
 
@@ -38,7 +40,6 @@ CAMELOT = {
     'F minor':  '4A',  'C minor':  '5A',
     'G minor':  '6A',  'D minor':  '7A',
 }
-
 
 def detect_bpm(y, sr):
   """
@@ -180,6 +181,37 @@ def read_tags(filepath):
     return tags
 
 
+def load_via_ffmpeg(filepath, sr=22050):
+    """
+    Decode audio with ffmpeg instead of soundfile.
+    librosa.load only reads formats libsndfile understands, which
+    excludes AAC-in-MP4 (.m4a) — ffmpeg handles those containers.
+    Returns mono float32 PCM at the target sample rate.
+    """
+    cmd = [
+        'ffmpeg', '-v', 'error', '-i', filepath,
+        '-f', 'f32le', '-ac', '1', '-ar', str(sr), '-'
+    ]
+    proc = subprocess.run(cmd, capture_output=True)
+    if proc.returncode != 0:
+        message = proc.stderr.decode(errors='ignore').strip() or 'ffmpeg decode failed'
+        raise RuntimeError(message)
+    y = np.frombuffer(proc.stdout, dtype=np.float32)
+    return y, sr
+
+
+def load_audio(filepath, sr=22050):
+    """
+    Load audio for analysis. Tries librosa/soundfile first (fast path
+    for wav/flac/mp3), falls back to ffmpeg for containers soundfile
+    can't decode (e.g. .m4a).
+    """
+    try:
+        return librosa.load(filepath, sr=sr, mono=True)
+    except Exception:
+        return load_via_ffmpeg(filepath, sr=sr)
+
+
 def analyze(filepath):
     """
     Full analysis pipeline:
@@ -203,7 +235,7 @@ def analyze(filepath):
     # Step 2 — load audio at 22050 Hz mono
     # Lower sample rate = faster load, still accurate for BPM/key
     try:
-        y, sr = librosa.load(filepath, sr=22050, mono=True)
+        y, sr = load_audio(filepath, sr=22050)
     except Exception as e:
         return {
             'success': False,

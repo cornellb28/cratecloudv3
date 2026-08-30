@@ -583,16 +583,16 @@ export function insertTrack(track: Record<string, unknown>): { lastInsertRowid: 
   return result
 }
 
-export function getAllTracks(): unknown {
-  return stmts.getAllTracks.all()
+export function getAllTracks(): Track[] {
+  return stmts.getAllTracks.all() as Track[]
 }
 
-export function getTrackById(id: number): unknown {
-  return stmts.getTrackById.get(id)
+export function getTrackById(id: number): Track | undefined {
+  return stmts.getTrackById.get(id) as Track | undefined
 }
 
-export function getTrackByFilepath(filepath: string): unknown {
-  return stmts.getTrackByFilepath.get(filepath)
+export function getTrackByFilepath(filepath: string): Track | undefined {
+  return stmts.getTrackByFilepath.get(filepath) as Track | undefined
 }
 
 export function updateTrackMeta(data: Record<string, unknown>): RunResult {
@@ -607,8 +607,8 @@ export function markTrackFound(filepath: string): RunResult {
   return stmts.markFound.run(filepath)
 }
 
-export function getTracksNeedingSync(): unknown[] {
-  return stmts.getNeedsSync.all()
+export function getTracksNeedingSync(): Track[] {
+  return stmts.getNeedsSync.all() as Track[]
 }
 
 export function clearTrackSync(id: number): RunResult {
@@ -656,20 +656,20 @@ export function removeTag(trackId: number, tagId: number): RunResult {
   return stmts.unlinkTag.run({ track_id: trackId, tag_id: tagId })
 }
 
-export function getTrackTags(trackId: number): unknown {
-  return stmts.getTrackTags.all(trackId)
+export function getTrackTags(trackId: number): Tag[] {
+  return stmts.getTrackTags.all(trackId) as Tag[]
 }
 
-export function getTagTracks(tagId: number): unknown {
-  return stmts.getTagTracks.all(tagId)
+export function getTagTracks(tagId: number): Track[] {
+  return stmts.getTagTracks.all(tagId) as Track[]
 }
 
-export function getAllTags(): unknown {
-  return stmts.getAllTags.all()
+export function getAllTags(): Tag[] {
+  return stmts.getAllTags.all() as Tag[]
 }
 
-export function getTagsByField(field: string): unknown {
-  return stmts.getTagsByField.all(field)
+export function getTagsByField(field: string): Tag[] {
+  return stmts.getTagsByField.all(field) as Tag[]
 }
 export function parseCommentToCandidates(comment: string): string[] {
   return comment
@@ -680,10 +680,7 @@ export function parseCommentToCandidates(comment: string): string[] {
     .filter((t) => !/^\d{4}$/.test(t))
 }
 
-export function checkCandidates(
-  candidates: string[],
-  field = 'label'
-): { value: string; exists: boolean; trackCount: number }[] {
+export function checkCandidates(candidates: string[], field = 'label'): TagCandidate[] {
   return candidates.map((value) => {
     const normalized = normalizeTagValue(field, value)
     const existing = stmts.findTag.get(field, normalized) as { id: number } | undefined
@@ -712,7 +709,7 @@ export function savePendingImport(
   })
 }
 
-export function getPendingImports(): unknown[] {
+export function getPendingImports(): PendingImport[] {
   const rows = stmts.getPending.all() as {
     id: number
     track_id: number
@@ -748,8 +745,8 @@ export function insertCrate(name: string, color = '#7f77dd'): RunResult {
   return stmts.insertCrate.run({ name, color })
 }
 
-export function getAllCrates(): unknown[] {
-  return stmts.getAllCrates.all()
+export function getAllCrates(): Crate[] {
+  return stmts.getAllCrates.all() as Crate[]
 }
 
 export function addTrackToCrate(crateId: number, trackId: number): RunResult {
@@ -760,18 +757,18 @@ export function removeTrackFromCrate(crateId: number, trackId: number): RunResul
   return stmts.removeTrackFromCrate.run({ crate_id: crateId, track_id: trackId })
 }
 
-export function getCrateTracks(crateId: number): unknown[] {
-  return stmts.getCrateTracks.all(crateId)
+export function getCrateTracks(crateId: number): Track[] {
+  return stmts.getCrateTracks.all(crateId) as Track[]
 }
 
 // ─── Board functions ──────────────────────────────────────
 
-export function getAllBoards(): unknown[] {
-  return stmts.getAllBoards.all()
+export function getAllBoards(): Board[] {
+  return stmts.getAllBoards.all() as Board[]
 }
 
-export function getTracksByColumn(column: string): unknown[] {
-  return stmts.getTracksByColumn.all(column)
+export function getTracksByColumn(column: string): Track[] {
+  return stmts.getTracksByColumn.all(column) as Track[]
 }
 
 // ─── Settings functions ───────────────────────────────────

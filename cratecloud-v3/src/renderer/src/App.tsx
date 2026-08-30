@@ -1,90 +1,156 @@
-import React from 'react'
+import React, { useEffect } from 'react'
+import { useLibraryStore } from './store/useLibraryStore'
 
 function App(): React.JSX.Element {
-  // async function handleTestDatabase(): Promise<void> {
-  //   // Insert a fake track
-  //   const insert = await window.api.db.insertTrack({
-  //     filepath: '/test/solar-apex.mp3',
-  //     filename: 'solar-apex.mp3',
-  //     title: 'Solar Apex',
-  //     artist: 'Kenji Rō',
-  //     album: null,
-  //     genre: 'Tech House',
-  //     year: null,
-  //     remixer: null,
-  //     composer: null,
-  //     comment: null,
-  //     label: null,
-  //     grouping: null,
-  //     bpm: 128,
-  //     key_camelot: '8A',
-  //     key_full: 'A minor',
-  //     camelot: '8A',
-  //     openkey: '1m',
-  //     duration_sec: 240,
-  //     duration_str: '4:00',
-  //     file_size_mb: 8.4,
-  //     format: 'MP3',
-  //     artwork_path: null,
-  //     analyzed_at: new Date().toISOString()
-  //   })
-  //   console.log('Insert track', insert)
+  const {
+    tracks,
+    isAnalyzing,
+    setTracks,
+    addTrack,
+    setAnalyzing,
+  } = useLibraryStore()
 
-  //   // 2. Check what the comment parser would produce
-  //   // Simulating a file that already has 'FTW CLASSIC HEADZ' in its comment
-  //   const candidates = await window.api.tags.checkCandidates(['FTW', 'CLASSIC', 'HEADZ'], 'label')
-  //   console.log('2. Tag candidates:', candidates)
+  // Load all tracks from SQLite when the app starts
+  // useEffect with [] runs once — on first mount only
+  useEffect(() => {
+    async function loadTracks(): Promise<void> {
+      const all = await window.api.db.allTracks()
+      setTracks(all)
+    }
+    loadTracks()
+  }, [])
 
-  //   // 3. Confirm the import — this creates the tags and links them
-  //   const confirm = await window.api.tags.confirmImport(
-  //     0, // pendingId 0 for test — no real pending row
-  //     insert.id!,
-  //     ['FTW', 'CLASSIC', 'HEADZ'],
-  //     'label'
-  //   )
-  //   console.log('3. Confirm import:', confirm)
+  // Analyze a file and save the result to SQLite + store
+  async function handleAnalyzeFile(): Promise<void> {
+    const filepath = '/Volumes/MUSICLITE/Iceman-400/Janice STFU Drake.m4a'
 
-  //   // 4. Read back the tags on that track
-  //   const trackTags = await window.api.tags.forTrack(insert.id!)
-  //   console.log('4. Track tags:', trackTags)
+    setAnalyzing(true)
 
-  //   // 5. Find all tracks with the FTW tag
-  //   const allTags = await window.api.tags.all()
-  //   console.log('5. All tags in library:', allTags)
+    const response = await window.api.analyzeFile(filepath)
 
-  //   // Read all tracks back
-  //   const tracks = await window.api.db.allTracks()
-  //   console.log('Track count:', tracks.length)
-  //   console.log('All tracks:', tracks)
+    if (!response.ok || !response.data) {
+      console.error('Analysis failed:', response.error)
+      setAnalyzing(false)
+      return
+    }
 
-  //   // Create a tag and apply it
-  //   const tagResult = await window.api.tags.apply(
-  //     insert.id!,
-  //     // findOrCreateTag runs in main process — test via a track insert
-  //     1
-  //   )
-  //   console.log('Tag applied:', tagResult)
+    const data = response.data
 
-  //   // Read all boards
-  //   const boards = await window.api.boards.all()
-  //   console.log('Boards:', boards)
-  // }
+    if (!data.success) {
+      console.error('Analysis failed:', data.error)
+      setAnalyzing(false)
+      return
+    }
 
-  async function handleAnalyzeFile(): Promise<{ ok: boolean; data?: AnalysisResult; error?: string }>
- {
-    // Use the folder picker for now — in Phase 6 we add a file picker
-    // For testing, hardcode a real path from your drive
-    const filepath = '/Volumes/MUSICLITE/Iceman-400/Ha - Remix JUVENILE, Hot Boys.mp3'
+    // Save to SQLite
+    const insert = await window.api.db.insertTrack({
+      filepath: data.filepath,
+      title: data.title,
+      artist: data.artist,
+      album: data.album,
+      genre: data.genre,
+      year: data.year,
+      comment: data.comment,
+      label: data.label,
+      remixer: data.remixer,
+      composer: data.composer,
+      grouping: data.grouping,
+      bpm: data.bpm,
+      key_camelot: data.key_camelot,
+      key_full: data.key_full,
+      camelot: data.camelot,
+      duration_sec: data.duration_sec,
+      duration_str: data.duration_str,
+      analyzed_at: new Date().toISOString(),
+    })
 
-    console.log('Analyzing:', filepath)
-    const result = await window.api.analyzeFile(filepath)
-    console.log('Analysis result:', result)
-    return result
+    if (!insert.ok) {
+      console.error('Insert failed:', insert.error)
+      setAnalyzing(false)
+      return
+    }
+
+    // Add to the store so the UI updates immediately
+    // without needing to re-fetch from SQLite
+    addTrack({
+      id: insert.id!,
+      filepath: data.filepath,
+      filename: null,
+      title: data.title,
+      artist: data.artist,
+      album: data.album,
+      genre: data.genre,
+      year: data.year,
+      comment: data.comment,
+      label: data.label,
+      remixer: data.remixer,
+      composer: data.composer,
+      grouping: data.grouping,
+      bpm: data.bpm,
+      key_camelot: data.key_camelot,
+      key_full: data.key_full,
+      camelot: data.camelot,
+      openkey: null,
+      duration_sec: data.duration_sec,
+      duration_str: data.duration_str,
+      file_size_mb: null,
+      format: null,
+      waveform: null,
+      artwork_path: null,
+      board_column: 'Untagged',
+      energy: null,
+      analyzed_at: new Date().toISOString(),
+      added_at: new Date().toISOString(),
+      updated_at: new Date().toISOString(),
+      last_modified: null,
+      missing: 0,
+      needs_sync: 0,
+      pending_changes: null,
+      last_seen_at: null,
+    })
+
+    setAnalyzing(false)
   }
 
   return (
     <div style={{ padding: '2rem', fontFamily: 'monospace' }}>
-      <button onClick={handleAnalyzeFile}>Analyze test file</button>
+
+      <h2>CrateCloud v2</h2>
+      <p style={{ color: '#555', marginBottom: '1rem' }}>
+        {tracks.length} track{tracks.length !== 1 ? 's' : ''} in library
+      </p>
+
+      <button
+        onClick={handleAnalyzeFile}
+        disabled={isAnalyzing}
+        style={{ marginBottom: '1rem', padding: '8px 16px' }}
+      >
+        {isAnalyzing ? 'Analyzing...' : 'Analyze test file'}
+      </button>
+
+      {/* Track list */}
+      <div>
+        {tracks.map((track) => (
+          <div
+            key={track.id}
+            style={{
+              padding: '8px 12px',
+              marginBottom: '4px',
+              background: '#1a1a26',
+              borderRadius: '6px',
+              color: '#e8e8f0',
+            }}
+          >
+            <div style={{ fontWeight: 500 }}>
+              {track.title ?? 'Untitled'} — {track.artist ?? 'Unknown'}
+            </div>
+            <div style={{ color: '#666', fontSize: '12px', marginTop: '2px' }}>
+              {track.bpm} BPM · {track.key_camelot} · {track.duration_str}
+            </div>
+          </div>
+        ))}
+      </div>
+
     </div>
   )
 }
