@@ -1,135 +1,98 @@
-import React, { useEffect } from 'react'
+import React, { useEffect, useState } from 'react'
 import { useLibraryStore } from './store/useLibraryStore'
 
 function App(): React.JSX.Element {
-  const {
-    tracks,
-    isAnalyzing,
-    setTracks,
-    addTrack,
-    setAnalyzing,
-  } = useLibraryStore()
+  const { tracks, setTracks } = useLibraryStore()
 
-  // Load all tracks from SQLite when the app starts
-  // useEffect with [] runs once — on first mount only
+  const [progress, setProgress] = useState<{
+    done: number
+    total: number
+    filepath: string
+  } | null>(null)
+
+  // Load existing tracks from SQLite on startup
   useEffect(() => {
-    async function loadTracks(): Promise<void> {
+    async function load(): Promise<void> {
       const all = await window.api.db.allTracks()
       setTracks(all)
     }
-    loadTracks()
-  }, [])
+    load()
+  })
 
-  // Analyze a file and save the result to SQLite + store
-  async function handleAnalyzeFile(): Promise<void> {
-    const filepath = '/Volumes/MUSICLITE/Iceman-400/Janice STFU Drake.m4a'
+  // Listen for progress events from the import handler
+  useEffect(() => {
+    window.api.onImportProgress((p) => {
+      setProgress(p)
 
-    setAnalyzing(true)
-
-    const response = await window.api.analyzeFile(filepath)
-
-    if (!response.ok || !response.data) {
-      console.error('Analysis failed:', response.error)
-      setAnalyzing(false)
-      return
-    }
-
-    const data = response.data
-
-    if (!data.success) {
-      console.error('Analysis failed:', data.error)
-      setAnalyzing(false)
-      return
-    }
-
-    // Save to SQLite
-    const insert = await window.api.db.insertTrack({
-      filepath: data.filepath,
-      title: data.title,
-      artist: data.artist,
-      album: data.album,
-      genre: data.genre,
-      year: data.year,
-      comment: data.comment,
-      label: data.label,
-      remixer: data.remixer,
-      composer: data.composer,
-      grouping: data.grouping,
-      bpm: data.bpm,
-      key_camelot: data.key_camelot,
-      key_full: data.key_full,
-      camelot: data.camelot,
-      duration_sec: data.duration_sec,
-      duration_str: data.duration_str,
-      analyzed_at: new Date().toISOString(),
+      // Reload the store after each track is saved
+      // so it appears in the list immediately
+      window.api.db.allTracks().then(setTracks)
     })
 
-    if (!insert.ok) {
-      console.error('Insert failed:', insert.error)
-      setAnalyzing(false)
-      return
+    return () => {
+      window.api.offImportProgress()
+    }
+  })
+
+  async function handleImportFolder(): Promise<void> {
+    const folderPath = await window.api.openFolder()
+    if (!folderPath) return
+
+    setProgress({ done: 0, total: 0, filepath: '' })
+
+    const result = await window.api.importFolder(folderPath)
+
+    if (result.ok) {
+      // Final reload to make sure everything is in sync
+      const all = await window.api.db.allTracks()
+      setTracks(all)
     }
 
-    // Add to the store so the UI updates immediately
-    // without needing to re-fetch from SQLite
-    addTrack({
-      id: insert.id!,
-      filepath: data.filepath,
-      filename: null,
-      title: data.title,
-      artist: data.artist,
-      album: data.album,
-      genre: data.genre,
-      year: data.year,
-      comment: data.comment,
-      label: data.label,
-      remixer: data.remixer,
-      composer: data.composer,
-      grouping: data.grouping,
-      bpm: data.bpm,
-      key_camelot: data.key_camelot,
-      key_full: data.key_full,
-      camelot: data.camelot,
-      openkey: null,
-      duration_sec: data.duration_sec,
-      duration_str: data.duration_str,
-      file_size_mb: null,
-      format: null,
-      waveform: null,
-      artwork_path: null,
-      board_column: 'Untagged',
-      energy: null,
-      analyzed_at: new Date().toISOString(),
-      added_at: new Date().toISOString(),
-      updated_at: new Date().toISOString(),
-      last_modified: null,
-      missing: 0,
-      needs_sync: 0,
-      pending_changes: null,
-      last_seen_at: null,
-    })
-
-    setAnalyzing(false)
+    // Clear progress after 2 seconds
+    setTimeout(() => setProgress(null), 2000)
   }
 
-  return (
-    <div style={{ padding: '2rem', fontFamily: 'monospace' }}>
+  const pct = progress && progress.total > 0 ? Math.round((progress.done / progress.total) * 100) : 0
 
-      <h2>CrateCloud v2</h2>
+  return (
+    <div style={{ padding: '2rem', fontFamily: 'monospace', color: '#e8e8f0', background: '#0e0e12', minHeight: '100vh', display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
+      <h2 style={{ marginBottom: '0.5rem' }}>CrateCloud v2</h2>
       <p style={{ color: '#555', marginBottom: '1rem' }}>
         {tracks.length} track{tracks.length !== 1 ? 's' : ''} in library
       </p>
 
       <button
-        onClick={handleAnalyzeFile}
-        disabled={isAnalyzing}
-        style={{ marginBottom: '1rem', padding: '8px 16px' }}
+        onClick={handleImportFolder}
+        disabled={!!progress}
+        style={{ padding: '8px 16px', marginBottom: '1rem' }}
       >
-        {isAnalyzing ? 'Analyzing...' : 'Analyze test file'}
+        {progress ? 'Importing...' : 'Import folder'}
       </button>
 
+      {/* Progress bar */}
+      {progress && progress.total > 0 && (
+        <div style={{ marginBottom: '1rem' }}>
+          <div style={{ color: '#7f77dd', marginBottom: '4px', fontSize: '12px' }}>
+            {progress.done} / {progress.total} — {progress.filepath}
+          </div>
+          <div style={{ background: '#1e1e2a', borderRadius: '4px', height: '6px', overflow: 'hidden' }}>
+            <div style={{
+              background: '#7f77dd',
+              height: '100%',
+              width: `${pct}%`,
+              transition: 'width 0.2s ease',
+              borderRadius: '4px',
+            }} />
+          </div>
+        </div>
+      )}
+
       {/* Track list */}
-      <div>
+      <div style={{
+        height: 'calc(100vh - 180px)',
+        overflowY: 'auto',
+        paddingRight: '8px',
+      }}>
         {tracks.map((track) => (
           <div
             key={track.id}
@@ -137,14 +100,13 @@ function App(): React.JSX.Element {
               padding: '8px 12px',
               marginBottom: '4px',
               background: '#1a1a26',
-              borderRadius: '6px',
-              color: '#e8e8f0',
+              borderRadius: '6px'
             }}
           >
             <div style={{ fontWeight: 500 }}>
-              {track.title ?? 'Untitled'} — {track.artist ?? 'Unknown'}
+              {track.title ?? track.filename ?? 'Untitled'} — {track.artist ?? 'Unknown'}
             </div>
-            <div style={{ color: '#666', fontSize: '12px', marginTop: '2px' }}>
+            <div style={{ color: '#555', fontSize: '12px', marginTop: '2px' }}>
               {track.bpm} BPM · {track.key_camelot} · {track.duration_str}
             </div>
           </div>

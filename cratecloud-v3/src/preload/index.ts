@@ -8,6 +8,9 @@ const api = {
   // TODO: return string[] when multi-folder import is built in Phase 5
   openFolder: (): Promise<string | null> => ipcRenderer.invoke('dialog:open-folder'),
   analyzeFile: (filepath: string) => ipcRenderer.invoke('sidecar:analyze', filepath),
+  importFolder: (folderPath: string) => ipcRenderer.invoke('library:import-folder', folderPath),
+  onImportProgress: ( cb: (p: { done: number; total: number; failed: number; filepath: string }) => void ) => ipcRenderer.on('library:import-progress', (_e, p) => cb(p)),
+  offImportProgress: () => ipcRenderer.removeAllListeners('library:import-progress'),
   // Tracks
   db: {
     allTracks: () => ipcRenderer.invoke('db:all-tracks'),

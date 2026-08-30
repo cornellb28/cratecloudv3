@@ -1,4 +1,4 @@
-export {}
+export { }
 
 declare global {
   interface Window {
@@ -9,6 +9,24 @@ declare global {
         data?: AnalysisResult
         error?: string
       }>
+
+      importFolder: (folderPath: string) => Promise<{
+        ok: boolean
+        imported?: number
+        failed?: number
+        total?: number
+        message?: string
+        error?: string
+      }>
+
+      onImportProgress: (cb: (p: {
+        done: number
+        total: number
+        failed: number
+        filepath: string
+      }) => void) => void
+
+      offImportProgress: () => void
 
       db: {
         allTracks: () => Promise<Track[]>

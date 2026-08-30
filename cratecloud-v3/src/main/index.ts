@@ -1,5 +1,6 @@
 import { app, shell, BrowserWindow, ipcMain, dialog } from 'electron'
-import { join } from 'path'
+import { join, extname, basename } from 'path'
+import { readdirSync, statSync } from 'fs'
 import { electronApp, optimizer, is } from '@electron-toolkit/utils'
 import icon from '../../resources/icon.png?asset'
 import {
@@ -9,7 +10,6 @@ import {
   updateTrackMeta,
   markTrackMissing,
   getAllTags,
-  //findOrCreateTag,
   applyTag,
   removeTag,
   getTrackTags,
@@ -28,6 +28,34 @@ import {
   setSetting
 } from './db'
 import { analyzeFile } from './sidecar'
+
+console.log('DB path:', join(app.getPath('userData'), 'cratecloud', 'library.db'))
+
+// ── Walk a folder and find all audio files ──────────────────────────────────────────────
+const AUDIO_EXTENSIONS = new Set(['.mp3', '.flac', '.wav', '.aiff', '.aif', '.m4a', '.ogg'])
+function walkFolder(folderPath: string): string[] {
+  const results: string[] = []
+
+  function walk(dir: string): void {
+    const entries = readdirSync(dir)
+    for (const entry of entries) {
+      const fullPath = join(dir, entry)
+      try {
+        const stat = statSync(fullPath)
+        if (stat.isDirectory()) {
+          walk(fullPath) // recurse into subfolders
+        } else if (AUDIO_EXTENSIONS.has(extname(entry).toLowerCase())) {
+          results.push(fullPath) // audio file found
+        }
+      } catch {
+        // skip files we cannot read
+      }
+    }
+  }
+
+  walk(folderPath)
+  return results
+}
 
 function createWindow(): void {
   // Create the browser window.
@@ -78,6 +106,8 @@ app.whenReady().then(() => {
   // IPC test
   ipcMain.on('ping', () => console.log('pong'))
 
+  // Dialog Actions
+
   ipcMain.handle('dialog:open-folder', async () => {
     const result = await dialog.showOpenDialog({
       properties: ['openDirectory', 'multiSelections'],
@@ -90,6 +120,82 @@ app.whenReady().then(() => {
   })
 
   // ── Tracks ──────────────────────────────────────────────
+
+  ipcMain.handle('library:import-folder', async (event, folderPath: string) => {
+    try {
+      // 1. Find all audio files
+      const filepaths = walkFolder(folderPath)
+      const total = filepaths.length
+
+      if (total === 0) {
+        return { ok: true, imported: 0, message: 'No audio files found' }
+      }
+
+      let imported = 0
+      let failed = 0
+      const concurrency = 4
+
+      // 2. Process in batches of 4
+      for (let i = 0; i < filepaths.length; i += concurrency) {
+        const batch = filepaths.slice(i, i + concurrency)
+
+        await Promise.all(
+          batch.map(async (filepath) => {
+            try {
+              // Analyze the file
+              const result = await analyzeFile(filepath)
+
+              if (!result.success) {
+                failed++
+                return
+              }
+
+              // Save to SQLite
+              insertTrack({
+                filepath,
+                filename: basename(filepath),
+                title: result.title,
+                artist: result.artist,
+                album: result.album,
+                genre: result.genre,
+                year: result.year,
+                comment: result.comment,
+                label: result.label,
+                remixer: result.remixer,
+                composer: result.composer,
+                grouping: result.grouping,
+                bpm: result.bpm,
+                key_camelot: result.key_camelot,
+                key_full: result.key_full,
+                camelot: result.camelot,
+                duration_sec: result.duration_sec,
+                duration_str: result.duration_str,
+                analyzed_at: new Date().toISOString()
+              })
+
+              imported++
+
+              // Send progress to the renderer after each file
+              // The renderer uses this to update the progress bar
+              event.sender.send('library:import-progress', {
+                done: imported,
+                total,
+                failed,
+                filepath: basename(filepath)
+              })
+            } catch {
+              failed++
+            }
+          })
+        )
+      }
+
+      return { ok: true, imported, failed, total }
+    } catch (err) {
+      return { ok: false, error: (err as Error).message }
+    }
+  })
+
   ipcMain.handle('db:all-tracks', () => getAllTracks())
 
   ipcMain.handle('db:track-by-id', (_e, id: number) => getTrackById(id))
