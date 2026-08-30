@@ -1,9 +1,15 @@
 import React, { useEffect, useState } from 'react'
 import { useLibraryStore } from './store/useLibraryStore'
+import { Sidebar } from './components/Sidebar'
+import { Toolbar } from './components/Toolbar'
+import { LibraryView } from './components/LibraryView'
+import { Inspector } from './components/Inpector'
+
+type View = 'library' | 'board'
 
 function App(): React.JSX.Element {
-  const { tracks, setTracks } = useLibraryStore()
-
+  const { tracks, setTracks, setAnalyzing } = useLibraryStore()
+  const [activeView, setActiveView] = useState<View>('library')
   const [progress, setProgress] = useState<{
     done: number
     total: number
@@ -12,12 +18,12 @@ function App(): React.JSX.Element {
 
   // Load existing tracks from SQLite on startup
   useEffect(() => {
-    async function load(): Promise<void> {
+    async function loadTracks(): Promise<void> {
       const all = await window.api.db.allTracks()
       setTracks(all)
     }
-    load()
-  })
+    loadTracks()
+  }, [setTracks])
 
   // Listen for progress events from the import handler
   useEffect(() => {
@@ -32,12 +38,13 @@ function App(): React.JSX.Element {
     return () => {
       window.api.offImportProgress()
     }
-  })
+  }, [setTracks])
 
   async function handleImportFolder(): Promise<void> {
     const folderPath = await window.api.openFolder()
     if (!folderPath) return
 
+    setAnalyzing(true)
     setProgress({ done: 0, total: 0, filepath: '' })
 
     const result = await window.api.importFolder(folderPath)
@@ -49,6 +56,7 @@ function App(): React.JSX.Element {
     }
 
     // Clear progress after 2 seconds
+    setAnalyzing(false)
     setTimeout(() => setProgress(null), 2000)
   }
 
@@ -61,13 +69,8 @@ function App(): React.JSX.Element {
         {tracks.length} track{tracks.length !== 1 ? 's' : ''} in library
       </p>
 
-      <button
-        onClick={handleImportFolder}
-        disabled={!!progress}
-        style={{ padding: '8px 16px', marginBottom: '1rem' }}
-      >
-        {progress ? 'Importing...' : 'Import folder'}
-      </button>
+      {/* Toolbar at the top */}
+      <Toolbar onImport={handleImportFolder} />
 
       {/* Progress bar */}
       {progress && progress.total > 0 && (
@@ -87,32 +90,28 @@ function App(): React.JSX.Element {
         </div>
       )}
 
-      {/* Track list */}
-      <div style={{
-        height: 'calc(100vh - 180px)',
-        overflowY: 'auto',
-        paddingRight: '8px',
-      }}>
-        {tracks.map((track) => (
-          <div
-            key={track.id}
-            style={{
-              padding: '8px 12px',
-              marginBottom: '4px',
-              background: '#1a1a26',
-              borderRadius: '6px'
-            }}
-          >
-            <div style={{ fontWeight: 500 }}>
-              {track.title ?? track.filename ?? 'Untitled'} — {track.artist ?? 'Unknown'}
-            </div>
-            <div style={{ color: '#555', fontSize: '12px', marginTop: '2px' }}>
-              {track.bpm} BPM · {track.key_camelot} · {track.duration_str}
-            </div>
-          </div>
-        ))}
-      </div>
+      {/* Main area — sidebar + content side by side */}
+      <div style={{ display: 'flex', flex: 1, overflow: 'hidden' }}>
 
+        <Sidebar
+          activeView={activeView}
+          onViewChange={setActiveView}
+        />
+
+        {/* Content area */}
+        <div style={{ flex: 1, display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
+          {activeView === 'library' && <LibraryView />}
+          {activeView === 'board' && (
+            <div style={{ flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', color: '#333' }}>
+              Board view — coming next
+            </div>
+          )}
+        </div>
+
+        {/* Inspector slides in from the right when a track is selected */}
+        <Inspector />
+
+      </div>
     </div>
   )
 }
