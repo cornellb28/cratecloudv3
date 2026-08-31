@@ -8,7 +8,7 @@ import { Inspector } from './components/Inpector'
 type View = 'library' | 'board'
 
 function App(): React.JSX.Element {
-  const { tracks, setTracks, setAnalyzing } = useLibraryStore()
+  const { tracks, setTracks, setAnalyzing, activeTrackId } = useLibraryStore()
   const [activeView, setActiveView] = useState<View>('library')
   const [progress, setProgress] = useState<{
     done: number
@@ -109,8 +109,7 @@ function App(): React.JSX.Element {
         </div>
 
         {/* Inspector slides in from the right when a track is selected */}
-        <Inspector />
-
+        <Inspector key={activeTrackId ?? 'none'} />
       </div>
     </div>
   )
