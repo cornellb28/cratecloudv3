@@ -1,5 +1,6 @@
 import React from 'react'
 import { useLibraryStore } from '../store/useLibraryStore'
+import { Button } from '../components/ui/button'
 
 interface ToolbarProps {
   onImport: () => void
@@ -19,9 +20,14 @@ export function Toolbar({ onImport }: ToolbarProps): React.JSX.Element {
         gap: '10px',
         flexShrink: 0
       }}>
-      <button onClick={onImport} disabled={isAnalyzing} style={{ padding: '6px 14px' }}>
+      <Button
+        onClick={onImport}
+        disabled={isAnalyzing}
+        variant="outline"
+        size="sm"
+      >
         {isAnalyzing ? 'Importing...' : '+ Import folder'}
-      </button>
+      </Button>
 
       <span style={{ color: '#444', fontSize: '12px', marginLeft: 'auto' }}>
         {tracks.length} tracks
