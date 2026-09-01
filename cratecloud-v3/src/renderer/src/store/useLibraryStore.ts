@@ -9,6 +9,8 @@ interface LibraryState {
   activeTrackId: number | null
   // Is an analysis currently running
   isAnalyzing: boolean
+  boards: Board[]
+  searchQuery: string
 
   // ── Actions ──────────────────────────────────────────
   // Actions are functions that change the state
@@ -16,10 +18,12 @@ interface LibraryState {
 
   setTracks: (tracks: Track[]) => void
   addTrack: (track: Track) => void
+  setBoards: (boards: Board[]) => void
   updateTrack: (id: number, changes: Partial<Track>) => void
   removeTrack: (id: number) => void
   setActiveTrack: (id: number | null) => void
   setAnalyzing: (value: boolean) => void
+  setSearchQuery: (query: string) => void
 }
 
 // ─── Store ───────────────────────────────────────────────
@@ -29,6 +33,8 @@ export const useLibraryStore = create<LibraryState>((set) => ({
   tracks: [],
   activeTrackId: null,
   isAnalyzing: false,
+  boards: [],
+  searchQuery: '',
 
   // Replace the entire track list
   // Called on app startup when we load from SQLite
@@ -57,5 +63,7 @@ export const useLibraryStore = create<LibraryState>((set) => ({
   setActiveTrack: (id) => set({ activeTrackId: id }),
 
   // Toggle the analyzing state for the progress indicator
-  setAnalyzing: (value) => set({ isAnalyzing: value })
+  setAnalyzing: (value) => set({ isAnalyzing: value }),
+  setBoards: (boards) => set({ boards }),
+  setSearchQuery: (query)  => set({ searchQuery: query }),
 }))

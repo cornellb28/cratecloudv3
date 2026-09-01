@@ -17,7 +17,8 @@ const api = {
     trackById: (id: number) => ipcRenderer.invoke('db:track-by-id', id),
     insertTrack: (track: unknown) => ipcRenderer.invoke('db:insert-track', track),
     updateTrackMeta: (data: unknown) => ipcRenderer.invoke('db:update-track-meta', data),
-    updateBoardColumn: (id: number, column: string) => ipcRenderer.invoke('db:update-board-column', id, column),
+    updateBoardId: (id: number, boardId: number) => ipcRenderer.invoke('db:update-board-id', id, boardId),
+    tracksByBoardId: (boardId: number) => ipcRenderer.invoke('db:tracks-by-board-id', boardId),
     markMissing: (filepath: string) => ipcRenderer.invoke('db:mark-missing', filepath)
   },
 

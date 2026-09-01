@@ -23,9 +23,10 @@ import {
   getCrateTracks,
   getAllBoards,
   getTracksByColumn,
-  updateBoardColumn,
+  updateBoardId,
   getSetting,
-  setSetting
+  setSetting,
+  getTracksByBoardId
 } from './db'
 import { analyzeFile } from './sidecar'
 
@@ -220,14 +221,16 @@ app.whenReady().then(() => {
     }
   })
 
-  ipcMain.handle('db:update-board-column', (_e, id: number, column: string) => {
+  ipcMain.handle('db:update-board-id', (_e, id: number, boardId: number) => {
     try {
-      updateBoardColumn(id, column)
+      updateBoardId(id, boardId)
       return { ok: true }
     } catch (err) {
       return { ok: false, error: (err as Error).message }
     }
   })
+
+  ipcMain.handle('db:tracks-by-board-id', (_e, boardId: number) => getTracksByBoardId(boardId))
 
   ipcMain.handle('db:mark-missing', (_e, filepath: string) => {
     try {

@@ -67,11 +67,7 @@ db.exec(`
     artwork_path  TEXT,
 
     -- App-only columns (never written to ID3 tags)
-    -- TODO: refactor to board_id INTEGER REFERENCES boards(id)
-    -- After board ui is built in phase 5.
-    -- When remaining a column, run:
-    -- UPDATE tracks SET board_column = 'NewName' WHERE board_column = 'OldName'
-    board_column  TEXT    NOT NULL DEFAULT 'Untagged',
+    board_id      INTEGER NOT NULL DEFAULT 1 REFERENCES boards(id),
     energy        INTEGER,
     analyzed_at   TEXT,
     added_at      TEXT    NOT NULL DEFAULT (datetime('now')),
@@ -239,7 +235,31 @@ db.exec(`
     ('Tagged',      '#378ADD', 1),
     ('Crate ready', '#1D9E75', 2),
     ('Gig ready',   '#7F77DD', 3);
+`)
 
+// ─── Migration ───────────────────────────────────────────
+// Databases created before the boards system existed have a
+// text `board_column` column instead of `board_id`. Add the
+// new column and backfill it from the old one by matching
+// board names, without touching any other data.
+
+const trackColumns = db.prepare(`PRAGMA table_info(tracks)`).all() as { name: string }[]
+const hasBoardId = trackColumns.some((c) => c.name === 'board_id')
+const hasBoardColumn = trackColumns.some((c) => c.name === 'board_column')
+
+if (!hasBoardId) {
+  db.exec(`ALTER TABLE tracks ADD COLUMN board_id INTEGER NOT NULL DEFAULT 1`)
+  if (hasBoardColumn) {
+    db.exec(`
+      UPDATE tracks
+      SET board_id = (SELECT id FROM boards WHERE boards.name = tracks.board_column)
+      WHERE board_column IS NOT NULL
+        AND EXISTS (SELECT 1 FROM boards WHERE boards.name = tracks.board_column)
+    `)
+  }
+}
+
+db.exec(`
   -- ─────────────────────────────────────────────────────
   -- APP SETTINGS
   -- Key/value store for user preferences.
@@ -293,8 +313,8 @@ db.exec(`
     ON tags(field);
     CREATE INDEX IF NOT EXISTS idx_tracks_key_camelot
     ON tracks(key_camelot);
-  CREATE INDEX IF NOT EXISTS idx_tracks_board_column
-    ON tracks(board_column);
+  CREATE INDEX IF NOT EXISTS idx_tracks_board_id
+    ON tracks(board_id);
   CREATE INDEX IF NOT EXISTS idx_tags_value
     ON tags(value);
   CREATE INDEX IF NOT EXISTS idx_tags_field_value
@@ -326,14 +346,14 @@ const stmts = {
       year, remixer, composer, comment, label, grouping,
       bpm, key_camelot, key_full, camelot, openkey,
       duration_sec, duration_str, file_size_mb, format,
-      artwork_path, analyzed_at
+      artwork_path, analyzed_at, board_id
      )
       VALUES (
        @filepath, @filename, @title, @artist, @album, @genre,
        @year, @remixer, @composer, @comment, @label, @grouping,
        @bpm, @key_camelot, @key_full, @camelot, @openkey,
        @duration_sec, @duration_str, @file_size_mb, @format,
-       @artwork_path, @analyzed_at
+       @artwork_path, @analyzed_at, @board_id
       )
        ON CONFLICT(filepath) DO UPDATE SET
          title        = excluded.title,
@@ -397,9 +417,9 @@ const stmts = {
     WHERE id = ?
   `),
 
-  updateBoardColumn: db.prepare(`
+  updateBoardId: db.prepare(`
     UPDATE tracks SET
-      board_column = @board_column,
+      board_id = @board_id,
       updated_at   = datetime('now')
     WHERE id = @id
   `),
@@ -521,9 +541,17 @@ const stmts = {
     SELECT * FROM boards ORDER BY position ASC
   `),
 
+  getTracksByBoardId: db.prepare(`
+    SELECT t.*, b.name as board_name, b.color as board_color
+    FROM tracks t
+    JOIN boards b ON b.id = t.board_id
+    WHERE t.board_id = ?
+    ORDER BY t.added_at DESC
+  `),
+
   getTracksByColumn: db.prepare(`
     SELECT * FROM tracks
-    WHERE board_column = ?
+    WHERE board_id = ?
     ORDER BY added_at DESC
   `),
 
@@ -570,7 +598,8 @@ export function insertTrack(track: Record<string, unknown>): { lastInsertRowid: 
     file_size_mb: track.file_size_mb ?? null,
     format: track.format ?? null,
     artwork_path: track.artwork_path ?? null,
-    analyzed_at: track.analyzed_at ?? null
+    analyzed_at: track.analyzed_at ?? null,
+    board_id: track.board_id ?? 1 // default to Untagged (id: 1)
   }
   const result = stmts.insertTrack.run(safe)
 
@@ -615,8 +644,12 @@ export function clearTrackSync(id: number): RunResult {
   return stmts.clearSync.run(id)
 }
 
-export function updateBoardColumn(id: number, column: string): RunResult {
-  return stmts.updateBoardColumn.run({ id, board_column: column })
+export function updateBoardId(id: number, boardId: number): RunResult {
+  return stmts.updateBoardId.run({ id, board_id: boardId })
+}
+
+export function getTracksByBoardId(boardId: number): Track[] {
+  return stmts.getTracksByBoardId.all(boardId) as Track[]
 }
 
 // ─── Tag functions ────────────────────────────────────────

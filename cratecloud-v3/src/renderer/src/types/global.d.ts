@@ -33,7 +33,8 @@ declare global {
         trackById: (id: number) => Promise<Track | null>
         insertTrack: (track: Partial<Track>) => Promise<{ ok: boolean; id?: number; error?: string }>
         updateTrackMeta: (data: Partial<Track> & { id: number }) => Promise<{ ok: boolean; error?: string }>
-        updateBoardColumn: (id: number, column: string) => Promise<{ ok: boolean; error?: string }>
+        updateBoardId: (id: number, boardId: number) => Promise<{ ok: boolean; error?: string }>
+        tracksByBoardId: (id: number, boardId: number) => Promise<Track[]>
         markMissing: (filepath: string) => Promise<{ ok: boolean; error?: string }>
       }
 
@@ -94,7 +95,9 @@ declare global {
     format: string | null
     waveform: string | null
     artwork_path: string | null
-    board_column: string
+    board_id: number
+    board_name?: string // joined from boards table
+    board_color?: string // joined from boards table
     energy: number | null
     analyzed_at: string | null
     added_at: string

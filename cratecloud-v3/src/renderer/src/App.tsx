@@ -3,12 +3,13 @@ import { useLibraryStore } from './store/useLibraryStore'
 import { Sidebar } from './components/Sidebar'
 import { Toolbar } from './components/Toolbar'
 import { LibraryView } from './components/LibraryView'
+import { BoardView } from './components/BoardView'
 import { Inspector } from './components/Inpector'
 
 type View = 'library' | 'board'
 
 function App(): React.JSX.Element {
-  const { tracks, setTracks, setAnalyzing, activeTrackId } = useLibraryStore()
+  const { tracks, setTracks, setAnalyzing, activeTrackId, setBoards } = useLibraryStore()
   const [activeView, setActiveView] = useState<View>('library')
   const [progress, setProgress] = useState<{
     done: number
@@ -18,12 +19,16 @@ function App(): React.JSX.Element {
 
   // Load existing tracks from SQLite on startup
   useEffect(() => {
-    async function loadTracks(): Promise<void> {
-      const all = await window.api.db.allTracks()
-      setTracks(all)
+    async function load(): Promise<void> {
+      const [tracks, boards] = await Promise.all([
+        window.api.db.allTracks(),
+        window.api.boards.all()
+      ])
+      setTracks(tracks)
+      setBoards(boards)
     }
-    loadTracks()
-  }, [setTracks])
+    load()
+  })
 
   // Listen for progress events from the import handler
   useEffect(() => {
@@ -103,7 +108,7 @@ function App(): React.JSX.Element {
           {activeView === 'library' && <LibraryView />}
           {activeView === 'board' && (
             <div style={{ flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', color: '#333' }}>
-              Board view — coming next
+              <BoardView />
             </div>
           )}
         </div>
