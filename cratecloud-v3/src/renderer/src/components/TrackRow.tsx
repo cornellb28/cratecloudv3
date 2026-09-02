@@ -1,5 +1,6 @@
 import React from 'react'
 import { useLibraryStore } from '../store/useLibraryStore'
+import { Badge } from '@renderer/components/ui/badge'
 
 interface TrackRowProps {
   track: Track
@@ -36,17 +37,31 @@ export function TrackRow({ track }: TrackRowProps): React.JSX.Element {
         gap: '8px',
       }}>
         {track.bpm && (
-          <span style={{ background: '#1a2535', color: '#5d9fd8', padding: '1px 6px', borderRadius: '4px' }}>
+          <Badge
+            variant="outline"
+            className="text-[10px] h-5 px-1.5 bg-[#1a2535] text-[#5d9fd8] border-[#1a2535] font-mono"
+          >
             {track.bpm} BPM
-          </span>
+          </Badge>
         )}
         {track.key_camelot && (
-          <span style={{ background: '#1a2830', color: '#3db88a', padding: '1px 6px', borderRadius: '4px' }}>
+          <Badge
+            variant="outline"
+            className="text-[10px] h-5 px-1.5 bg-[#1a2830] text-[#3db88a] border-[#1a2830] font-mono"
+          >
             {track.key_camelot}
-          </span>
+          </Badge>
         )}
         {track.duration_str && (
           <span>{track.duration_str}</span>
+        )}
+        {track.genre && (
+          <Badge
+            variant="outline"
+            className="text-[10px] h-5 px-1.5 bg-[#261f3a] text-[#9b8ed4] border-[#261f3a] font-mono"
+          >
+            {track.genre}
+          </Badge>
         )}
       </div>
     </div>

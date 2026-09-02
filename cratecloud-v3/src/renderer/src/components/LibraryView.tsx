@@ -3,7 +3,24 @@ import { useLibraryStore } from '../store/useLibraryStore'
 import { TrackRow } from '../components/TrackRow'
 
 export function LibraryView(): React.JSX.Element {
-  const { tracks } = useLibraryStore()
+  const { tracks, searchQuery } = useLibraryStore()
+
+  const query = searchQuery.trim().toLowerCase()
+  const filteredTracks = query
+    ? tracks.filter((track) => {
+        const haystack = [
+          track.title,
+          track.artist,
+          track.bpm,
+          track.key_camelot,
+          track.camelot
+        ]
+          .filter((value) => value !== null && value !== undefined)
+          .join(' ')
+          .toLowerCase()
+        return haystack.includes(query)
+      })
+    : tracks
 
   if (tracks.length === 0) {
     return (
@@ -26,7 +43,7 @@ export function LibraryView(): React.JSX.Element {
       overflowY: 'auto',
       padding: '8px 16px',
     }}>
-      {tracks.map((track) => (
+      {filteredTracks.map((track) => (
         <TrackRow key={track.id} track={track} />
       ))}
     </div>

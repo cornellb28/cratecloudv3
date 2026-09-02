@@ -1,5 +1,8 @@
 import React, { useRef, useEffect } from 'react'
 import { useLibraryStore } from '../store/useLibraryStore'
+import { Input } from '@renderer/components/ui/input'
+import { Slider } from '@renderer/components/ui/slider'
+import { Separator } from '@renderer/components/ui/separator'
 
 export function Inspector(): React.JSX.Element {
   const { tracks, activeTrackId, setActiveTrack, updateTrack } = useLibraryStore()
@@ -94,7 +97,7 @@ export function Inspector(): React.JSX.Element {
           </div>
 
           {/* Divider */}
-          <div style={{ height: '0.5px', background: '#1e1e2a' }} />
+          <Separator className="bg-[#1e1e2a]" />
 
           {/* Editable fields */}
           <div style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
@@ -135,12 +138,24 @@ export function Inspector(): React.JSX.Element {
               onKeyDown={(e) => onKeyDown(e, 'key_camelot')}
             />
 
-            <EditField
-              label="Energy"
-              defaultValue={track.energy?.toString() ?? ''}
-              onSave={(v) => saveField('energy', v)}
-              onKeyDown={(e) => onKeyDown(e, 'energy')}
-            />
+            <div className="flex flex-col gap-2">
+              <label className="text-[10px] font-medium tracking-widest uppercase text-muted-foreground">
+                Energy
+              </label>
+              <div className="flex items-center gap-3">
+                <Slider
+                  defaultValue={[track.energy ?? 5]}
+                  min={1}
+                  max={10}
+                  step={1}
+                  onValueCommit={(val) => saveField('energy', val[0].toString())}
+                  className="flex-1"
+                />
+                <span className="text-xs font-mono text-muted-foreground w-4 text-right">
+                  {track.energy ?? '—'}
+                </span>
+              </div>
+            </div>
 
             <EditField
               label="Album"
@@ -159,7 +174,7 @@ export function Inspector(): React.JSX.Element {
           </div>
 
           {/* Divider */}
-          <div style={{ height: '0.5px', background: '#1e1e2a' }} />
+          <Separator className="bg-[#1e1e2a]" />
 
           {/* Read-only fields */}
           <ReadField label="Duration" value={track.duration_str} />
@@ -167,7 +182,7 @@ export function Inspector(): React.JSX.Element {
           <ReadField label="Key full" value={track.key_full} />
 
           {/* Divider */}
-          <div style={{ height: '0.5px', background: '#1e1e2a' }} />
+          <Separator className="bg-[#1e1e2a]" />
 
           {/* File path — read only */}
           <div>
@@ -211,34 +226,15 @@ const EditField = React.forwardRef<HTMLInputElement, EditFieldProps>(
   ({ label, defaultValue, onSave, onKeyDown }, ref) => {
     return (
       <div>
-        <div style={{
-          fontSize: '10px',
-          fontWeight: 500,
-          letterSpacing: '0.8px',
-          textTransform: 'uppercase',
-          color: '#333',
-          marginBottom: '4px',
-        }}>
+        <label className="text-[10px] font-medium tracking-widest uppercase text-muted-foreground">
           {label}
-        </div>
-        <input
+        </label>
+        <Input
           ref={ref}
           defaultValue={defaultValue}
           onBlur={(e) => onSave(e.target.value)}
           onKeyDown={onKeyDown}
-          style={{
-            width: '100%',
-            background: '#1a1a26',
-            border: '0.5px solid #252535',
-            borderRadius: '5px',
-            padding: '5px 8px',
-            color: '#c0c0d8',
-            fontSize: '12px',
-            fontFamily: 'monospace',
-            outline: 'none',
-          }}
-          onFocus={(e) => e.target.style.borderColor = '#7f77dd'}
-          onBlurCapture={(e) => e.target.style.borderColor = '#252535'}
+          className="h-7 text-xs font-mono bg-[#1a1a26] border-[#252535] text-[#c0c0d8] focus-visible:ring-[#7f77dd]"
         />
       </div>
     )

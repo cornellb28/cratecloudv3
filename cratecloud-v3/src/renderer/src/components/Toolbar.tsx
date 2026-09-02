@@ -1,13 +1,14 @@
 import React from 'react'
 import { useLibraryStore } from '../store/useLibraryStore'
-import { Button } from '../components/ui/button'
+import { Button } from '@renderer/components/ui/button'
+import { Input } from '@renderer/components/ui/input'
 
 interface ToolbarProps {
   onImport: () => void
 }
 
 export function Toolbar({ onImport }: ToolbarProps): React.JSX.Element {
-  const { isAnalyzing, tracks } = useLibraryStore()
+  const { isAnalyzing, tracks, searchQuery, setSearchQuery } = useLibraryStore()
 
   return (
     <div
@@ -28,6 +29,24 @@ export function Toolbar({ onImport }: ToolbarProps): React.JSX.Element {
       >
         {isAnalyzing ? 'Importing...' : '+ Import folder'}
       </Button>
+
+      <div className="relative flex-1">
+        <Input
+          type="text"
+          placeholder="Search title, artist, BPM, key..."
+          value={searchQuery}
+          onChange={(e) => setSearchQuery(e.target.value)}
+          className="bg-[#1a1a26] border-[#252535] text-[#e8e8f0] placeholder:text-[#444] h-8 text-xs font-mono"
+        />
+        {searchQuery && (
+          <button
+            onClick={() => setSearchQuery('')}
+            className="absolute right-2 top-1/2 -translate-y-1/2 text-[#444] hover:text-[#a09be8] text-sm"
+          >
+            ✕
+          </button>
+        )}
+      </div>
 
       <span style={{ color: '#444', fontSize: '12px', marginLeft: 'auto' }}>
         {tracks.length} tracks
