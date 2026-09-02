@@ -3,6 +3,7 @@ export { }
 declare global {
   interface Window {
     api: {
+      getArtworkUrl: (filepath: string) => string
       openFolder: () => Promise<string | null>
       analyzeFile: (filepath: string) => Promise<{
         ok: boolean
@@ -169,5 +170,6 @@ declare global {
     duration_sec: number | null
     duration_str: string | null
     bpm_tag: string | null
+    artwork_base64: string | null
   }
 }

@@ -102,4 +102,5 @@ export interface AnalysisResult {
   duration_sec: number | null
   duration_str: string | null
   bpm_tag: string | null
+  artwork_base64: string | null
 }

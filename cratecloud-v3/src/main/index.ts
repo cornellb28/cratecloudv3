@@ -1,6 +1,6 @@
 import { app, shell, BrowserWindow, ipcMain, dialog } from 'electron'
 import { join, extname, basename } from 'path'
-import { readdirSync, statSync } from 'fs'
+import { readdirSync, statSync, writeFileSync, mkdirSync } from 'fs'
 import { electronApp, optimizer, is } from '@electron-toolkit/utils'
 import icon from '../../resources/icon.png?asset'
 import {
@@ -56,6 +56,20 @@ function walkFolder(folderPath: string): string[] {
 
   walk(folderPath)
   return results
+}
+
+function saveArtwork(trackId: number, base64Data: string): string | null {
+  try {
+    const artworkDir = join(app.getPath('userData'), 'cratecloud', 'artwork')
+    mkdirSync(artworkDir, { recursive: true })
+
+    const filepath = join(artworkDir, `${trackId}.jpg`)
+    const buffer = Buffer.from(base64Data, 'base64')
+    writeFileSync(filepath, buffer)
+    return filepath
+  } catch {
+    return null
+  }
 }
 
 function createWindow(): void {
@@ -144,35 +158,59 @@ app.whenReady().then(() => {
           batch.map(async (filepath) => {
             try {
               // Analyze the file
-              const result = await analyzeFile(filepath)
+              const analysisResult = await analyzeFile(filepath)
 
-              if (!result.success) {
+              if (!analysisResult.success) {
                 failed++
                 return
               }
 
               // Save to SQLite
-              insertTrack({
+              const trackData = {
                 filepath,
                 filename: basename(filepath),
-                title: result.title,
-                artist: result.artist,
-                album: result.album,
-                genre: result.genre,
-                year: result.year,
-                comment: result.comment,
-                label: result.label,
-                remixer: result.remixer,
-                composer: result.composer,
-                grouping: result.grouping,
-                bpm: result.bpm,
-                key_camelot: result.key_camelot,
-                key_full: result.key_full,
-                camelot: result.camelot,
-                duration_sec: result.duration_sec,
-                duration_str: result.duration_str,
+                title: analysisResult.title,
+                artist: analysisResult.artist,
+                album: analysisResult.album,
+                genre: analysisResult.genre,
+                year: analysisResult.year,
+                comment: analysisResult.comment,
+                label: analysisResult.label,
+                remixer: analysisResult.remixer,
+                composer: analysisResult.composer,
+                grouping: analysisResult.grouping,
+                bpm: analysisResult.bpm,
+                key_camelot: analysisResult.key_camelot,
+                key_full: analysisResult.key_full,
+                camelot: analysisResult.camelot,
+                duration_sec: analysisResult.duration_sec,
+                duration_str: analysisResult.duration_str,
                 analyzed_at: new Date().toISOString()
-              })
+              }
+
+              // Insert track into SQLite
+              const result = insertTrack(trackData) as { lastInsertRowid: number | bigint }
+              const trackId = Number(result.lastInsertRowid)
+
+              // Save artwork to disk if present
+              if (analysisResult.artwork_base64 && trackId > 0) {
+                const artworkPath = saveArtwork(trackId, analysisResult.artwork_base64)
+                if (artworkPath) {
+                  updateTrackMeta({
+                    id: trackId,
+                    artwork_path: artworkPath,
+                    title: trackData.title,
+                    artist: trackData.artist,
+                    genre: trackData.genre,
+                    bpm: trackData.bpm,
+                    key_camelot: trackData.key_camelot,
+                    energy: null,
+                    comment: trackData.comment,
+                    needs_sync: 0,
+                    pending_changes: null,
+                  })
+                }
+              }
 
               imported++
 

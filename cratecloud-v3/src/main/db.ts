@@ -388,7 +388,8 @@ const stmts = {
       comment         = @comment,
       updated_at      = datetime('now'),
       needs_sync      = @needs_sync,
-      pending_changes = @pending_changes
+      pending_changes = @pending_changes,
+      artwork_path    = @artwork_path
     WHERE id = @id
   `),
   markMissing: db.prepare(`

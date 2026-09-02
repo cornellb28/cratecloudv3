@@ -10,6 +10,8 @@ export function TrackRow({ track }: TrackRowProps): React.JSX.Element {
   const { activeTrackId, setActiveTrack } = useLibraryStore()
   const isActive = activeTrackId === track.id
 
+  const artworkUrl = track.artwork_path ? `file://${track.artwork_path}` : null
+
   return (
     <div
       onClick={() => setActiveTrack(isActive ? null : track.id)}
@@ -23,6 +25,28 @@ export function TrackRow({ track }: TrackRowProps): React.JSX.Element {
         transition: 'all 0.1s'
       }}
     >
+      {/* Artwork */}
+      <div style={{
+        width: '40px',
+        height: '40px',
+        borderRadius: '4px',
+        flexShrink: 0,
+        overflow: 'hidden',
+        background: '#1e1e2a',
+        display: 'flex',
+        alignItems: 'center',
+        justifyContent: 'center',
+      }}>
+        {artworkUrl ? (
+          <img
+            src={artworkUrl}
+            alt=""
+            style={{ width: '100%', height: '100%', objectFit: 'cover' }}
+          />
+        ) : (
+          <span style={{ fontSize: '18px', color: '#333' }}>♪</span>
+        )}
+      </div>
       <div style={{ fontWeight: 500, fontSize: '13px' }}>
         {track.title ?? track.filename ?? 'Untitled'}
         <span style={{ color: '#555', fontWeight: 400 }}>

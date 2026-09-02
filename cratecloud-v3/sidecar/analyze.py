@@ -20,6 +20,12 @@ import subprocess
 import numpy as np
 import librosa # analyzes the actual audio waveform
 import mutagen # reads the metadata embedded in the music file
+import base64
+from mutagen.id3 import ID3, TBPM, TKEY
+from mutagen.flac import FLAC
+from mutagen.mp4 import MP4
+from mutagen.mp3 import MP3
+from mutagen.easyid3 import EasyID3
 
 # ─── Camelot Wheel ───────────────────────────────────────
 # Maps librosa key names to Camelot notation
@@ -211,6 +217,26 @@ def load_audio(filepath, sr=22050):
     except Exception:
         return load_via_ffmpeg(filepath, sr=sr)
 
+def extract_artwork(filepath: str) -> str | None:
+    """Return embedded album art as a base64 string, or None if unavailable."""
+    ext = os.path.splitext(filepath)[1].lower()
+    try:
+        if ext in ('.mp3', '.wav', '.aiff', '.aif'):
+            audio = ID3(filepath)
+            for key in audio.keys():
+                if key.startswith('APIC'):
+                    return base64.b64encode(audio[key].data).decode()
+        elif ext == '.flac':
+            audio = FLAC(filepath)
+            if audio.pictures:
+                return base64.b64encode(audio.pictures[0].data).decode()
+        elif ext in ('.m4a', '.mp4'):
+            audio = MP4(filepath)
+            if audio.tags and 'covr' in audio.tags:
+                return base64.b64encode(bytes(audio.tags['covr'][0])).decode()
+    except Exception:
+        pass
+    return None
 
 def analyze(filepath):
     """
@@ -263,6 +289,9 @@ def analyze(filepath):
     seconds = int(duration_sec % 60)
     duration_str = f'{minutes}:{seconds:02d}'
 
+    # Add artwork extraction
+    artwork_base64 = extract_artwork(filepath)
+
     # Step 6 — Return everything
     # Tags from the file take priority for title/artist/etc.
     # BPM and key come from analysis
@@ -286,8 +315,8 @@ def analyze(filepath):
         'duration_sec': duration_sec,
         'duration_str': duration_str,
         'bpm_tag':      tags['bpm_tag'],
+        'artwork_base64': artwork_base64,
     }
-
 
 # ─── Entry point ─────────────────────────────────────────
 

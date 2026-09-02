@@ -96,6 +96,29 @@ export function Inspector(): React.JSX.Element {
             </button>
           </div>
 
+          {/* Artwork */}
+          <div style={{
+            width: '100%',
+            aspectRatio: '1',
+            borderRadius: '8px',
+            overflow: 'hidden',
+            background: '#1e1e2a',
+            marginBottom: '4px',
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+          }}>
+            {track.artwork_path ? (
+              <img
+                src={`file://${track.artwork_path}`}
+                alt=""
+                style={{ width: '100%', height: '100%', objectFit: 'cover' }}
+              />
+            ) : (
+              <span style={{ fontSize: '48px', color: '#333' }}>♪</span>
+            )}
+          </div>
+
           {/* Divider */}
           <Separator className="bg-[#1e1e2a]" />
 
