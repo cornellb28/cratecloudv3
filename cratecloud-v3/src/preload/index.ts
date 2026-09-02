@@ -7,10 +7,31 @@ const api = {
   // ── Audio analysis ─────────────────────────────────────────────────────
   // TODO: return string[] when multi-folder import is built in Phase 5
   openFolder: (): Promise<string | null> => ipcRenderer.invoke('dialog:open-folder'),
+  openFiles: (): Promise<string[]> => ipcRenderer.invoke('dialog:open-files'),
+  importFile: (filepath: string) => ipcRenderer.invoke('library:import-file', filepath),
+  importFiles: (filepaths: string[]) => ipcRenderer.invoke('library:import-files', filepaths),
   analyzeFile: (filepath: string) => ipcRenderer.invoke('sidecar:analyze', filepath),
   importFolder: (folderPath: string) => ipcRenderer.invoke('library:import-folder', folderPath),
-  onImportProgress: ( cb: (p: { done: number; total: number; failed: number; filepath: string }) => void ) => ipcRenderer.on('library:import-progress', (_e, p) => cb(p)),
+  onImportProgress: (cb: (p: { done: number; total: number; failed: number; filepath: string }) => void) => ipcRenderer.on('library:import-progress', (_e, p) => cb(p)),
   offImportProgress: () => ipcRenderer.removeAllListeners('library:import-progress'),
+  onTrackAnalyzed: (cb: (data: {
+    trackId: number
+    bpm: number | null
+    key_camelot: string | null
+    key_full: string | null
+    duration_sec: number | null
+    duration_str: string | null
+    done: number
+    total: number
+  }) => void) => ipcRenderer.on('library:track-analyzed', (_e, d) => cb(d)),
+  onPhase1Complete: (cb: (data: { imported: number, total: number }) => void) => ipcRenderer.on('library:phase1-complete', (_e, d) => cb(d)),
+  onAnalysisComplete: (cb: (data: { analyzed: number, total: number }) => void) => ipcRenderer.on('library:analysis-complete', (_e, d) => cb(d)),
+
+  offAnalysisListeners: () => {
+    ipcRenderer.removeAllListeners('library:track-analyzed')
+    ipcRenderer.removeAllListeners('library:phase1-complete')
+    ipcRenderer.removeAllListeners('library:analysis-complete')
+  },
   getArtworkUrl: (filepath: string) => `artwork://${filepath}`,
   // Tracks
   db: {

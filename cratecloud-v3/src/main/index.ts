@@ -27,9 +27,11 @@ import {
   updateBoardId,
   getSetting,
   setSetting,
-  getTracksByBoardId
+  getTracksByBoardId,
+  getUnanalyzedTracks,
+  updateArtworkPath
 } from './db'
-import { analyzeFile } from './sidecar'
+import { analyzeFile, readTagsFast } from './sidecar'
 
 // console.log('DB path:', join(app.getPath('userData'), 'cratecloud', 'library.db'))
 
@@ -41,6 +43,7 @@ function walkFolder(folderPath: string): string[] {
   function walk(dir: string): void {
     const entries = readdirSync(dir)
     for (const entry of entries) {
+      if (entry.startsWith('.')) continue // skip hidden files/folders (e.g. macOS ._ AppleDouble files, .DS_Store)
       const fullPath = join(dir, entry)
       try {
         const stat = statSync(fullPath)
@@ -73,9 +76,97 @@ function saveArtwork(trackId: number, base64Data: string): string | null {
   }
 }
 
+// Build a consistent track data object from analysis result
+function buildTrackData(filepath: string, result: AnalysisResult) {
+  return {
+    filepath,
+    filename: basename(filepath),
+    title: result.title,
+    artist: result.artist,
+    album: result.album,
+    genre: result.genre,
+    year: result.year,
+    comment: result.comment,
+    label: result.label,
+    remixer: result.remixer,
+    composer: result.composer,
+    grouping: result.grouping,
+    bpm: result.bpm,
+    key_camelot: result.key_camelot,
+    key_full: result.key_full,
+    camelot: result.camelot,
+    duration_sec: result.duration_sec,
+    duration_str: result.duration_str,
+    analyzed_at: result.analyzed ? new Date().toISOString() : null,
+    board_id: 1
+  }
+}
+
+// Update just the analysis fields after Phase 2 completes
+function updateTrackAnalysis(trackId: number, result: AnalysisResult): void {
+  const existing = getTrackById(trackId)
+  updateTrackMeta({
+    id: trackId,
+    title: result.title,
+    artist: result.artist,
+    genre: result.genre,
+    bpm: result.bpm,
+    key_camelot: result.key_camelot,
+    energy: null,
+    comment: result.comment,
+    artwork_path: existing?.artwork_path ?? null,
+    needs_sync: 0,
+    pending_changes: null
+  })
+}
+
+// Background Phase 2 - analyze tracks that have no BPM/key yet
+async function analyzeUnanalyzed(event: Electron.IpcMainInvokeEvent, _totalFromPhase1: number): Promise<void> {
+  const unanalyzed = getUnanalyzedTracks()
+  const concurrency = 4 // back to 4 for heavy librosa work
+
+  let done = 0
+
+  for (let i = 0; i < unanalyzed.length; i += concurrency) {
+    const batch = unanalyzed.slice(i, i + concurrency) as Track[]
+
+    await Promise.all(
+      batch.map(async (track) => {
+        try {
+          const result = await analyzeFile(track.filepath)
+          if (result.success) {
+            updateTrackAnalysis(track.id, result)
+            done++
+
+            // Tell renderer to refresh this one track
+            event.sender.send('library:track-analyzed', {
+              trackId: track.id,
+              bpm: result.bpm,
+              key_camelot: result.key_camelot,
+              key_full: result.key_full,
+              duration_sec: result.duration_sec,
+              duration_str: result.duration_str,
+              done,
+              total: unanalyzed.length
+            })
+          }
+        } catch {
+          // skip failed analysis — track still visible without BPM
+        }
+      })
+    )
+  }
+  event.sender.send('library:analysis-complete', {
+    analyzed: done,
+    total: unanalyzed.length
+  })
+}
+
+let mainWindow: BrowserWindow | null = null
+
 function createWindow(): void {
   // Create the browser window.
-  const mainWindow = new BrowserWindow({
+  const win = new BrowserWindow({
     width: 900,
     height: 670,
     show: false,
@@ -86,12 +177,13 @@ function createWindow(): void {
       sandbox: false
     }
   })
+  mainWindow = win
 
-  mainWindow.on('ready-to-show', () => {
-    mainWindow.show()
+  win.on('ready-to-show', () => {
+    win.show()
   })
 
-  mainWindow.webContents.setWindowOpenHandler((details) => {
+  win.webContents.setWindowOpenHandler((details) => {
     shell.openExternal(details.url)
     return { action: 'deny' }
   })
@@ -99,9 +191,9 @@ function createWindow(): void {
   // HMR for renderer base on electron-vite cli.
   // Load the remote URL for development or the local html file for production.
   if (is.dev && process.env['ELECTRON_RENDERER_URL']) {
-    mainWindow.loadURL(process.env['ELECTRON_RENDERER_URL'])
+    win.loadURL(process.env['ELECTRON_RENDERER_URL'])
   } else {
-    mainWindow.loadFile(join(__dirname, '../renderer/index.html'))
+    win.loadFile(join(__dirname, '../renderer/index.html'))
   }
 }
 
@@ -153,6 +245,8 @@ app.whenReady().then(() => {
     return result.filePaths[0]
   })
 
+
+
   // ── Tracks ──────────────────────────────────────────────
 
   ipcMain.handle('library:import-folder', async (event, folderPath: string) => {
@@ -177,57 +271,25 @@ app.whenReady().then(() => {
           batch.map(async (filepath) => {
             try {
               // Analyze the file
-              const analysisResult = await analyzeFile(filepath)
+              const result = await readTagsFast(filepath)
 
-              if (!analysisResult.success) {
+              if (!result.success) {
                 failed++
                 return
               }
 
               // Save to SQLite
-              const trackData = {
-                filepath,
-                filename: basename(filepath),
-                title: analysisResult.title,
-                artist: analysisResult.artist,
-                album: analysisResult.album,
-                genre: analysisResult.genre,
-                year: analysisResult.year,
-                comment: analysisResult.comment,
-                label: analysisResult.label,
-                remixer: analysisResult.remixer,
-                composer: analysisResult.composer,
-                grouping: analysisResult.grouping,
-                bpm: analysisResult.bpm,
-                key_camelot: analysisResult.key_camelot,
-                key_full: analysisResult.key_full,
-                camelot: analysisResult.camelot,
-                duration_sec: analysisResult.duration_sec,
-                duration_str: analysisResult.duration_str,
-                analyzed_at: new Date().toISOString()
-              }
+              const trackData = buildTrackData(filepath, result)
 
               // Insert track into SQLite
-              const result = insertTrack(trackData) as { lastInsertRowid: number | bigint }
-              const trackId = Number(result.lastInsertRowid)
+              const insertResult = insertTrack(trackData) as { lastInsertRowid: number | bigint }
+              const trackId = Number(insertResult.lastInsertRowid)
 
               // Save artwork to disk if present
-              if (analysisResult.artwork_base64 && trackId > 0) {
-                const artworkPath = saveArtwork(trackId, analysisResult.artwork_base64)
+              if (result.artwork_base64 && trackId > 0) {
+                const artworkPath = saveArtwork(trackId, result.artwork_base64)
                 if (artworkPath) {
-                  updateTrackMeta({
-                    id: trackId,
-                    artwork_path: artworkPath,
-                    title: trackData.title,
-                    artist: trackData.artist,
-                    genre: trackData.genre,
-                    bpm: trackData.bpm,
-                    key_camelot: trackData.key_camelot,
-                    energy: null,
-                    comment: trackData.comment,
-                    needs_sync: 0,
-                    pending_changes: null,
-                  })
+                  updateArtworkPath(trackId, artworkPath)
                 }
               }
 
@@ -248,10 +310,73 @@ app.whenReady().then(() => {
         )
       }
 
+      // Tell renderer Phase 1 is done — tracks are visible
+      event.sender.send('library:phase1-complete', { imported, total })
+
+      // Phase 2 — analyze in background (BPM + key)
+      // Do not await — runs after handler returns
+      analyzeUnanalyzed(event, total)
+
       return { ok: true, imported, failed, total }
     } catch (err) {
       return { ok: false, error: (err as Error).message }
     }
+  })
+
+  async function importSingleFile(filepath: string): Promise<{ ok: boolean; trackId?: number; error?: string }> {
+    try {
+      // Phase 1
+      const fastResult = await readTagsFast(filepath)
+      const trackData = buildTrackData(filepath, fastResult)
+      const insertResult = insertTrack(trackData) as { lastInsertRowid: number | bigint }
+      const trackId = Number(insertResult.lastInsertRowid)
+
+      if (fastResult.artwork_base64 && trackId > 0) {
+        const artworkPath = saveArtwork(trackId, fastResult.artwork_base64)
+        if (artworkPath) updateArtworkPath(trackId, artworkPath)
+      }
+
+      // Phase 2 - analyze this one file immediately
+      // Single file is fast enough to do inline
+      const fullResult = await analyzeFile(filepath)
+
+      if (fullResult.success) {
+        updateTrackAnalysis(trackId, fullResult)
+      }
+
+      return { ok: true, trackId }
+    } catch (err) {
+      return { ok: false, error: (err as Error).message }
+    }
+  }
+
+  ipcMain.handle('library:import-file', async (_event, filepath: string) => {
+    return importSingleFile(filepath)
+  })
+
+  // ── Multi file import ────────────────────────────────────
+
+  ipcMain.handle('library:import-files', async (_event, filepaths: string[]) => {
+    const results: Awaited<ReturnType<typeof importSingleFile>>[] = []
+    for (const filepath of filepaths) {
+      results.push(await importSingleFile(filepath))
+    }
+    return { ok: true, count: filepaths.length, results }
+  })
+
+  ipcMain.handle('dialog:open-files', async () => {
+    if (!mainWindow) return []
+    const { canceled, filePaths } = await dialog.showOpenDialog(mainWindow, {
+      properties: ['openFile', 'multiSelections'],
+      title: 'Add tracks',
+      filters: [
+        {
+          name: 'Audio',
+          extensions: ['mp3', 'flac', 'wav', 'aiff', 'aif', 'm4a', 'ogg']
+        }
+      ],
+    })
+    return canceled ? [] : filePaths
   })
 
   ipcMain.handle('db:all-tracks', () => getAllTracks())

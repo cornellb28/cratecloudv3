@@ -13,6 +13,7 @@ import sys
 import json # lets Python convert Python objects into JSON
 import warnings # Don't show warning messages. Because your Electron process is expecting clean JSON on stdout.
 import os
+import argparse
 
 # Suppose librosa warnings - safe to ignore
 warnings.filterwarnings('ignore')
@@ -187,7 +188,6 @@ def read_tags(filepath):
 
     return tags
 
-
 def load_via_ffmpeg(filepath, sr=22050):
     """
     Decode audio with ffmpeg instead of soundfile.
@@ -319,6 +319,52 @@ def analyze(filepath):
         'artwork_base64': artwork_base64,
     }
 
+def read_tags_fast(filepath: str) -> dict:
+  """
+  Fast import — reads only ID3 tags and artwork.
+  No librosa, no audio loading. Runs in milliseconds.
+  Used for Phase 1 of the two-phase import.
+  """
+
+  if not os.path.exists(filepath):
+    return {
+      'success': False,
+      'error': f'File not found: {filepath}'
+    }
+
+  ext = os.path.splitext(filepath)[1].lower()
+
+  tags = read_tags(filepath)
+  artwork_base64 = extract_artwork(filepath)
+
+  file_size_mb = round(os.path.getsize(filepath) / (1024 * 1024), 2)
+  filename = os.path.basename(filepath)
+
+  return {
+    'success':        True,
+        'filepath':       filepath,
+        'filename':       filename,
+        'file_size_mb':   file_size_mb,
+        'format':         ext.lstrip('.').upper(),
+        'title':          tags['title'] or os.path.splitext(filename)[0],
+        'artist':         tags['artist'],
+        'album':          tags['album'],
+        'genre':          tags['genre'],
+        'year':           tags['year'],
+        'comment':        tags['comment'],
+        'label':          tags['label'],
+        'remixer':        tags['remixer'],
+        'composer':       tags['composer'],
+        'grouping':       tags['grouping'],
+        'bpm':            float(tags['bpm_tag']) if tags['bpm_tag'] else None,
+        'key_camelot':    None,
+        'key_full':       None,
+        'camelot':        None,
+        'duration_sec':   None,
+        'duration_str':   None,
+        'artwork_base64': artwork_base64,
+        'analyzed':       False,   # ← tells main process this needs Phase 2
+  }
 # ─── Entry point ─────────────────────────────────────────
 
 if __name__ == '__main__':
@@ -329,11 +375,16 @@ if __name__ == '__main__':
         }))
         sys.exit(1)
 
-    filepath = sys.argv[1]
-    result = analyze(filepath)
+    parser = argparse.ArgumentParser()
+    parser.add_argument('filepath', help='Path to audio file')
+    parser.add_argument('--fast', action='store_true', help='Fast mode - tags only, no audio analysis')
+    args = parser.parse_args()
 
-    # stdout = the result Node.js reads
-    # This must be the ONLY thing printed to stdout
+    if args.fast:
+      result = read_tags_fast(args.filepath)
+    else:
+      result = analyze(args.filepath)
+
     print(json.dumps(result))
 
 

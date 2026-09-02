@@ -10,12 +10,16 @@ import { Inspector } from './components/Inpector'
 type View = 'library' | 'board'
 
 function App(): React.JSX.Element {
-  const { tracks, setTracks, setAnalyzing, activeTrackId, setBoards } = useLibraryStore()
+  const { tracks, setTracks, setAnalyzing, activeTrackId, setBoards, updateTrack } = useLibraryStore()
   const [activeView, setActiveView] = useState<View>('library')
   const [progress, setProgress] = useState<{
     done: number
     total: number
     filepath: string
+  } | null>(null)
+  const [analysisProgress, setAnalysisProgress] = useState<{
+    done: number
+    total: number
   } | null>(null)
 
   // Load existing tracks from SQLite on startup
@@ -41,7 +45,27 @@ function App(): React.JSX.Element {
       window.api.db.allTracks().then(setTracks)
     })
 
+    // Phase 2 — update individual tracks as BPM/key comes in
+    window.api.onTrackAnalyzed((data) => {
+      updateTrack(data.trackId, {
+        bpm: data.bpm,
+        key_camelot: data.key_camelot,
+        key_full: data.key_full,
+        duration_sec: data.duration_sec,
+        duration_str: data.duration_str,
+      })
+      setAnalysisProgress({
+        done: data.done,
+        total: data.total
+      })
+    })
+
+    window.api.onAnalysisComplete(() => {
+      setAnalysisProgress(null)
+    })
+
     return () => {
+      window.api.offAnalysisListeners()
       window.api.offImportProgress()
     }
   }, [setTracks])
@@ -66,6 +90,17 @@ function App(): React.JSX.Element {
     setTimeout(() => setProgress(null), 2000)
   }
 
+  // Add import files handler
+  async function handleImportFiles(): Promise<void> {
+    const filepaths = await window.api.openFiles()
+    if (!filepaths.length) return
+
+    for (const filepath of filepaths) {
+      await window.api.importFile(filepath)
+      window.api.db.allTracks().then(setTracks)
+    }
+  }
+
   const pct = progress && progress.total > 0 ? Math.round((progress.done / progress.total) * 100) : 0
 
   return (
@@ -76,7 +111,24 @@ function App(): React.JSX.Element {
       </p>
 
       {/* Toolbar at the top */}
-      <Toolbar onImport={handleImportFolder} activeView={activeView} />
+      <Toolbar onImport={handleImportFolder} activeView={activeView} onImportFiles={handleImportFiles} />
+
+      {analysisProgress && (
+        <div style={{ padding: '4px 16px', background: '#13131b', borderBottom: '0.5px solid #1e1e2a' }}>
+          <div className="text-xs text-muted-foreground mb-1">
+            Analyzing BPM + key — {analysisProgress.done} / {analysisProgress.total}
+          </div>
+          <div style={{ background: '#1e1e2a', borderRadius: '4px', height: '3px', overflow: 'hidden' }}>
+            <div style={{
+              background: '#1d9e75',
+              height: '100%',
+              width: `${Math.round(analysisProgress.done / analysisProgress.total * 100)}%`,
+              transition: 'width 0.3s ease',
+              borderRadius: '4px',
+            }} />
+          </div>
+        </div>
+      )}
 
       {/* Progress bar */}
       {progress && progress.total > 0 && (
@@ -108,7 +160,7 @@ function App(): React.JSX.Element {
         <div style={{ flex: 1, display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
           {activeView === 'library' && <LibraryView />}
           {activeView === 'board' && (
-            <div style={{ flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', color: '#333' }}>
+            <div style={{ flex: 1, display: 'flex', justifyContent: 'center', color: '#333' }}>
               <BoardView />
             </div>
           )}

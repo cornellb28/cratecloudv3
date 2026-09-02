@@ -51,7 +51,7 @@ export function BoardView(): React.JSX.Element {
             {/* Column header */}
             <div style={{
               padding: '10px 12px', borderBottom: '0.5px solid #1e1e2a',
-              display: 'flex', alignItems: 'center', gap: '8px', flexShrink: 0,
+              display: 'flex', gap: '8px', flexShrink: 0,
             }}>
               <div style={{
                 width: '8px', height: '8px',
@@ -120,7 +120,7 @@ export function BoardView(): React.JSX.Element {
               {colTracks.length === 0 && (
                 <div style={{
                   border: '1.5px dashed #252535', borderRadius: '7px',
-                  padding: '20px', textAlign: 'center', color: '#333', fontSize: '12px',
+                  padding: '20px', color: '#333', fontSize: '12px',
                 }}>
                   Drop tracks here
                 </div>

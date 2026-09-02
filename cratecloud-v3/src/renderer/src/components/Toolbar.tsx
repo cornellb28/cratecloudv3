@@ -5,10 +5,11 @@ import { Input } from '@renderer/components/ui/input'
 
 interface ToolbarProps {
   onImport: () => void
+  onImportFiles: () => void
   activeView: 'library' | 'board'
 }
 
-export function Toolbar({ onImport, activeView }: ToolbarProps): React.JSX.Element {
+export function Toolbar({ onImport, activeView, onImportFiles }: ToolbarProps): React.JSX.Element {
   const { isAnalyzing, tracks, searchQuery, setSearchQuery } = useLibraryStore()
 
   return (
@@ -29,6 +30,15 @@ export function Toolbar({ onImport, activeView }: ToolbarProps): React.JSX.Eleme
         size="sm"
       >
         {isAnalyzing ? 'Importing...' : '+ Import folder'}
+      </Button>
+      <Button
+        onClick={onImportFiles}
+        disabled={isAnalyzing}
+        variant="ghost"
+        size="sm"
+        className="shrink-0"
+      >
+        + Add files
       </Button>
       {activeView === 'library' && (
         <div className="relative flex-1">

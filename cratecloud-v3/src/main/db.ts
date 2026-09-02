@@ -392,6 +392,16 @@ const stmts = {
       artwork_path    = @artwork_path
     WHERE id = @id
   `),
+  getUnanalyzedTracks: db.prepare(`
+  SELECT id, filepath FROM tracks
+  WHERE analyzed_at IS NULL
+  AND (missing = 0 OR missing IS NULL)
+  ORDER BY added_at ASC
+`),
+  updateArtworkPath: db.prepare(`
+  UPDATE tracks SET artwork_path = @artwork_path
+  WHERE id = @id
+`),
   markMissing: db.prepare(`
     UPDATE tracks SET
       missing    = 1,
@@ -700,6 +710,14 @@ export function getTagTracks(tagId: number): Track[] {
 
 export function getAllTags(): Tag[] {
   return stmts.getAllTags.all() as Tag[]
+}
+
+export function getUnanalyzedTracks(): unknown[] {
+  return stmts.getUnanalyzedTracks.all()
+}
+
+export function updateArtworkPath(id: number, artworkPath: string): RunResult {
+  return stmts.updateArtworkPath.run({ id, artwork_path: artworkPath })
 }
 
 export function getTagsByField(field: string): Tag[] {

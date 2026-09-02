@@ -79,6 +79,37 @@ export function analyzeFile(filepath: string): Promise<AnalysisResult> {
   })
 }
 
+export function readTagsFast(filepath: string): Promise<AnalysisResult> {
+  return new Promise((resolve, reject) => {
+    const python = getPython()
+    const script = getSidecarPath()
+    const spawnArgs = app.isPackaged ? [filepath, '--fast'] : [script, filepath, '--fast']
+    const child = spawn(python, spawnArgs, { stdio: ['ignore', 'pipe', 'pipe'] })
+
+    let stdout = ''
+
+    child.stdout.on('data', (chunk: Buffer) => {
+      stdout += chunk.toString()
+    })
+
+    child.stderr.on('data', (chunk: Buffer) => {
+      console.warn('Sidecar stderr:', chunk.toString().trim())
+    })
+
+    child.on('close', () => {
+      try {
+        resolve(JSON.parse(stdout) as AnalysisResult)
+      } catch {
+        reject(new Error(`Failed to parse fast tag output: ${stdout.slice(0, 200)}`))
+      }
+    })
+
+    child.on('error', (err) => {
+      reject(new Error(`Failed to start sidecar: ${err.message}`))
+    })
+  })
+}
+
 // ─── Type for the result ──────────────────────────────────
 
 export interface AnalysisResult {
@@ -102,5 +133,6 @@ export interface AnalysisResult {
   duration_sec: number | null
   duration_str: string | null
   bpm_tag: string | null
+  analyzed: boolean
   artwork_base64: string | null
 }

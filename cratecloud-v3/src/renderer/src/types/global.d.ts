@@ -5,6 +5,9 @@ declare global {
     api: {
       getArtworkUrl: (filepath: string) => string
       openFolder: () => Promise<string | null>
+      openFiles: () => Promise<string[]>
+      importFile: (filepath: string) => Promise<{ ok: boolean; trackId?: number; error?: string }>
+      importFiles: (filepaths: string[]) => Promise<{ ok: boolean; count: number; results: { ok: boolean; trackId?: number; error?: string }[] }>
       analyzeFile: (filepath: string) => Promise<{
         ok: boolean
         data?: AnalysisResult
@@ -28,6 +31,23 @@ declare global {
       }) => void) => void
 
       offImportProgress: () => void
+
+      onTrackAnalyzed: (cb: (data: {
+        trackId: number
+        bpm: number | null
+        key_camelot: string | null
+        key_full: string | null
+        duration_sec: number | null
+        duration_str: string | null
+        done: number
+        total: number
+      }) => void) => void
+
+      onPhase1Complete: (cb: (data: { imported: number; total: number }) => void) => void
+
+      onAnalysisComplete: (cb: (data: { analyzed: number; total: number }) => void) => void
+
+      offAnalysisListeners: () => void
 
       db: {
         allTracks: () => Promise<Track[]>
@@ -171,5 +191,6 @@ declare global {
     duration_str: string | null
     bpm_tag: string | null
     artwork_base64: string | null
+    analyzed: boolean
   }
 }
