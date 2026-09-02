@@ -76,7 +76,7 @@ function App(): React.JSX.Element {
       </p>
 
       {/* Toolbar at the top */}
-      <Toolbar onImport={handleImportFolder} />
+      <Toolbar onImport={handleImportFolder} activeView={activeView} />
 
       {/* Progress bar */}
       {progress && progress.total > 0 && (
