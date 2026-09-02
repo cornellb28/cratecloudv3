@@ -18,7 +18,7 @@ export function Inspector(): React.JSX.Element {
       titleRef.current.focus()
       titleRef.current.select()
     }
-  }, [activeTrackId])  // re-run when the active track changes
+  }, [activeTrackId, isOpen])  // re-run when the active track changes
 
   // Save a single field to SQLite and the store
   async function saveField(field: string, value: string): Promise<void> {
@@ -89,7 +89,7 @@ export function Inspector(): React.JSX.Element {
                 cursor: 'pointer',
                 fontSize: '16px',
                 padding: '0',
-                lineHeight: 1,
+                lineHeight: 1
               }}
             >
               ✕
@@ -106,11 +106,11 @@ export function Inspector(): React.JSX.Element {
             marginBottom: '4px',
             display: 'flex',
             alignItems: 'center',
-            justifyContent: 'center',
+            justifyContent: 'center'
           }}>
             {track.artwork_path ? (
               <img
-                src={`file://${track.artwork_path}`}
+                src={`artwork://${track.artwork_path}`}
                 alt=""
                 style={{ width: '100%', height: '100%', objectFit: 'cover' }}
               />

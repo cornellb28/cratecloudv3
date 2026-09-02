@@ -12,6 +12,7 @@ Usage:
 import sys
 import json # lets Python convert Python objects into JSON
 import warnings # Don't show warning messages. Because your Electron process is expecting clean JSON on stdout.
+import os
 
 # Suppose librosa warnings - safe to ignore
 warnings.filterwarnings('ignore')

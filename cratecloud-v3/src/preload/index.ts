@@ -11,7 +11,7 @@ const api = {
   importFolder: (folderPath: string) => ipcRenderer.invoke('library:import-folder', folderPath),
   onImportProgress: ( cb: (p: { done: number; total: number; failed: number; filepath: string }) => void ) => ipcRenderer.on('library:import-progress', (_e, p) => cb(p)),
   offImportProgress: () => ipcRenderer.removeAllListeners('library:import-progress'),
-  getArtworkUrl: (filepath: string) => `file://${filepath}`,
+  getArtworkUrl: (filepath: string) => `artwork://${filepath}`,
   // Tracks
   db: {
     allTracks: () => ipcRenderer.invoke('db:all-tracks'),

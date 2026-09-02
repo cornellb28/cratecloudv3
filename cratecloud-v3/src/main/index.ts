@@ -1,4 +1,5 @@
-import { app, shell, BrowserWindow, ipcMain, dialog } from 'electron'
+import { app, shell, BrowserWindow, ipcMain, dialog, protocol, net } from 'electron'
+import { pathToFileURL } from 'url'
 import { join, extname, basename } from 'path'
 import { readdirSync, statSync, writeFileSync, mkdirSync } from 'fs'
 import { electronApp, optimizer, is } from '@electron-toolkit/utils'
@@ -30,7 +31,7 @@ import {
 } from './db'
 import { analyzeFile } from './sidecar'
 
-console.log('DB path:', join(app.getPath('userData'), 'cratecloud', 'library.db'))
+// console.log('DB path:', join(app.getPath('userData'), 'cratecloud', 'library.db'))
 
 // ── Walk a folder and find all audio files ──────────────────────────────────────────────
 const AUDIO_EXTENSIONS = new Set(['.mp3', '.flac', '.wav', '.aiff', '.aif', '.m4a', '.ogg'])
@@ -104,10 +105,28 @@ function createWindow(): void {
   }
 }
 
+protocol.registerSchemesAsPrivileged([
+  {
+    scheme: 'artwork',
+    privileges: {
+      secure: true,
+      supportFetchAPI: true,
+      bypassCSP: true,
+    }
+  }
+])
+
 // This method will be called when Electron has finished
 // initialization and is ready to create browser windows.
 // Some APIs can only be used after this event occurs.
 app.whenReady().then(() => {
+  // ── Register a custom protocol for serving local artwork ──────────────────────────────────────────────
+  protocol.handle('artwork', (request) => {
+    const url = request.url.replace('artwork://', '')
+    const decodedPath = decodeURIComponent(url)
+    return net.fetch(pathToFileURL(decodedPath).toString())
+  })
+
   // Set app user model id for windows
   electronApp.setAppUserModelId('com.electron')
 

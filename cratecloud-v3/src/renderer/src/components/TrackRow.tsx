@@ -10,7 +10,7 @@ export function TrackRow({ track }: TrackRowProps): React.JSX.Element {
   const { activeTrackId, setActiveTrack } = useLibraryStore()
   const isActive = activeTrackId === track.id
 
-  const artworkUrl = track.artwork_path ? `file://${track.artwork_path}` : null
+  const artworkUrl = track.artwork_path ? `artwork://${track.artwork_path}` : null
 
   return (
     <div
