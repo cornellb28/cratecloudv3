@@ -14,6 +14,7 @@ export function TrackRow({ track }: TrackRowProps): React.JSX.Element {
 
   return (
     <div
+      data-testid={`track-row-${track.id}`}
       onClick={() => setActiveTrack(isActive ? null : track.id)}
       style={{
         padding: '8px 16px',

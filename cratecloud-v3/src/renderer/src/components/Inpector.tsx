@@ -57,7 +57,9 @@ export function Inspector(): React.JSX.Element {
   }
 
   return (
-    <div style={{
+    <div
+      data-testid="inspector-panel"
+      style={{
       width: isOpen ? '260px' : '0px',
       flexShrink: 0,
       background: '#12121a',
@@ -127,6 +129,7 @@ export function Inspector(): React.JSX.Element {
 
             <EditField
               ref={titleRef}
+              data-testid="inspector-field-title"
               label="Title"
               defaultValue={track.title ?? ''}
               onSave={(v) => saveField('title', v)}
@@ -135,6 +138,7 @@ export function Inspector(): React.JSX.Element {
 
             <EditField
               label="Artist"
+              data-testid="inspector-field-artist"
               defaultValue={track.artist ?? ''}
               onSave={(v) => saveField('artist', v)}
               onKeyDown={(e) => onKeyDown(e, 'artist')}
@@ -142,6 +146,7 @@ export function Inspector(): React.JSX.Element {
 
             <EditField
               label="Genre"
+              data-testid="inspector-field-genre"
               defaultValue={track.genre ?? ''}
               onSave={(v) => saveField('genre', v)}
               onKeyDown={(e) => onKeyDown(e, 'genre')}
@@ -149,6 +154,7 @@ export function Inspector(): React.JSX.Element {
 
             <EditField
               label="BPM"
+              data-testid="inspector-field-bpm"
               defaultValue={track.bpm?.toString() ?? ''}
               onSave={(v) => saveField('bpm', v)}
               onKeyDown={(e) => onKeyDown(e, 'bpm')}
@@ -156,6 +162,7 @@ export function Inspector(): React.JSX.Element {
 
             <EditField
               label="Key"
+              data-testid="inspector-field-key"
               defaultValue={track.key_camelot ?? ''}
               onSave={(v) => saveField('key_camelot', v)}
               onKeyDown={(e) => onKeyDown(e, 'key_camelot')}
@@ -243,10 +250,11 @@ interface EditFieldProps {
   defaultValue: string
   onSave: (value: string) => void
   onKeyDown: (e: React.KeyboardEvent<HTMLInputElement>) => void
+  'data-testid'?: string
 }
 
 const EditField = React.forwardRef<HTMLInputElement, EditFieldProps>(
-  ({ label, defaultValue, onSave, onKeyDown }, ref) => {
+  ({ label, defaultValue, onSave, onKeyDown, 'data-testid': testId }, ref) => {
     return (
       <div>
         <label className="text-[10px] font-medium tracking-widest uppercase text-muted-foreground">
@@ -254,6 +262,7 @@ const EditField = React.forwardRef<HTMLInputElement, EditFieldProps>(
         </label>
         <Input
           ref={ref}
+          data-testid={testId}
           defaultValue={defaultValue}
           onBlur={(e) => onSave(e.target.value)}
           onKeyDown={onKeyDown}

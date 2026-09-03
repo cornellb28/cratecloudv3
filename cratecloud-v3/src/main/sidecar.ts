@@ -6,6 +6,12 @@ import { app } from 'electron'
 // In development: use the .venv we created in sidecar/
 // In production:  use the bundled binary (Phase 6)
 
+// __dirname is out/main at runtime (the compiled main bundle), regardless of
+// how Electron was launched — unlike app.getAppPath(), which resolves to the
+// entry script's directory (not the project root) when Electron is launched
+// with a script path argument instead of a project directory.
+const projectRoot = join(__dirname, '..', '..')
+
 function getPython(): string {
   if (app.isPackaged) {
     // Production — bundled binary path
@@ -13,13 +19,11 @@ function getPython(): string {
   }
 
   // Development — use the virtual environment
-  const root = app.getAppPath()
-  return join(root, 'sidecar', '.venv', 'bin', 'python3')
+  return join(projectRoot, 'sidecar', '.venv', 'bin', 'python3')
 }
 
 function getSidecarPath(): string {
-  const root = app.getAppPath()
-  return join(root, 'sidecar', 'analyze.py')
+  return join(projectRoot, 'sidecar', 'analyze.py')
 }
 
 // ─── Core bridge function ─────────────────────────────────

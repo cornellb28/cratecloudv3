@@ -323,7 +323,7 @@ app.whenReady().then(() => {
     }
   })
 
-  async function importSingleFile(filepath: string): Promise<{ ok: boolean; trackId?: number; error?: string }> {
+  async function importSingleFile(event: Electron.IpcMainInvokeEvent, filepath: string): Promise<{ ok: boolean; trackId?: number; error?: string }> {
     try {
       // Phase 1
       const fastResult = await readTagsFast(filepath)
@@ -336,12 +336,31 @@ app.whenReady().then(() => {
         if (artworkPath) updateArtworkPath(trackId, artworkPath)
       }
 
+      // Tell renderer the track exists so it can refresh the list
+      event.sender.send('library:import-progress', {
+        done: 1,
+        total: 1,
+        failed: 0,
+        filepath: basename(filepath)
+      })
+
       // Phase 2 - analyze this one file immediately
       // Single file is fast enough to do inline
       const fullResult = await analyzeFile(filepath)
 
       if (fullResult.success) {
         updateTrackAnalysis(trackId, fullResult)
+
+        event.sender.send('library:track-analyzed', {
+          trackId,
+          bpm: fullResult.bpm,
+          key_camelot: fullResult.key_camelot,
+          key_full: fullResult.key_full,
+          duration_sec: fullResult.duration_sec,
+          duration_str: fullResult.duration_str,
+          done: 1,
+          total: 1
+        })
       }
 
       return { ok: true, trackId }
@@ -350,16 +369,16 @@ app.whenReady().then(() => {
     }
   }
 
-  ipcMain.handle('library:import-file', async (_event, filepath: string) => {
-    return importSingleFile(filepath)
+  ipcMain.handle('library:import-file', async (event, filepath: string) => {
+    return importSingleFile(event, filepath)
   })
 
   // ── Multi file import ────────────────────────────────────
 
-  ipcMain.handle('library:import-files', async (_event, filepaths: string[]) => {
+  ipcMain.handle('library:import-files', async (event, filepaths: string[]) => {
     const results: Awaited<ReturnType<typeof importSingleFile>>[] = []
     for (const filepath of filepaths) {
-      results.push(await importSingleFile(filepath))
+      results.push(await importSingleFile(event, filepath))
     }
     return { ok: true, count: filepaths.length, results }
   })

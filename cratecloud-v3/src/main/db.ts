@@ -2,11 +2,22 @@ import Database, { RunResult } from 'better-sqlite3'
 import { app } from 'electron'
 import { join } from 'path'
 import { mkdirSync } from 'fs'
+import { tmpdir } from 'os'
 
 // ─── Setup ───────────────────────────────────────────────
 // SQLite lives in the user's app data folder — never in
 // the project folder. On Mac: ~/Library/Application Support/cratecloud/
 // On Windows: C:\Users\Name\AppData\Roaming\cratecloud\
+
+// Tests run against a throwaway userData dir so they never read or write
+// the developer's real library, and so every run starts from a clean DB.
+// Keyed by the parent (test runner) pid, not this Electron process's own —
+// each test launches a fresh Electron process via beforeEach, and they all
+// need to share one DB across a single `playwright test` invocation while
+// still starting clean on the next invocation.
+if (process.env.NODE_ENV === 'test') {
+  app.setPath('userData', join(tmpdir(), `cratecloud-test-${process.ppid}`))
+}
 
 // gives access to system paths (like "where should this app store its data").
 const dbDir = join(app.getPath('userData'), 'cratecloud') // It appends a cratecloud subfolder to that path.

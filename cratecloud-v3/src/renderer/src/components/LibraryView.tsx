@@ -24,7 +24,8 @@ export function LibraryView(): React.JSX.Element {
 
   if (tracks.length === 0) {
     return (
-      <div style={{
+      <div
+        style={{
         flex: 1,
         display: 'flex',
         alignItems: 'center',
@@ -38,7 +39,9 @@ export function LibraryView(): React.JSX.Element {
   }
 
   return (
-    <div style={{
+    <div
+      data-testid="track-list"
+      style={{
       flex: 1,
       overflowY: 'auto',
       padding: '8px 16px',

@@ -38,6 +38,7 @@ export function BoardView(): React.JSX.Element {
 
         return (
           <div
+            data-testid={`board-column-${board.id}`}
             key={board.id}
             onDragOver={onDragOver}
             onDrop={(e) => onDrop(e, board.id)}
