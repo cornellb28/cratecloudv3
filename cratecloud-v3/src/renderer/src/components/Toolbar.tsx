@@ -43,6 +43,7 @@ export function Toolbar({ onImport, activeView, onImportFiles }: ToolbarProps): 
       {activeView === 'library' && (
         <div className="relative flex-1">
           <Input
+          data-testid="search-input"
             type="text"
             placeholder="Search title, artist, BPM, key..."
             value={searchQuery}

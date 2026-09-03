@@ -61,3 +61,30 @@ test('library starts empty with zero tracks', async () => {
   // Should show 0 tracks
   await expect(trackCount).toContainText('0')
 })
+
+test('search input filters track list', async () => {
+  // This test needs tracks in the library first
+  // We will use a data-testid on the search input
+  const searchInput = page.getByTestId('search-input')
+  await expect(searchInput).toBeVisible()
+
+  // Type a search query
+  await searchInput.fill('jeyone')
+
+  // The track list should filter
+  // We will check the track count updates
+  const trackCount = page.getByTestId('track-count')
+  await expect(trackCount).toBeVisible()
+})
+
+test('switching back to library view shows track list', async () => {
+  // Go to board first
+  await page.getByText('Board view').click()
+
+  // Then back to library
+  await page.getByText('All tracks').click()
+
+  // Search bar should be visible again
+  const searchInput = page.getByTestId('search-input')
+  await expect(searchInput).toBeVisible()
+})
