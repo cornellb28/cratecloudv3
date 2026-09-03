@@ -106,7 +106,7 @@ function App(): React.JSX.Element {
   return (
     <div style={{ padding: '2rem', fontFamily: 'monospace', color: '#e8e8f0', background: '#0e0e12', minHeight: '100vh', display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
       <h2 style={{ marginBottom: '0.5rem' }}>CrateCloud v2</h2>
-      <p style={{ color: '#555', marginBottom: '1rem' }}>
+      <p data-testid="track-count" style={{ color: '#555', marginBottom: '1rem' }}>
         {tracks.length} track{tracks.length !== 1 ? 's' : ''} in library
       </p>
 
