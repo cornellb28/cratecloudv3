@@ -49,6 +49,15 @@ CAMELOT = {
     'G minor':  '6A',  'D minor':  '7A',
 }
 
+def format_duration(duration_sec: float | None) -> str | None:
+    """Convert seconds to a MM:SS string. Returns None if input is None."""
+    if duration_sec is None:
+        return None
+    total_seconds = int(duration_sec)
+    minutes = total_seconds // 60
+    seconds = total_seconds % 60
+    return f'{minutes}:{seconds:02d}'
+
 def detect_bpm(y, sr):
   """
   Detect the tempo (BPM) of an audio signal.
@@ -132,7 +141,7 @@ def detect_key(y, sr):
         'key_camelot':  camelot,
     }
 
-def read_tags(filepath):
+def _extract_tags(filepath):
     """
     Read existing ID3 tags from the file using mutagen.
     Fast — does not load the full audio into memory.
@@ -206,7 +215,6 @@ def load_via_ffmpeg(filepath, sr=22050):
     y = np.frombuffer(proc.stdout, dtype=np.float32)
     return y, sr
 
-
 def load_audio(filepath, sr=22050):
     """
     Load audio for analysis. Tries librosa/soundfile first (fast path
@@ -257,7 +265,7 @@ def analyze(filepath):
         }
 
     # Step 1 — read tags (no audio load needed)
-    tags = read_tags(filepath)
+    tags = _extract_tags(filepath)
 
     # Step 2 — load audio at 22050 Hz mono
     # Lower sample rate = faster load, still accurate for BPM/key
@@ -319,7 +327,7 @@ def analyze(filepath):
         'artwork_base64': artwork_base64,
     }
 
-def read_tags_fast(filepath: str) -> dict:
+def read_tags(filepath: str) -> dict:
   """
   Fast import — reads only ID3 tags and artwork.
   No librosa, no audio loading. Runs in milliseconds.
@@ -334,7 +342,8 @@ def read_tags_fast(filepath: str) -> dict:
 
   ext = os.path.splitext(filepath)[1].lower()
 
-  tags = read_tags(filepath)
+  tags = _extract_tags(filepath)
+  probe = probe_duration(filepath)
   artwork_base64 = extract_artwork(filepath)
 
   file_size_mb = round(os.path.getsize(filepath) / (1024 * 1024), 2)
@@ -342,29 +351,76 @@ def read_tags_fast(filepath: str) -> dict:
 
   return {
     'success':        True,
-        'filepath':       filepath,
-        'filename':       filename,
-        'file_size_mb':   file_size_mb,
-        'format':         ext.lstrip('.').upper(),
-        'title':          tags['title'] or os.path.splitext(filename)[0],
-        'artist':         tags['artist'],
-        'album':          tags['album'],
-        'genre':          tags['genre'],
-        'year':           tags['year'],
-        'comment':        tags['comment'],
-        'label':          tags['label'],
-        'remixer':        tags['remixer'],
-        'composer':       tags['composer'],
-        'grouping':       tags['grouping'],
-        'bpm':            float(tags['bpm_tag']) if tags['bpm_tag'] else None,
-        'key_camelot':    None,
-        'key_full':       None,
-        'camelot':        None,
-        'duration_sec':   None,
-        'duration_str':   None,
-        'artwork_base64': artwork_base64,
-        'analyzed':       False,   # ← tells main process this needs Phase 2
+    'filepath':       filepath,
+    'filename':       filename,
+    'duration_sec':   probe.get('duration_sec'),
+    'duration_str':   format_duration(probe.get('duration_sec')),
+    'file_size_mb':   file_size_mb,
+    'format':         ext.lstrip('.').upper(),
+    'title':          tags['title'] or os.path.splitext(filename)[0],
+    'artist':         tags['artist'],
+    'album':          tags['album'],
+    'genre':          tags['genre'],
+    'year':           tags['year'],
+    'comment':        tags['comment'],
+    'label':          tags['label'],
+    'remixer':        tags['remixer'],
+    'composer':       tags['composer'],
+    'grouping':       tags['grouping'],
+    'bpm':            float(tags['bpm_tag']) if tags['bpm_tag'] else None,
+    'key_camelot':    None,
+    'key_full':       None,
+    'camelot':        None,
+    'duration_sec':   None,
+    'duration_str':   None,
+    'artwork_base64': artwork_base64,
+    'analyzed':       False,   # ← tells main process this needs Phase 2
   }
+
+def write_tags(filepath: str, bpm: float, camelot: str) -> bool:
+    ext = os.path.splitext(filepath)[1].lower()
+    try:
+        if ext == '.mp3':
+            raw = ID3(filepath)
+            raw['TBPM'] = TBPM(encoding=3, text=str(int(round(bpm))))
+            raw['TKEY'] = TKEY(encoding=3, text=camelot)
+            raw.save()
+        elif ext == '.flac':
+            audio = FLAC(filepath)
+            audio['bpm'] = [str(int(round(bpm)))]
+            audio['key'] = [camelot]
+            audio.save()
+        elif ext == '.m4a':
+            audio = MP4(filepath)
+            if audio.tags is None:
+                audio.add_tags()
+            audio.tags['tmpo'] = [int(round(bpm))]
+            audio.save()
+        else:
+            return False
+        return True
+    except Exception:
+        return False
+
+def probe_duration(filepath: str) -> dict:
+    """Cheap header-only probe: size + duration via mutagen, no audio decode.
+    Used only as a match signal during orphan reconciliation — never for tagging."""
+    if not os.path.exists(filepath):
+        return {'success': False, 'error': f'File not found: {filepath}', 'filepath': filepath}
+    try:
+        file_size_mb = round(os.path.getsize(filepath) / (1024 * 1024), 2)
+        audio = mutagen.File(filepath)
+        duration_sec = round(float(audio.info.length), 2) if audio and audio.info else None
+        return {
+            'success': True,
+            'filepath': filepath,
+            'file_size_mb': file_size_mb,
+            'duration_sec': duration_sec,
+        }
+    except Exception as e:
+        return {'success': False, 'error': str(e), 'filepath': filepath}
+
+
 # ─── Entry point ─────────────────────────────────────────
 
 if __name__ == '__main__':
@@ -381,7 +437,7 @@ if __name__ == '__main__':
     args = parser.parse_args()
 
     if args.fast:
-      result = read_tags_fast(args.filepath)
+      result = read_tags(args.filepath)
     else:
       result = analyze(args.filepath)
 

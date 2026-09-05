@@ -6,11 +6,12 @@ import { LibraryView } from './components/LibraryView'
 import { BoardView } from './components/BoardView'
 import { Inspector } from './components/Inpector'
 
-
 type View = 'library' | 'board'
 
+const COLLAPSE_THRESHOLD = 900 // px
+
 function App(): React.JSX.Element {
-  const { tracks, setTracks, setAnalyzing, activeTrackId, setBoards, updateTrack } = useLibraryStore()
+  const { tracks, setTracks, setAnalyzing, activeTrackId, setBoards, updateTrack, sidebarCollapsed, setSidebarCollapsed } = useLibraryStore()
   const [activeView, setActiveView] = useState<View>('library')
   const [progress, setProgress] = useState<{
     done: number
@@ -21,6 +22,19 @@ function App(): React.JSX.Element {
     done: number
     total: number
   } | null>(null)
+
+  // Auto-collapse on narrow window
+  useEffect(() => {
+    function handleResize(): void {
+      if (window.innerWidth < COLLAPSE_THRESHOLD) {
+        setSidebarCollapsed(true)
+      }
+    }
+
+    window.addEventListener('resize', handleResize)
+    handleResize() // check on mount
+    return () => window.removeEventListener('resize', handleResize)
+  })
 
   // Load existing tracks from SQLite on startup
   useEffect(() => {

@@ -1,9 +1,10 @@
 import { app, shell, BrowserWindow, ipcMain, dialog, protocol, net } from 'electron'
 import { pathToFileURL } from 'url'
-import { join, extname, basename } from 'path'
+import { join, extname, basename, dirname } from 'path'
 import { readdirSync, statSync, writeFileSync, mkdirSync } from 'fs'
 import { electronApp, optimizer, is } from '@electron-toolkit/utils'
 import icon from '../../resources/icon.png?asset'
+import { rename, stat, copyFile, unlink, mkdir, readdir } from 'fs/promises'
 import {
   insertTrack,
   getAllTracks,
@@ -29,7 +30,10 @@ import {
   setSetting,
   getTracksByBoardId,
   getUnanalyzedTracks,
-  updateArtworkPath
+  updateArtworkPath,
+  updateTrackFilepath,
+  getTrackByFilepath,
+  markTrackAnalyzed
 } from './db'
 import { analyzeFile, readTagsFast } from './sidecar'
 
@@ -77,7 +81,28 @@ function saveArtwork(trackId: number, base64Data: string): string | null {
 }
 
 // Build a consistent track data object from analysis result
-function buildTrackData(filepath: string, result: AnalysisResult) {
+function buildTrackData(filepath: string, result: AnalysisResult): {
+  filepath: string
+  filename: string
+  title: string | null
+  artist: string | null
+  album: string | null
+  genre: string | null
+  year: string | null
+  comment: string | null
+  label: string | null
+  remixer: string | null
+  composer: string | null
+  grouping: string | null
+  bpm: number | null
+  key_camelot: string | null
+  key_full: string | null
+  camelot: string | null
+  duration_sec: number | null
+  duration_str: string | null
+  analyzed_at: string | null
+  board_id: number
+} {
   return {
     filepath,
     filename: basename(filepath),
@@ -102,6 +127,51 @@ function buildTrackData(filepath: string, result: AnalysisResult) {
   }
 }
 
+// move files to folders
+async function moveFileToFolder(fromPath: string, toFolder: string): Promise<string> {
+  const ext = extname(fromPath)
+  const base = basename(fromPath, ext)
+  let toPath = join(toFolder, basename(fromPath))
+  let counter = 1
+
+  // Collision detection - find a free filename at the destination
+  while (true) {
+    try {
+      await stat(toPath)
+      // stat succeeded -> file exists -> try next name
+      toPath = join(toFolder, `${base} (${counter++}${ext})`)
+    } catch {
+      // stat threw -> path does not exist -> safe to use
+    }
+    if (counter > 99) {
+      throw new Error('Too many filename collisions at destination')
+    }
+  }
+
+  try {
+    await rename(fromPath, toPath)
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === 'EXDEV') {
+      // Cross-device move - copy then verify than delete
+      const sourceSize = (await stat(fromPath)).size
+      await copyFile(fromPath, toPath)
+      const copiedSize = (await stat(toPath)).size
+
+      if (copiedSize !== sourceSize) {
+        await unlink(toPath).catch(() => { })
+        throw new Error(
+          `Copy verification failed (${copiedSize} bytes copied, ` + `expected ${sourceSize}) — source left untouched`
+        )
+      }
+
+      await unlink(fromPath)
+    } else {
+      throw err
+    }
+  }
+  return toPath
+}
+
 // Update just the analysis fields after Phase 2 completes
 function updateTrackAnalysis(trackId: number, result: AnalysisResult): void {
   const existing = getTrackById(trackId)
@@ -117,48 +187,6 @@ function updateTrackAnalysis(trackId: number, result: AnalysisResult): void {
     artwork_path: existing?.artwork_path ?? null,
     needs_sync: 0,
     pending_changes: null
-  })
-}
-
-// Background Phase 2 - analyze tracks that have no BPM/key yet
-async function analyzeUnanalyzed(event: Electron.IpcMainInvokeEvent, _totalFromPhase1: number): Promise<void> {
-  const unanalyzed = getUnanalyzedTracks()
-  const concurrency = 4 // back to 4 for heavy librosa work
-
-  let done = 0
-
-  for (let i = 0; i < unanalyzed.length; i += concurrency) {
-    const batch = unanalyzed.slice(i, i + concurrency) as Track[]
-
-    await Promise.all(
-      batch.map(async (track) => {
-        try {
-          const result = await analyzeFile(track.filepath)
-          if (result.success) {
-            updateTrackAnalysis(track.id, result)
-            done++
-
-            // Tell renderer to refresh this one track
-            event.sender.send('library:track-analyzed', {
-              trackId: track.id,
-              bpm: result.bpm,
-              key_camelot: result.key_camelot,
-              key_full: result.key_full,
-              duration_sec: result.duration_sec,
-              duration_str: result.duration_str,
-              done,
-              total: unanalyzed.length
-            })
-          }
-        } catch {
-          // skip failed analysis — track still visible without BPM
-        }
-      })
-    )
-  }
-  event.sender.send('library:analysis-complete', {
-    analyzed: done,
-    total: unanalyzed.length
   })
 }
 
@@ -245,8 +273,6 @@ app.whenReady().then(() => {
     return result.filePaths[0]
   })
 
-
-
   // ── Tracks ──────────────────────────────────────────────
 
   ipcMain.handle('library:import-folder', async (event, folderPath: string) => {
@@ -261,7 +287,7 @@ app.whenReady().then(() => {
 
       let imported = 0
       let failed = 0
-      const concurrency = 4
+      const concurrency = 8
 
       // 2. Process in batches of 4
       for (let i = 0; i < filepaths.length; i += concurrency) {
@@ -311,11 +337,11 @@ app.whenReady().then(() => {
       }
 
       // Tell renderer Phase 1 is done — tracks are visible
-      event.sender.send('library:phase1-complete', { imported, total })
+      event.sender.send('library:phase1-complete', { imported, total, failed })
 
       // Phase 2 — analyze in background (BPM + key)
       // Do not await — runs after handler returns
-      analyzeUnanalyzed(event, total)
+      runPhase2Analysis(event)
 
       return { ok: true, imported, failed, total }
     } catch (err) {
@@ -323,7 +349,7 @@ app.whenReady().then(() => {
     }
   })
 
-  async function importSingleFile(event: Electron.IpcMainInvokeEvent, filepath: string): Promise<{ ok: boolean; trackId?: number; error?: string }> {
+  async function importSingleFile( event: Electron.IpcMainInvokeEvent, filepath: string ): Promise<{ ok: boolean; trackId?: number; error?: string }> {
     try {
       // Phase 1
       const fastResult = await readTagsFast(filepath)
@@ -367,6 +393,78 @@ app.whenReady().then(() => {
     } catch (err) {
       return { ok: false, error: (err as Error).message }
     }
+  }
+
+  async function runPhase2Analysis(event: Electron.IpcMainInvokeEvent): Promise<void> {
+    // Only analyze tracks that Phase 1 did not already resolve
+    // (tracks that had BPM/key tags skip librosa entirely)
+    const unanalyzed = getUnanalyzedTracks() as Track[]
+
+    if (unanalyzed.length === 0) {
+      event.sender.send('library:analysis-complete', {
+        analyzed: 0,
+        total: 0,
+      })
+      return
+    }
+
+    const total = unanalyzed.length
+    let done = 0
+    const concurrency = 4  // librosa is heavy — keep this lower
+
+    for (let i = 0; i < unanalyzed.length; i += concurrency) {
+      const batch = unanalyzed.slice(i, i + concurrency)
+
+      await Promise.all(
+        batch.map(async (track) => {
+          try {
+            const result = await analyzeFile(track.filepath)
+
+            if (result.success) {
+              // Update just the analysis fields
+              updateTrackMeta({
+                id: track.id,
+                title: track.title,
+                artist: track.artist,
+                genre: track.genre,
+                bpm: result.bpm,
+                key_camelot: result.key_camelot,
+                energy: null,
+                comment: track.comment,
+                artwork_path: track.artwork_path,
+                needs_sync: 0,
+                pending_changes: null,
+              })
+
+              // Mark as analyzed
+              markTrackAnalyzed(track.id)
+
+              done++
+
+              // Tell renderer to update this track's badges
+              event.sender.send('library:track-analyzed', {
+                trackId: track.id,
+                bpm: result.bpm,
+                key_camelot: result.key_camelot,
+                key_full: result.key_full,
+                duration_sec: result.duration_sec,
+                duration_str: result.duration_str,
+                done,
+                total,
+              })
+            }
+          } catch {
+            // Skip failed analysis — track still visible without BPM
+            done++
+          }
+        })
+      )
+    }
+
+    event.sender.send('library:analysis-complete', {
+      analyzed: done,
+      total,
+    })
   }
 
   ipcMain.handle('library:import-file', async (event, filepath: string) => {
@@ -451,6 +549,188 @@ app.whenReady().then(() => {
       return { ok: false, error: (err as Error).message }
     }
   })
+
+  // ── Move a single file to a folder ──────────────────────
+
+  ipcMain.handle('fs:move-file',
+    async (_e, fromPath: string, toFolder: string) => {
+      try {
+        // Validate — source must exist
+        await stat(fromPath)
+
+        // Validate — destination must be a directory
+        const destStat = await stat(toFolder)
+        if (!destStat.isDirectory()) {
+          return { ok: false, error: 'Destination is not a folder' }
+        }
+
+        // Move the file
+        const newPath = await moveFileToFolder(fromPath, toFolder)
+
+        // Update DB — filepath changed
+        updateTrackFilepath(fromPath, newPath)
+
+        return { ok: true, newPath }
+      } catch (err) {
+        return { ok: false, error: (err as Error).message }
+      }
+    }
+  )
+
+  // ── Move multiple files to a folder ─────────────────────
+
+  ipcMain.handle('fs:move-files',
+    async (_e, fromPaths: string[], toFolder: string) => {
+      const results: { path: string; ok: boolean; newPath?: string; error?: string }[] = []
+
+      for (const fromPath of fromPaths) {
+        try {
+          const newPath = await moveFileToFolder(fromPath, toFolder)
+          updateTrackFilepath(fromPath, newPath)
+          results.push({ path: fromPath, ok: true, newPath })
+        } catch (err) {
+          results.push({
+            path: fromPath,
+            ok: false,
+            error: (err as Error).message,
+          })
+        }
+      }
+
+      const succeeded = results.filter(r => r.ok).length
+      const failed = results.filter(r => !r.ok).length
+
+      return { ok: true, succeeded, failed, results }
+    }
+  )
+
+  // ── Rename a file on disk ────────────────────────────────
+
+  ipcMain.handle('fs:rename-file',
+    async (_e, filepath: string, newName: string) => {
+      try {
+        // Validate newName — no path separators, no empty string
+        if (!newName.trim()) {
+          return { ok: false, error: 'Name cannot be empty' }
+        }
+        if (newName.includes('/') || newName.includes('\\')) {
+          return { ok: false, error: 'Name cannot contain slashes' }
+        }
+
+        const dir = dirname(filepath)
+        const ext = extname(filepath)
+        const newPath = join(dir, newName + ext)
+
+        // Check for collision
+        try {
+          await stat(newPath)
+          return { ok: false, error: 'A file with that name already exists' }
+        } catch {
+          // Good — file does not exist
+        }
+
+        await rename(filepath, newPath)
+
+        // Update DB
+        updateTrackFilepath(filepath, newPath)
+
+        // Update title in DB to match new filename
+        const track = getTrackByFilepath(newPath) as Track | undefined
+        if (track) {
+          updateTrackMeta({
+            id: track.id,
+            title: newName,
+            artist: track.artist,
+            genre: track.genre,
+            bpm: track.bpm,
+            key_camelot: track.key_camelot,
+            energy: track.energy,
+            comment: track.comment,
+            artwork_path: track.artwork_path,
+            needs_sync: track.needs_sync,
+            pending_changes: track.pending_changes,
+          })
+        }
+
+        return { ok: true, newPath }
+      } catch (err) {
+        return { ok: false, error: (err as Error).message }
+      }
+    }
+  )
+
+  // ── Create a new folder ──────────────────────────────────
+
+  ipcMain.handle('fs:create-folder',
+    async (_e, parentPath: string, folderName: string) => {
+      try {
+        if (!folderName.trim()) {
+          return { ok: false, error: 'Folder name cannot be empty' }
+        }
+
+        const newFolderPath = join(parentPath, folderName)
+
+        // Check for collision
+        try {
+          await stat(newFolderPath)
+          return { ok: false, error: 'A folder with that name already exists' }
+        } catch {
+          // Good — does not exist
+        }
+
+        await mkdir(newFolderPath, { recursive: false })
+        return { ok: true, path: newFolderPath }
+      } catch (err) {
+        return { ok: false, error: (err as Error).message }
+      }
+    }
+  )
+
+  // ── Read folder contents ─────────────────────────────────
+
+  ipcMain.handle('fs:read-folder',
+    async (_e, folderPath: string) => {
+      try {
+        const entries = await readdir(folderPath, { withFileTypes: true })
+
+        const AUDIO_EXT = new Set([
+          '.mp3', '.flac', '.wav', '.aiff', '.aif', '.m4a', '.ogg'
+        ])
+
+        const items = await Promise.all(
+          entries
+            .filter(e => {
+              // Include directories and audio files only
+              if (e.isDirectory()) return true
+              return AUDIO_EXT.has(extname(e.name).toLowerCase())
+            })
+            .map(async (e) => {
+              const fullPath = join(folderPath, e.name)
+              const s = await stat(fullPath)
+              return {
+                name: e.name,
+                path: fullPath,
+                isDirectory: e.isDirectory(),
+                size: s.size,
+                modified: s.mtimeMs,
+              }
+            })
+        )
+
+        // Folders first, then files, both alphabetical
+        items.sort((a, b) => {
+          if (a.isDirectory !== b.isDirectory) {
+            return a.isDirectory ? -1 : 1
+          }
+          return a.name.localeCompare(b.name)
+        })
+
+        return { ok: true, items }
+      } catch (err) {
+        return { ok: false, error: (err as Error).message }
+      }
+    }
+  )
 
   // ── Tags ────────────────────────────────────────────────
 

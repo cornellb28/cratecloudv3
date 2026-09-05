@@ -201,3 +201,11 @@ test('search filters track list', async () => {
   await searchInput.fill('')
   await page.waitForTimeout(300)
 })
+
+
+// Things worth testing next:
+// test('dragging a track to a new column updates its board_id')
+// test('editing BPM in inspector persists after app restart')
+// test('search filters correctly by key signature')
+// test('artwork appears on track rows')
+// test('tag badges appear after confirming pending import')

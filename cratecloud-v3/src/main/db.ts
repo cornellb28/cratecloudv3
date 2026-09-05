@@ -1,6 +1,6 @@
 import Database, { RunResult } from 'better-sqlite3'
 import { app } from 'electron'
-import { join } from 'path'
+import { join, basename } from 'path'
 import { mkdirSync } from 'fs'
 import { tmpdir } from 'os'
 
@@ -577,6 +577,23 @@ const stmts = {
     ORDER BY added_at DESC
   `),
 
+  markAnalyzed: db.prepare(`
+  UPDATE tracks SET
+    analyzed_at = datetime('now'),
+    updated_at  = datetime('now')
+  WHERE id = ?
+`),
+
+  // ── File/Folder Moves ───────────────────────────────
+
+  updateFilepath: db.prepare(`
+  UPDATE tracks SET
+    filepath   = @newPath,
+    filename   = @filename,
+    updated_at = datetime('now')
+  WHERE filepath = @oldPath
+`),
+
   // ── App settings ────────────────────────────────────
 
   getSetting: db.prepare(`
@@ -656,6 +673,10 @@ export function markTrackMissing(filepath: string): RunResult {
 
 export function markTrackFound(filepath: string): RunResult {
   return stmts.markFound.run(filepath)
+}
+
+export function markTrackAnalyzed(id: number): RunResult {
+  return stmts.markAnalyzed.run(id)
 }
 
 export function getTracksNeedingSync(): Track[] {
@@ -832,6 +853,18 @@ export function getAllBoards(): Board[] {
 
 export function getTracksByColumn(column: string): Track[] {
   return stmts.getTracksByColumn.all(column) as Track[]
+}
+
+// ─── Move functions ──────────────────────────────────────
+export function updateTrackFilepath(
+  oldPath: string,
+  newPath: string
+): RunResult {
+  return stmts.updateFilepath.run({
+    oldPath,
+    newPath,
+    filename: basename(newPath),
+  })
 }
 
 // ─── Settings functions ───────────────────────────────────

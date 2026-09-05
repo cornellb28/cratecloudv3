@@ -75,6 +75,13 @@ const api = {
     get: (key: string) => ipcRenderer.invoke('settings:get', key),
     set: (key: string, value: string) => ipcRenderer.invoke('settings:set', key, value)
   },
+  fs: {
+    moveFile: (from: string, to: string) => ipcRenderer.invoke('fs:move-file', from, to),
+    moveFiles: (from: string[], to: string) => ipcRenderer.invoke('fs:move-files', from, to),
+    renameFile: (filepath: string, newName: string) => ipcRenderer.invoke('fs:rename-file', filepath, newName),
+    createFolder: (parent: string, name: string) => ipcRenderer.invoke('fs:create-folder', parent, name),
+    readFolder: (folderPath: string) => ipcRenderer.invoke('fs:read-folder', folderPath),
+  },
 }
 
 // Use `contextBridge` APIs to expose Electron APIs to

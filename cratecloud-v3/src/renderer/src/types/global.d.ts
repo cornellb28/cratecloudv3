@@ -86,6 +86,14 @@ declare global {
         get: (key: string) => Promise<string | null>
         set: (key: string, value: string) => Promise<{ ok: boolean; error?: string }>
       }
+
+      fs: {
+        moveFile: (from: string, to: string) => Promise<{ ok: boolean; newPath?: string; error?: string }>
+        moveFiles: (from: string[], to: string) => Promise<{ ok: boolean; succeeded: number; failed: number; results: FileMoveResult[] }>
+        renameFile: (filepath: string, newName: string) => Promise<{ ok: boolean; newPath?: string; error?: string }>
+        createFolder: (parent: string, name: string) => Promise<{ ok: boolean; path?: string; error?: string }>
+        readFolder: (folderPath: string) => Promise<{ ok: boolean; items?: FolderItem[]; error?: string }>
+      }
     }
   }
 
@@ -192,5 +200,20 @@ declare global {
     bpm_tag: string | null
     artwork_base64: string | null
     analyzed: boolean
+  }
+
+  interface FolderItem {
+    name: string
+    path: string
+    isDirectory: boolean
+    size: number
+    modified: number
+  }
+
+  interface FileMoveResult {
+    path: string
+    ok: boolean
+    newPath?: string
+    error?: string
   }
 }
