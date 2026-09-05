@@ -68,6 +68,7 @@ declare global {
         checkCandidates: (candidates: string[], field: string) => Promise<TagCandidate[]>
         confirmImport: (pendingId: number, trackId: number, approvedTags: string[], field: string) => Promise<{ ok: boolean; error?: string }>
         pending: () => Promise<PendingImport[]>
+        findOrCreate: (field: string, value: string, color: string) => Promise<{ ok: boolean; id?: number; error?: string }>
       }
 
       crates: {

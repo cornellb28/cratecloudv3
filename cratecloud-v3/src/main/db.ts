@@ -246,6 +246,33 @@ db.exec(`
     ('Tagged',      '#378ADD', 1),
     ('Crate ready', '#1D9E75', 2),
     ('Gig ready',   '#7F77DD', 3);
+
+  -- Seed default genre tags
+-- DJ can edit, add, or delete these
+INSERT OR IGNORE INTO tags (field, value, color) VALUES
+  ('genre', 'Afro House',    '#d85a30'),
+  ('genre', 'Amapiano',      '#ba7517'),
+  ('genre', 'Bass House',    '#7f77dd'),
+  ('genre', 'Breaks',        '#378add'),
+  ('genre', 'Deep House',    '#1d9e75'),
+  ('genre', 'Drum and Bass', '#d4537e'),
+  ('genre', 'Dubstep',       '#534ab7'),
+  ('genre', 'Funk',          '#ba7517'),
+  ('genre', 'Hip Hop',       '#d85a30'),
+  ('genre', 'House',         '#7f77dd'),
+  ('genre', 'Jungle',        '#1d9e75'),
+  ('genre', 'Latin',         '#d85a30'),
+  ('genre', 'Melodic House', '#378add'),
+  ('genre', 'Minimal',       '#888780'),
+  ('genre', 'Nu Disco',      '#d4537e'),
+  ('genre', 'Organic House', '#1d9e75'),
+  ('genre', 'R&B',           '#d85a30'),
+  ('genre', 'Reggae',        '#1d9e75'),
+  ('genre', 'Soul',          '#ba7517'),
+  ('genre', 'Tech House',    '#534ab7'),
+  ('genre', 'Techno',        '#3a3a3a'),
+  ('genre', 'Trance',        '#378add'),
+  ('genre', 'UK Garage',     '#7f77dd');
 `)
 
 // ─── Migration ───────────────────────────────────────────

@@ -27,6 +27,14 @@ interface LibraryState {
   setActiveTrack: (id: number | null) => void
   setAnalyzing: (value: boolean) => void
   setSearchQuery: (query: string) => void
+
+  // ── Tags ──────────────────────────────────────────
+  tags: Tag[]
+  setTags: (tags: Tag[]) => void
+  addTag: (tag: Tag) => void
+  removeTag: (id: number) => void
+  trackTags: Map<number, Tag[]>
+  setTrackTags: (trackId: number, tags: Tag[]) => void
 }
 
 // ─── Store ───────────────────────────────────────────────
@@ -34,6 +42,12 @@ interface LibraryState {
 export const useLibraryStore = create<LibraryState>((set) => ({
   // Initial state — empty until data loads from SQLite
   tracks: [],
+  tags: [],
+  setTags: (tags) => set({ tags }),
+  addTag: (tag) => set((state) => ({ tags: [...state.tags, tag] })),
+  trackTags: new Map(),
+  setTrackTags: (trackId, tags) => set((state) => ({ trackTags: new Map(state.trackTags).set(trackId, tags) })),
+  removeTag: (id) => set((state) => ({ tags: state.tags.filter((t) => t.id !== id) })),
   activeTrackId: null,
   isAnalyzing: false,
   boards: [],

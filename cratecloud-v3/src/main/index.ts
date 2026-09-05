@@ -29,6 +29,7 @@ import {
   getSetting,
   setSetting,
   getTracksByBoardId,
+  findOrCreateTag,
   getUnanalyzedTracks,
   updateArtworkPath,
   updateTrackFilepath,
@@ -349,7 +350,7 @@ app.whenReady().then(() => {
     }
   })
 
-  async function importSingleFile( event: Electron.IpcMainInvokeEvent, filepath: string ): Promise<{ ok: boolean; trackId?: number; error?: string }> {
+  async function importSingleFile(event: Electron.IpcMainInvokeEvent, filepath: string): Promise<{ ok: boolean; trackId?: number; error?: string }> {
     try {
       // Phase 1
       const fastResult = await readTagsFast(filepath)
@@ -739,6 +740,17 @@ app.whenReady().then(() => {
   ipcMain.handle('tags:for-track', (_e, trackId: number) => getTrackTags(trackId))
 
   ipcMain.handle('tags:tracks-by-tag', (_e, tagId: number) => getTagTracks(tagId))
+
+  ipcMain.handle('tags:find-or-create',
+    (_e, field: string, value: string, color: string) => {
+      try {
+        const id = findOrCreateTag(field, value, color)
+        return { ok: true, id }
+      } catch (err) {
+        return { ok: false, error: (err as Error).message }
+      }
+    }
+  )
 
   ipcMain.handle('tags:apply', (_e, trackId: number, tagId: number) => {
     try {

@@ -7,8 +7,9 @@ interface TrackRowProps {
 }
 
 export function TrackRow({ track }: TrackRowProps): React.JSX.Element {
-  const { activeTrackId, setActiveTrack } = useLibraryStore()
+  const { activeTrackId, setActiveTrack, trackTags } = useLibraryStore()
   const isActive = activeTrackId === track.id
+  const appliedTags = trackTags.get(track.id) ?? []
 
   const artworkUrl = track.artwork_path ? `artwork://${track.artwork_path}` : null
 
@@ -88,6 +89,24 @@ export function TrackRow({ track }: TrackRowProps): React.JSX.Element {
             {track.genre}
           </Badge>
         )}
+        {/* Applied tag badges */}
+        {appliedTags.map(tag => (
+          <Badge
+            key={tag.id}
+            variant="outline"
+            style={{
+              fontSize: '10px',
+              background: tag.color + '22',
+              color: tag.color,
+              borderColor: tag.color + '44',
+              fontWeight: 500,
+              height: '18px',
+              padding: '0 6px'
+            }}
+          >
+            {tag.value}
+          </Badge>
+        ))}
       </div>
     </div>
   )

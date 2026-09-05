@@ -3,6 +3,7 @@ import { useLibraryStore } from '../store/useLibraryStore'
 import { Input } from '@renderer/components/ui/input'
 import { Slider } from '@renderer/components/ui/slider'
 import { Separator } from '@renderer/components/ui/separator'
+import { TagInput } from './TagInput'
 
 export function Inspector(): React.JSX.Element {
   const { tracks, activeTrackId, setActiveTrack, updateTrack } = useLibraryStore()
@@ -60,16 +61,16 @@ export function Inspector(): React.JSX.Element {
     <div
       data-testid="inspector-panel"
       style={{
-      width: isOpen ? '260px' : '0px',
-      flexShrink: 0,
-      background: '#12121a',
-      borderLeft: isOpen ? '0.5px solid #1e1e2a' : 'none',
-      overflowY: isOpen ? 'auto' : 'hidden',
-      overflowX: 'hidden',
-      display: 'flex',
-      flexDirection: 'column',
-      transition: 'width 0.25s ease',
-    }}>
+        width: isOpen ? '260px' : '0px',
+        flexShrink: 0,
+        background: '#12121a',
+        borderLeft: isOpen ? '0.5px solid #1e1e2a' : 'none',
+        overflowY: isOpen ? 'auto' : 'hidden',
+        overflowX: 'hidden',
+        display: 'flex',
+        flexDirection: 'column',
+        transition: 'width 0.25s ease',
+      }}>
 
       {isOpen && track && (
         <div style={{
@@ -150,6 +151,27 @@ export function Inspector(): React.JSX.Element {
               defaultValue={track.genre ?? ''}
               onSave={(v) => saveField('genre', v)}
               onKeyDown={(e) => onKeyDown(e, 'genre')}
+            />
+
+            <TagInput
+              trackId={track.id}
+              field="comment"
+              label="Comment tags"
+              color="#7f77dd"
+            />
+
+            <TagInput
+              trackId={track.id}
+              field="grouping"
+              label="Grouping tags"
+              color="#1d9e75"
+            />
+
+            <TagInput
+              trackId={track.id}
+              field="remixer"
+              label="Remixer tags"
+              color="#d85a30"
             />
 
             <EditField

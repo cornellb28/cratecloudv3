@@ -11,7 +11,7 @@ type View = 'library' | 'board'
 const COLLAPSE_THRESHOLD = 900 // px
 
 function App(): React.JSX.Element {
-  const { tracks, setTracks, setAnalyzing, activeTrackId, setBoards, updateTrack, sidebarCollapsed, setSidebarCollapsed } = useLibraryStore()
+  const { tracks, setTracks, setAnalyzing, activeTrackId, setBoards, updateTrack, sidebarCollapsed, setSidebarCollapsed, setTags } = useLibraryStore()
   const [activeView, setActiveView] = useState<View>('library')
   const [progress, setProgress] = useState<{
     done: number
@@ -39,12 +39,14 @@ function App(): React.JSX.Element {
   // Load existing tracks from SQLite on startup
   useEffect(() => {
     async function load(): Promise<void> {
-      const [tracks, boards] = await Promise.all([
+      const [tracks, boards, tags] = await Promise.all([
         window.api.db.allTracks(),
-        window.api.boards.all()
+        window.api.boards.all(),
+        window.api.tags.all()
       ])
       setTracks(tracks)
       setBoards(boards)
+      setTags(tags)
     }
     load()
   })

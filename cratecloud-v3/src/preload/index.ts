@@ -53,7 +53,8 @@ const api = {
     remove: (trackId: number, tagId: number) => ipcRenderer.invoke('tags:remove', trackId, tagId),
     checkCandidates: (candidates: string[], field: string) => ipcRenderer.invoke('tags:check-candidates', candidates, field),
     confirmImport: (pendingId: number, trackId: number, approvedTags: string[], field: string) => ipcRenderer.invoke('tags:confirm-import', pendingId, trackId, approvedTags, field),
-    pending: () => ipcRenderer.invoke('tags:pending')
+    pending: () => ipcRenderer.invoke('tags:pending'),
+    findOrCreate: (field: string, value: string, color: string) => ipcRenderer.invoke('tags:find-or-create', field, value, color)
   },
 
   // Crates
@@ -81,7 +82,7 @@ const api = {
     renameFile: (filepath: string, newName: string) => ipcRenderer.invoke('fs:rename-file', filepath, newName),
     createFolder: (parent: string, name: string) => ipcRenderer.invoke('fs:create-folder', parent, name),
     readFolder: (folderPath: string) => ipcRenderer.invoke('fs:read-folder', folderPath),
-  },
+  }
 }
 
 // Use `contextBridge` APIs to expose Electron APIs to
