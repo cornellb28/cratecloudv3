@@ -168,6 +168,8 @@ function App(): React.JSX.Element {
         <Sidebar
           activeView={activeView}
           onViewChange={setActiveView}
+          collapsed={sidebarCollapsed}
+          onToggleCollapsed={() => setSidebarCollapsed(!sidebarCollapsed)}
         />
 
         {/* Content area */}

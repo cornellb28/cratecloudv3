@@ -6,23 +6,26 @@ type View = 'library' | 'board'
 interface SidebarProps {
   activeView: View
   onViewChange: (view: View) => void
+  collapsed: boolean
+  onToggleCollapsed: () => void
 }
 
-export function Sidebar({ activeView, onViewChange }: SidebarProps): React.JSX.Element {
+export function Sidebar({ activeView, onViewChange, collapsed, onToggleCollapsed }: SidebarProps): React.JSX.Element {
   const { tracks } = useLibraryStore()
 
-  const navItem = (view: View, label: string, count?: number): React.JSX.Element => {
+  const navItem = (view: View, label: string, icon: string, count?: number): React.JSX.Element => {
     const isActive = activeView === view
 
     return (
       <button
         onClick={() => onViewChange(view)}
+        title={collapsed ? label : undefined}
         style={{
           display: 'flex',
           alignItems: 'center',
-          justifyContent: 'space-between',
+          justifyContent: collapsed ? 'center' : 'space-between',
           width: '100%',
-          padding: '7px 12px',
+          padding: collapsed ? '7px 0' : '7px 12px',
           background: isActive ? '#1a1a26' : 'none',
           border: 'none',
           borderRadius: '6px',
@@ -33,19 +36,25 @@ export function Sidebar({ activeView, onViewChange }: SidebarProps): React.JSX.E
           borderRight: isActive ? '2px solid #7f77dd' : '2px solid transparent'
         }}
       >
-        <span>{label}</span>
-        {count !== undefined && (
-          <span
-            style={{
-              fontSize: '11px',
-              background: '#1e1e2a',
-              padding: '1px 6px',
-              borderRadius: '10px',
-              color: '#444'
-            }}
-          >
-            {count}
-          </span>
+        {collapsed ? (
+          <span>{icon}</span>
+        ) : (
+          <>
+            <span>{label}</span>
+            {count !== undefined && (
+              <span
+                style={{
+                  fontSize: '11px',
+                  background: '#1e1e2a',
+                  padding: '1px 6px',
+                  borderRadius: '10px',
+                  color: '#444'
+                }}
+              >
+                {count}
+              </span>
+            )}
+          </>
         )}
       </button>
     )
@@ -54,31 +63,58 @@ export function Sidebar({ activeView, onViewChange }: SidebarProps): React.JSX.E
   return (
     <div
       style={{
-        width: '200px',
+        width: collapsed ? '48px' : '200px',
         flexShrink: 0,
         background: '#12121a',
         borderRight: '0.5px solid #1e1e2a',
         padding: '12px 8px',
         display: 'flex',
         flexDirection: 'column',
-        gap: '2px'
+        gap: '2px',
+        transition: 'width 0.15s ease'
       }}
     >
-      <p
+      <div
         style={{
-          fontSize: '10px',
-          fontWeight: 500,
-          letterSpacing: '1px',
-          textTransform: 'uppercase',
-          color: '#333',
-          padding: '8px 12px 4px'
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: collapsed ? 'center' : 'space-between',
+          padding: '4px 4px 8px'
         }}
       >
-        Library
-      </p>
+        {!collapsed && (
+          <p
+            style={{
+              fontSize: '10px',
+              fontWeight: 500,
+              letterSpacing: '1px',
+              textTransform: 'uppercase',
+              color: '#333',
+              margin: 0
+            }}
+          >
+            Library
+          </p>
+        )}
+        <button
+          onClick={onToggleCollapsed}
+          title={collapsed ? 'Expand sidebar' : 'Collapse sidebar'}
+          style={{
+            background: 'none',
+            border: 'none',
+            color: '#444',
+            cursor: 'pointer',
+            fontSize: '12px',
+            padding: '2px 4px',
+            lineHeight: 1
+          }}
+        >
+          {collapsed ? '»' : '«'}
+        </button>
+      </div>
 
-      {navItem('library', 'All tracks', tracks.length)}
-      {navItem('board', 'Board view')}
+      {navItem('library', 'All tracks', '♪', tracks.length)}
+      {navItem('board', 'Board view', '▤')}
     </div>
   )
 }
