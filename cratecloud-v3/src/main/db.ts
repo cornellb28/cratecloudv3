@@ -420,6 +420,7 @@ const stmts = {
       title           = @title,
       artist          = @artist,
       genre           = @genre,
+      year            = @year,
       bpm             = @bpm,
       key_camelot     = @key_camelot,
       energy          = @energy,
@@ -691,7 +692,11 @@ export function getTrackByFilepath(filepath: string): Track | undefined {
 }
 
 export function updateTrackMeta(data: Record<string, unknown>): RunResult {
-  return stmts.updateTrackMeta.run(data)
+  // Merge onto the existing row so callers that only touch a subset of
+  // fields (e.g. re-analysis only updating bpm/key) don't need to know
+  // every column the statement binds, and don't clear ones they omit.
+  const existing = stmts.getTrackById.get(data.id as number) as Record<string, unknown> | undefined
+  return stmts.updateTrackMeta.run({ ...existing, ...data })
 }
 
 export function markTrackMissing(filepath: string): RunResult {
