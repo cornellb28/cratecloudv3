@@ -218,7 +218,7 @@ export function BulkEditModal({ trackIds, open, onClose }: BulkEditModalProps): 
           background: '#13131b',
           border: '0.5px solid #1e1e2a',
           borderRadius: '12px',
-          maxWidth: '520px',
+          maxWidth: '620px',
           width: '100%',
           maxHeight: '85vh',
           overflowY: 'auto',

@@ -1,20 +1,45 @@
 import { BulkEditModal } from './BulkEditModal'
 import React, { useState } from 'react'
 import { useLibraryStore } from '../store/useLibraryStore'
+import { Button } from './ui/button'
+import { Badge } from './ui/badge'
 
 interface BulkBarProps {
-  selectedIds: number
-  onClearSelect: boolean
+  selectedIds: Set<number>
+  onClearSelect: () => void
+  onSelectAll: () => void
+  totalCount: number
 }
 
-export function BulkBar({ selectedIds, onClearSelect }: BulkBarProps) {
+export function BulkBar({ selectedIds, onClearSelect, totalCount, onSelectAll }: BulkBarProps): React.JSX.Element | null {
   const { quickTags, trackTags, setTrackTags } = useLibraryStore()
   const [applying, setApplying] = useState(false)
   const [editModalOpen, setEditModalOpen] = useState(false)
 
+  // Hide when nothing is selected
   if (selectedIds.size === 0) return null
 
   const selectedArray = Array.from(selectedIds)
+
+  // Apply a tag to every selected track
+  async function applyTagToAll(tag: Tag): Promise<void> {
+    setApplying(true)
+
+    for (const trackId of selectedArray) {
+      const current = trackTags.get(trackId) ?? []
+      const already = current.some(t => t.id === tag.id)
+      if (already) continue
+
+      // Optimistic update
+      const updated = [...current, tag]
+      setTrackTags(trackId, updated)
+
+      // Persist
+      await window.api.tags.apply(trackId, tag.id)
+    }
+
+    setApplying(false)
+  }
 
   return (
     <>
@@ -44,6 +69,23 @@ export function BulkBar({ selectedIds, onClearSelect }: BulkBarProps) {
         }}>
           {selectedIds.size} selected
         </span>
+
+        {/* Select all */}
+        <button
+          onClick={onSelectAll}
+          style={{
+            background: 'none',
+            border: '0.5px solid #3a3060',
+            borderRadius: '5px',
+            color: '#a09be8',
+            fontSize: '11px',
+            padding: '3px 10px',
+            cursor: 'pointer',
+            fontFamily: 'inherit',
+          }}
+        >
+          Select all {totalCount}
+        </button>
 
         {/* Edit labels button */}
         <Button

@@ -1,16 +1,18 @@
 import React from 'react'
 import { useLibraryStore } from '../store/useLibraryStore'
 import { Badge } from '@renderer/components/ui/badge'
+import { Checkbox } from '@renderer/components/ui/checkbox'
 
 interface TrackRowProps {
   track: Track
+  isSelected?: boolean
+  onSelected?: (id: number) => void
 }
 
-export function TrackRow({ track }: TrackRowProps): React.JSX.Element {
+export function TrackRow({ track, isSelected, onSelected }: TrackRowProps): React.JSX.Element {
   const { activeTrackId, setActiveTrack, trackTags } = useLibraryStore()
   const isActive = activeTrackId === track.id
   const appliedTags = trackTags.get(track.id) ?? []
-
   const artworkUrl = track.artwork_path ? `artwork://${track.artwork_path}` : null
 
   return (
@@ -27,6 +29,12 @@ export function TrackRow({ track }: TrackRowProps): React.JSX.Element {
         transition: 'all 0.1s'
       }}
     >
+      <Checkbox
+        checked={isSelected}
+        onCheckedChange={() => onSelected?.(track.id)}
+        onClick={(e) => e.stopPropagation()}
+        className="border-[#333] data-[state=checked]:bg-[#7f77dd] data-[state=checked]:border-[#7f77dd]"
+      />
       {/* Artwork */}
       <div style={{
         width: '40px',
