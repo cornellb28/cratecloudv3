@@ -5,6 +5,7 @@ import { readdirSync, statSync, writeFileSync, mkdirSync } from 'fs'
 import { electronApp, optimizer, is } from '@electron-toolkit/utils'
 import icon from '../../resources/icon.png?asset'
 import { rename, stat, copyFile, unlink, mkdir, readdir } from 'fs/promises'
+import { startWatcher, stopWatcher, stopAllWatchers, setWatcherCallbacks } from './libraryWatcher'
 import {
   insertTrack,
   getAllTracks,
@@ -13,7 +14,6 @@ import {
   markTrackMissing,
   getAllTags,
   getMostUsedTags,
-  getAllRoots,
   addRoot,
   removeRoot,
   applyTag,
@@ -37,8 +37,13 @@ import {
   getUnanalyzedTracks,
   updateArtworkPath,
   updateTrackFilepath,
+  markTrackAnalyzed,
+  insertPendingChange,
+  getPendingChanges,
+  acceptPendingChange,
+  ignorePendingChange,
   getTrackByFilepath,
-  markTrackAnalyzed
+  getAllRoots
 } from './db'
 import { analyzeFile, readTagsFast } from './sidecar'
 
@@ -219,6 +224,128 @@ function updateTrackAnalysis(trackId: number, result: AnalysisResult): void {
   })
 }
 
+async function runFolderImport(
+  event: Electron.IpcMainInvokeEvent,
+  folderPath: string
+): Promise<{ imported: number; failed: number; total: number }> {
+  const filepaths = walkFolder(folderPath)
+  const total = filepaths.length
+
+  if (total === 0) return { imported: 0, failed: 0, total: 0 }
+
+  let imported = 0
+  let failed = 0
+  const concurrency = 8
+
+  for (let i = 0; i < filepaths.length; i += concurrency) {
+    const batch = filepaths.slice(i, i + concurrency)
+
+    await Promise.all(
+      batch.map(async (filepath) => {
+        try {
+          const result = await readTagsFast(filepath)
+          if (!result.success) { failed++; return }
+
+          const trackData = buildTrackData(filepath, result)
+          const insertResult = insertTrack(trackData) as { lastInsertRowid: number | bigint }
+          const trackId = Number(insertResult.lastInsertRowid)
+
+          if (result.artwork_base64 && trackId > 0) {
+            const artworkPath = saveArtwork(trackId, result.artwork_base64)
+            if (artworkPath) updateArtworkPath(trackId, artworkPath)
+          }
+
+          imported++
+
+          event.sender.send('library:import-progress', {
+            done: imported,
+            total,
+            failed,
+            filepath: basename(filepath)
+          })
+        } catch { failed++ }
+      })
+    )
+  }
+
+  event.sender.send('library:phase1-complete', { imported, total, failed })
+  runPhase2Analysis(event)
+
+  return { imported, failed, total }
+}
+
+async function runPhase2Analysis(event: Electron.IpcMainInvokeEvent): Promise<void> {
+  // Only analyze tracks that Phase 1 did not already resolve
+  // (tracks that had BPM/key tags skip librosa entirely)
+  const unanalyzed = getUnanalyzedTracks() as Track[]
+
+  if (unanalyzed.length === 0) {
+    event.sender.send('library:analysis-complete', {
+      analyzed: 0,
+      total: 0
+    })
+    return
+  }
+
+  const total = unanalyzed.length
+  let done = 0
+  const concurrency = 4 // librosa is heavy — keep this lower
+
+  for (let i = 0; i < unanalyzed.length; i += concurrency) {
+    const batch = unanalyzed.slice(i, i + concurrency)
+
+    await Promise.all(
+      batch.map(async (track) => {
+        try {
+          const result = await analyzeFile(track.filepath)
+
+          if (result.success) {
+            // Update just the analysis fields
+            updateTrackMeta({
+              id: track.id,
+              title: track.title,
+              artist: track.artist,
+              genre: track.genre,
+              bpm: result.bpm,
+              key_camelot: result.key_camelot,
+              energy: null,
+              comment: track.comment,
+              artwork_path: track.artwork_path,
+              needs_sync: 0,
+              pending_changes: null
+            })
+
+            // Mark as analyzed
+            markTrackAnalyzed(track.id)
+
+            done++
+
+            // Tell renderer to update this track's badges
+            event.sender.send('library:track-analyzed', {
+              trackId: track.id,
+              bpm: result.bpm,
+              key_camelot: result.key_camelot,
+              key_full: result.key_full,
+              duration_sec: result.duration_sec,
+              duration_str: result.duration_str,
+              done,
+              total
+            })
+          }
+        } catch {
+          // Skip failed analysis — track still visible without BPM
+          done++
+        }
+      })
+    )
+  }
+
+  event.sender.send('library:analysis-complete', {
+    analyzed: done,
+    total
+  })
+}
+
 let mainWindow: BrowserWindow | null = null
 
 function createWindow(): void {
@@ -303,84 +430,20 @@ app.whenReady().then(() => {
   })
 
   // ── Tracks ──────────────────────────────────────────────
-
   ipcMain.handle('library:import-folder', async (event, folderPath: string) => {
     try {
-      // 1. Find all audio files
-      const filepaths = walkFolder(folderPath)
-      const total = filepaths.length
+      const result = await runFolderImport(event, folderPath)
 
-      if (total === 0) {
-        return { ok: true, imported: 0, message: 'No audio files found' }
-      }
-
-      let imported = 0
-      let failed = 0
-      const concurrency = 8
-
-      // 2. Process in batches of 4
-      for (let i = 0; i < filepaths.length; i += concurrency) {
-        const batch = filepaths.slice(i, i + concurrency)
-
-        await Promise.all(
-          batch.map(async (filepath) => {
-            try {
-              // Analyze the file
-              const result = await readTagsFast(filepath)
-
-              if (!result.success) {
-                failed++
-                return
-              }
-
-              // Save to SQLite
-              const trackData = buildTrackData(filepath, result)
-
-              // Insert track into SQLite
-              const insertResult = insertTrack(trackData) as { lastInsertRowid: number | bigint }
-              const trackId = Number(insertResult.lastInsertRowid)
-
-              // Save artwork to disk if present
-              if (result.artwork_base64 && trackId > 0) {
-                const artworkPath = saveArtwork(trackId, result.artwork_base64)
-                if (artworkPath) {
-                  updateArtworkPath(trackId, artworkPath)
-                }
-              }
-
-              imported++
-
-              // Send progress to the renderer after each file
-              // The renderer uses this to update the progress bar
-              event.sender.send('library:import-progress', {
-                done: imported,
-                total,
-                failed,
-                filepath: basename(filepath)
-              })
-            } catch {
-              failed++
-            }
-          })
-        )
-      }
-
-      // Register the imported folder as a library root so it shows up in Folders —
-      // unless it's already nested inside a root that's registered
+      // Register as root if not already nested
       const existingRoots = getAllRoots()
-      const alreadyNested = existingRoots.some((root) => folderPath.startsWith(root.path))
+      const alreadyNested = existingRoots.some((r) => folderPath.startsWith(r.path))
       if (!alreadyNested) {
-        addRoot(basename(folderPath), folderPath)
+        const rootResult = addRoot(basename(folderPath), folderPath)
+        const rootId = Number(rootResult.lastInsertRowid)
+        startWatcher(rootId, folderPath)
       }
 
-      // Tell renderer Phase 1 is done — tracks are visible
-      event.sender.send('library:phase1-complete', { imported, total, failed })
-
-      // Phase 2 — analyze in background (BPM + key)
-      // Do not await — runs after handler returns
-      runPhase2Analysis(event)
-
-      return { ok: true, imported, failed, total }
+      return { ok: true, ...result }
     } catch (err) {
       return { ok: false, error: (err as Error).message }
     }
@@ -433,78 +496,6 @@ app.whenReady().then(() => {
     } catch (err) {
       return { ok: false, error: (err as Error).message }
     }
-  }
-
-  async function runPhase2Analysis(event: Electron.IpcMainInvokeEvent): Promise<void> {
-    // Only analyze tracks that Phase 1 did not already resolve
-    // (tracks that had BPM/key tags skip librosa entirely)
-    const unanalyzed = getUnanalyzedTracks() as Track[]
-
-    if (unanalyzed.length === 0) {
-      event.sender.send('library:analysis-complete', {
-        analyzed: 0,
-        total: 0
-      })
-      return
-    }
-
-    const total = unanalyzed.length
-    let done = 0
-    const concurrency = 4 // librosa is heavy — keep this lower
-
-    for (let i = 0; i < unanalyzed.length; i += concurrency) {
-      const batch = unanalyzed.slice(i, i + concurrency)
-
-      await Promise.all(
-        batch.map(async (track) => {
-          try {
-            const result = await analyzeFile(track.filepath)
-
-            if (result.success) {
-              // Update just the analysis fields
-              updateTrackMeta({
-                id: track.id,
-                title: track.title,
-                artist: track.artist,
-                genre: track.genre,
-                bpm: result.bpm,
-                key_camelot: result.key_camelot,
-                energy: null,
-                comment: track.comment,
-                artwork_path: track.artwork_path,
-                needs_sync: 0,
-                pending_changes: null
-              })
-
-              // Mark as analyzed
-              markTrackAnalyzed(track.id)
-
-              done++
-
-              // Tell renderer to update this track's badges
-              event.sender.send('library:track-analyzed', {
-                trackId: track.id,
-                bpm: result.bpm,
-                key_camelot: result.key_camelot,
-                key_full: result.key_full,
-                duration_sec: result.duration_sec,
-                duration_str: result.duration_str,
-                done,
-                total
-              })
-            }
-          } catch {
-            // Skip failed analysis — track still visible without BPM
-            done++
-          }
-        })
-      )
-    }
-
-    event.sender.send('library:analysis-complete', {
-      analyzed: done,
-      total
-    })
   }
 
   ipcMain.handle('library:import-file', async (event, filepath: string) => {
@@ -865,10 +856,31 @@ app.whenReady().then(() => {
 
   ipcMain.handle('roots:all', () => getAllRoots())
 
-  ipcMain.handle('roots:add', (_e, name: string, rootPath: string) => {
+  ipcMain.handle('roots:add', async (event, folderPath: string) => {
     try {
-      addRoot(name, rootPath)
-      return { ok: true }
+      await stat(folderPath) // confirm it exists
+
+      // Check not already nested iinside existing root
+      const existingRoots = getAllRoots()
+      const alreadyNested = existingRoots.some((r) => folderPath.startsWith(r.path))
+
+      if (alreadyNested) {
+        return { ok: false, error: 'This folder is already inside a registered library root' }
+      }
+
+      // Extract name from path
+      const name = basename(folderPath)
+      const result = addRoot(name, folderPath)
+      const rootId = Number(result.lastInsertRowid)
+
+      // Start watching immediately
+      startWatcher(rootId, folderPath)
+
+      // Auto-import in background — same as clicking Import folder
+      // Do not await — returns immediately so Settings modal stays responsive
+      runFolderImport(event, folderPath)
+
+      return { ok: true, id: rootId }
     } catch (err) {
       return { ok: false, error: (err as Error).message }
     }
@@ -902,6 +914,159 @@ app.whenReady().then(() => {
     }
   })
 
+  // ── Set up watcher callbacks ──────────────────────────────
+
+  setWatcherCallbacks({
+    // New file detected — auto-import it
+    onFileAdded: async (filepath, rootId) => {
+      try {
+        // Check if already in DB
+        const existing = getTrackByFilepath(filepath)
+        if (existing) return
+
+        // Fast tag read
+        const result = await readTagsFast(filepath)
+        if (!result.success) return
+
+        const trackData = buildTrackData(filepath, result)
+        const insertResult = insertTrack(trackData) as { lastInsertRowid: number | bigint }
+        const trackId = Number(insertResult.lastInsertRowid)
+
+        if (result.artwork_base64 && trackId > 0) {
+          const artworkPath = saveArtwork(trackId, result.artwork_base64)
+          if (artworkPath) updateArtworkPath(trackId, artworkPath)
+        }
+
+        // Queue as pending change for DJ to review
+        insertPendingChange({
+          root_id: rootId,
+          change_type: 'added',
+          old_path: null,
+          new_path: filepath,
+          track_id: trackId
+        })
+
+        // Tell renderer a new track arrived
+        mainWindow?.webContents.send('watcher:track-added', {
+          trackId,
+          filepath
+        })
+
+        console.log(`[watcher] auto-imported: ${filepath}`)
+        } catch (err) {
+          console.error('[watcher] onFileAdded error:', err)
+      }
+    },
+
+    // File moved — update filepath in DB
+    onFileMoved: async (oldPath, newPath, rootId) => {
+      try {
+        const track = getTrackByFilepath(oldPath)
+
+        // Queue the change for DJ to review
+        insertPendingChange({
+          root_id: rootId,
+          change_type: 'moved',
+          old_path: oldPath,
+          new_path: newPath,
+          track_id: track?.id ?? null
+        })
+
+        if (track) {
+          // Update filepath immediately — the file is just in a new place
+          updateTrackFilepath(oldPath, newPath)
+
+          mainWindow?.webContents.send('watcher:track-moved', {
+            trackId: track.id,
+            oldPath,
+            newPath
+          })
+        }
+
+        console.log(`[watcher] move accepted: ${oldPath} → ${newPath}`)
+      } catch (err) {
+        console.error('[watcher] onFileMoved error:', err)
+      }
+    },
+
+    // File deleted — queue for review
+    onFileDeleted: async (filepath, rootId) => {
+      try {
+        const track = getTrackByFilepath(filepath)
+
+        insertPendingChange({
+          root_id: rootId,
+          change_type: 'deleted',
+          old_path: filepath,
+          new_path: null,
+          track_id: track?.id ?? null
+        })
+
+        mainWindow?.webContents.send('watcher:track-deleted', {
+          filepath,
+          trackId: track?.id ?? null
+        })
+
+        console.log(`[watcher] file deleted: ${filepath}`)
+      } catch (err) {
+        console.error('[watcher] onFileDeleted error:', err)
+      }
+    },
+
+    // Root went offline — notify renderer
+    onRootOffline: (rootId, rootPath) => {
+      console.log(`[watcher] root offline: ${rootPath}`)
+      mainWindow?.webContents.send('watcher:root-offline', { rootId, rootPath })
+    },
+
+    // Root came back online
+    onRootOnline: (rootId, rootPath) => {
+      console.log(`[watcher] root online: ${rootPath}`)
+      mainWindow?.webContents.send('watcher:root-online', { rootId, rootPath })
+    }
+  })
+
+  // ── Start watchers for all registered roots ───────────────
+
+  const roots = getAllRoots()
+
+  for (const root of roots) {
+    if (root.status === 'online') {
+      startWatcher(root.id, root.path)
+    }
+  }
+
+  ipcMain.handle('watcher:pending-changes', () => getPendingChanges())
+
+  ipcMain.handle('watcher:accept-change', (_e, id: number) => {
+    try {
+      acceptPendingChange(id)
+      return { ok: true }
+    } catch (err) {
+      return { ok: false, error: (err as Error).message }
+    }
+  })
+
+  ipcMain.handle('watcher:ignore-change', (_e, id: number) => {
+    try {
+      ignorePendingChange(id)
+      return { ok: true }
+    } catch (err) {
+      return { ok: false, error: (err as Error).message }
+    }
+  })
+
+  // Start/stop watcher when DJ adds/removes a root
+  ipcMain.handle('watcher:start', (_e, rootId: number, rootPath: string) => {
+    startWatcher(rootId, rootPath)
+    return { ok: true }
+  })
+
+  ipcMain.handle('watcher:stop', async (_e, rootId: number) => {
+    await stopWatcher(rootId)
+    return { ok: true }
+  })
+
   createWindow()
 
   app.on('activate', function () {
@@ -909,6 +1074,10 @@ app.whenReady().then(() => {
     // dock icon is clicked and there are no other windows open.
     if (BrowserWindow.getAllWindows().length === 0) createWindow()
   })
+})
+
+app.on('before-quit', async () => {
+  await stopAllWatchers()
 })
 
 // Quit when all windows are closed, except on macOS. There, it's common

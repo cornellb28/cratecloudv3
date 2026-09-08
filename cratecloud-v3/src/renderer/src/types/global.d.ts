@@ -7,9 +7,7 @@ declare global {
       openFolder: () => Promise<string | null>
       openFiles: () => Promise<string[]>
       importFile: (filepath: string) => Promise<{ ok: boolean; trackId?: number; error?: string }>
-      importFiles: (
-        filepaths: string[]
-      ) => Promise<{
+      importFiles: (filepaths: string[]) => Promise<{
         ok: boolean
         count: number
         results: { ok: boolean; trackId?: number; error?: string }[]
@@ -48,11 +46,18 @@ declare global {
         }) => void
       ) => void
 
-      onPhase1Complete: (cb: (data: { imported: number; total: number }) => void) => void
+      onPhase1Complete: (cb: (data: { imported: number; total: number, failed: number }) => void) => void
 
       onAnalysisComplete: (cb: (data: { analyzed: number; total: number }) => void) => void
 
       offAnalysisListeners: () => void
+
+      onTrackAdded: (cb: (data: { trackId: number; filepath: string }) => void) => void
+      onTrackMoved: (cb: (data: { trackId: number; oldPath: string; newPath: string }) => void) => void
+      onTrackDeleted: (cb: (data: { filepath: string; trackId: number | null }) => void) => void
+      onRootOffline: (cb: (data: { rootId: number; rootPath: string }) => void) => void
+      onRootOnline: (cb: (data: { rootId: number; rootPath: string }) => void) => void
+      offWatcherListeners: () => void
 
       db: {
         allTracks: () => Promise<Track[]>
@@ -66,6 +71,14 @@ declare global {
         updateBoardId: (id: number, boardId: number) => Promise<{ ok: boolean; error?: string }>
         tracksByBoardId: (id: number, boardId: number) => Promise<Track[]>
         markMissing: (filepath: string) => Promise<{ ok: boolean; error?: string }>
+      }
+
+      watcher: {
+        pendingChanges: () => Promise<PendingChange[]>
+        acceptChange: (id: number) => Promise<{ ok: boolean; error?: string }>
+        ignoreChange: (id: number) => Promise<{ ok: boolean; error?: string }>
+        start: (rootId: number, rootPath: string) => Promise<{ ok: boolean }>
+        stop: (rootId: number) => Promise<{ ok: boolean }>
       }
 
       tags: {
@@ -92,7 +105,7 @@ declare global {
 
       roots: {
         all: () => Promise<LibraryRoot[]>
-        add: (name: string, path: string) => Promise<{ ok: boolean; error?: string }>
+        add: (folderPath: string) => Promise<{ ok: boolean; id?: number; error?: string }>
         remove: (id: number) => Promise<{ ok: boolean; error?: string }>
       }
 
@@ -268,5 +281,19 @@ declare global {
     created_at: number
     last_scanned_at: number | null
     status: string
+  }
+
+  interface PendingChange {
+    id: number
+    root_id: number
+    change_type: 'added' | 'moved' | 'renamed' | 'deleted'
+    old_path: string | null
+    new_path: string | null
+    track_id: number | null
+    title: string | null
+    artist: string | null
+    artwork_path: string | null
+    detected_at: number
+    status: 'pending' | 'accepted' | 'ignored'
   }
 }

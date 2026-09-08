@@ -10,6 +10,7 @@ import { SettingsModal } from './components/SettingsModal'
 import { EmptyState } from './views/EmptyState'
 import { DashboardView } from '@renderer/views/DashboardView'
 import type { View } from './components/Sidebar'
+import { Breadcrumb } from './components/Breadcrumb'
 
 // type View = 'dashboard' | 'library' | 'board' | 'genre' | 'artist' | 'folders' | 'crates' | 'settings'
 
@@ -55,6 +56,34 @@ function App(): React.JSX.Element {
     return () => window.removeEventListener('resize', handleResize)
   }, [setSidebarCollapsed])
 
+  // ── Watchers ────────────────────
+  useEffect(() => {
+    // New file added by Finder - add to store
+    window.api.onTrackAdded(async () => {
+      const all = await window.api.db.allTracks()
+      setTracks(all)
+    })
+
+    // File moved — update filepath in store
+    window.api.onTrackMoved(({ trackId, newPath }) => {
+      updateTrack(trackId, { filepath: newPath })
+    })
+
+    // File deleted — reload store
+    window.api.onTrackDeleted(async () => {
+      const all = await window.api.db.allTracks()
+      setTracks(all)
+    })
+
+    // Root went offline
+    window.api.onRootOffline(({ rootPath }) => {
+      console.log('Root offline:', rootPath)
+      // Show notification — we will add this UI next
+    })
+
+    return () => window.api.offWatcherListeners()
+  })
+
   // Load existing tracks from SQLite on startup
   // ── Load data on startup ──────────────────────────────
   useEffect(() => {
@@ -73,7 +102,7 @@ function App(): React.JSX.Element {
       setLibraryRoots(roots)
     }
     load()
-  })
+  }, [])
 
   // Listen for progress events from the import handler
   // ── Import progress listeners ─────────────────────────
@@ -84,6 +113,11 @@ function App(): React.JSX.Element {
       // Reload the store after each track is saved
       // so it appears in the list immediately
       window.api.db.allTracks().then(setTracks)
+    })
+
+    // Phase 1 complete - hide the progress bar
+    window.api.onPhase1Complete(() => {
+      setTimeout(() => setProgress(null), 1500)
     })
 
     // Phase 2 — update individual tracks as BPM/key comes in
@@ -101,18 +135,19 @@ function App(): React.JSX.Element {
       })
     })
 
+    // Phase 2 complete — hide the analysis bar
     window.api.onAnalysisComplete(() => {
-      setAnalysisProgress(null)
+      setTimeout(() => setAnalysisProgress(null), 3000)
     })
 
     return () => {
       window.api.offAnalysisListeners()
       window.api.offImportProgress()
     }
-  }, [setTracks])
+  }, [setTracks, updateTrack])
 
   // ── Import handlers ───────────────────────────────────
-  async function handleImportFolder(): Promise<void> {
+  async function handleImport(): Promise<void> {
     const folderPath = await window.api.openFolder()
     if (!folderPath) return
 
@@ -129,7 +164,10 @@ function App(): React.JSX.Element {
 
     // Clear progress after 2 seconds
     setAnalyzing(false)
-    setTimeout(() => setProgress(null), 2000)
+    // Progress bar is cleared by onPhase1Complete event
+    // Analysis bar is cleared by onAnalysisComplete event
+    // setProgress(null)
+    // setTimeout(() => setProgress(null), 2000)
   }
 
   // Add import files handler
@@ -172,23 +210,54 @@ function App(): React.JSX.Element {
       }}
     >
       <h2 style={{ marginBottom: '0.5rem' }}>CrateCloud v2</h2>
-      <p data-testid="track-count" style={{ color: '#555', marginBottom: '1rem' }}>
+
+      {/* Hidden track count — for Playwright tests */}
+      <div data-testid="track-count" style={{ display: 'none' }}>
         {tracks.length} track{tracks.length !== 1 ? 's' : ''} in library
-      </p>
+      </div>
 
       {/* Toolbar at the top */}
       <Toolbar
-        onImport={handleImportFolder}
+        onImport={handleImport}
         activeView={activeView}
         onImportFiles={handleImportFiles}
       />
 
-      {analysisProgress && (
+      {/* Phase 1 — import progress bar */}
+      {progress !== null && progress.total > 0 && (
+        <div style={{ marginBottom: '1rem' }}>
+          <div style={{ color: '#7f77dd', marginBottom: '4px', fontSize: '12px' }}>
+            {progress.done} / {progress.total} — {progress.filepath}
+          </div>
+          <div
+            style={{
+              background: '#1e1e2a',
+              borderRadius: '4px',
+              height: '6px',
+              overflow: 'hidden'
+            }}
+          >
+            <div
+              style={{
+                background: '#7f77dd',
+                height: '100%',
+                width: `${pct}%`,
+                transition: 'width 0.2s ease',
+                borderRadius: '4px'
+              }}
+            />
+          </div>
+        </div>
+      )}
+
+      {/* Phase 2 — analysis progress bar */}
+      {analysisProgress !== null && analysisProgress.total > 0 && (
         <div
           style={{
             padding: '4px 16px',
             background: '#13131b',
-            borderBottom: '0.5px solid #1e1e2a'
+            borderBottom: '0.5px solid #1e1e2a',
+            flexShrink: 0
           }}
         >
           <div className="text-xs text-muted-foreground mb-1">
@@ -215,33 +284,6 @@ function App(): React.JSX.Element {
         </div>
       )}
 
-      {/* Progress bar */}
-      {progress && progress.total > 0 && (
-        <div style={{ marginBottom: '1rem' }}>
-          <div style={{ color: '#7f77dd', marginBottom: '4px', fontSize: '12px' }}>
-            {progress.done} / {progress.total} — {progress.filepath}
-          </div>
-          <div
-            style={{
-              background: '#1e1e2a',
-              borderRadius: '4px',
-              height: '6px',
-              overflow: 'hidden'
-            }}
-          >
-            <div
-              style={{
-                background: '#7f77dd',
-                height: '100%',
-                width: `${pct}%`,
-                transition: 'width 0.2s ease',
-                borderRadius: '4px'
-              }}
-            />
-          </div>
-        </div>
-      )}
-
       {/* Main area — sidebar + content side by side */}
       <div style={{ display: 'flex', flex: 1, overflow: 'hidden' }}>
         <Sidebar
@@ -254,13 +296,12 @@ function App(): React.JSX.Element {
 
         {/* Content area */}
         <div style={{ flex: 1, display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
-          {activeView === 'dashboard' && (tracks.length === 0 ? <EmptyState onImport={handleImportFolder} /> : <DashboardView />)}
+          {/* App-level breadcrumb */}
+          <Breadcrumb activeView={activeView} onNavigate={setActiveView} />
+          {/* Views */}
+          {activeView === 'dashboard' && (tracks.length === 0 ? <EmptyState onImport={handleImport} /> : <DashboardView />)}
           {activeView === 'library' && <LibraryView />}
-          {activeView === 'board' && (
-            <div style={{ flex: 1, display: 'flex', justifyContent: 'center', color: '#333' }}>
-              <BoardView />
-            </div>
-          )}
+          {activeView === 'board' && <BoardView />}
           {activeView === 'folders' &&
             (libraryRoots.length > 0 ? (
               <FolderView libraryRoots={libraryRoots} />

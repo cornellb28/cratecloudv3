@@ -326,6 +326,17 @@ db.exec(`
     PRIMARY KEY (track_id_a, track_id_b)
   );
 
+  CREATE TABLE IF NOT EXISTS pending_changes (
+  id           INTEGER PRIMARY KEY AUTOINCREMENT,
+  root_id      INTEGER REFERENCES library_roots(id) ON DELETE CASCADE,
+  change_type  TEXT    NOT NULL,
+  old_path     TEXT,
+  new_path     TEXT,
+  track_id     INTEGER REFERENCES tracks(id) ON DELETE SET NULL,
+  detected_at  INTEGER NOT NULL DEFAULT (strftime('%s','now')),
+  status       TEXT    NOT NULL DEFAULT 'pending'
+);
+
   -- ─────────────────────────────────────────────────────
   -- INDEXES
   -- These make queries fast. Without them SQLite reads
@@ -369,6 +380,11 @@ db.exec(`
     ON folders(path);
   CREATE INDEX IF NOT EXISTS idx_folders_parent
     ON folders(parent_folder_id);
+  CREATE INDEX IF NOT EXISTS idx_pending_changes_status
+  ON pending_changes(status);
+
+  CREATE INDEX IF NOT EXISTS idx_pending_changes_root
+    ON pending_changes(root_id);
 `)
 
 // ─── Prepared statements/Queries ─────────────────────────────────────────────
@@ -660,6 +676,32 @@ const stmts = {
     ON CONFLICT(key) DO UPDATE SET
       value      = excluded.value,
       updated_at = strftime('%s','now')
+  `),
+  insertPendingChange: db.prepare(`
+    INSERT INTO pending_changes
+      (root_id, change_type, old_path, new_path, track_id)
+    VALUES
+      (@root_id, @change_type, @old_path, @new_path, @track_id)
+  `),
+
+  getPendingChanges: db.prepare(`
+    SELECT pc.*, t.title, t.artist, t.artwork_path
+    FROM pending_changes pc
+    LEFT JOIN tracks t ON t.id = pc.track_id
+    WHERE pc.status = 'pending'
+    ORDER BY pc.detected_at ASC
+  `),
+
+  acceptPendingChange: db.prepare(`
+    UPDATE pending_changes SET status = 'accepted' WHERE id = ?
+  `),
+
+  ignorePendingChange: db.prepare(`
+    UPDATE pending_changes SET status = 'ignored' WHERE id = ?
+  `),
+
+  clearPendingChanges: db.prepare(`
+    DELETE FROM pending_changes WHERE status != 'pending'
   `)
 }
 
@@ -939,6 +981,28 @@ export function updateTrackFilepath(
     newPath,
     filename: basename(newPath),
   })
+}
+
+export function insertPendingChange(data: {
+  root_id: number
+  change_type: string
+  old_path: string | null
+  new_path: string | null
+  track_id: number | null
+}): RunResult {
+  return stmts.insertPendingChange.run(data)
+}
+
+export function getPendingChanges(): unknown[] {
+  return stmts.getPendingChanges.all()
+}
+
+export function acceptPendingChange(id: number): RunResult {
+  return stmts.acceptPendingChange.run(id)
+}
+
+export function ignorePendingChange(id: number): RunResult {
+  return stmts.ignorePendingChange.run(id)
 }
 
 // ─── Settings functions ───────────────────────────────────

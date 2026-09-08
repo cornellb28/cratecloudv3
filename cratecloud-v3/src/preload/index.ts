@@ -1,7 +1,6 @@
 import { contextBridge, ipcRenderer } from 'electron'
 import { electronAPI } from '@electron-toolkit/preload'
 
-
 // Custom APIs for renderer
 const api = {
   // ── Audio analysis ─────────────────────────────────────────────────────
@@ -13,7 +12,10 @@ const api = {
   analyzeFile: (filepath: string) => ipcRenderer.invoke('sidecar:analyze', filepath),
   importFolder: (folderPath: string) => ipcRenderer.invoke('library:import-folder', folderPath),
   onImportProgress: (cb: (p: { done: number; total: number; failed: number; filepath: string }) => void) => ipcRenderer.on('library:import-progress', (_e, p) => cb(p)),
-  offImportProgress: () => ipcRenderer.removeAllListeners('library:import-progress'),
+  offImportProgress: () => {
+    ipcRenderer.removeAllListeners('library:import-progress')
+    ipcRenderer.removeAllListeners('library:phase1-complete')
+  },
   onTrackAnalyzed: (cb: (data: {
     trackId: number
     bpm: number | null
@@ -24,8 +26,21 @@ const api = {
     done: number
     total: number
   }) => void) => ipcRenderer.on('library:track-analyzed', (_e, d) => cb(d)),
-  onPhase1Complete: (cb: (data: { imported: number, total: number }) => void) => ipcRenderer.on('library:phase1-complete', (_e, d) => cb(d)),
+  onPhase1Complete: (cb: (data: { imported: number, total: number, failed: number }) => void) => ipcRenderer.on('library:phase1-complete', (_e, d) => cb(d)),
   onAnalysisComplete: (cb: (data: { analyzed: number, total: number }) => void) => ipcRenderer.on('library:analysis-complete', (_e, d) => cb(d)),
+
+  onTrackAdded: (cb: (data: { trackId: number; filepath: string }) => void) => ipcRenderer.on('watcher:track-added', (_e, d) => cb(d)),
+  onTrackMoved: (cb: (data: { trackId: number; oldPath: string; newPath: string }) => void) => ipcRenderer.on('watcher:track-moved', (_e, d) => cb(d)),
+  onTrackDeleted: (cb: (data: { filepath: string; trackId: number | null }) => void) => ipcRenderer.on('watcher:track-deleted', (_e, d) => cb(d)),
+  onRootOffline: (cb: (data: { rootId: number; rootPath: string }) => void) => ipcRenderer.on('watcher:root-offline', (_e, d) => cb(d)),
+  onRootOnline: (cb: (data: { rootId: number; rootPath: string }) => void) => ipcRenderer.on('watcher:root-online', (_e, d) => cb(d)),
+  offWatcherListeners: () => {
+    ipcRenderer.removeAllListeners('watcher:track-added')
+    ipcRenderer.removeAllListeners('watcher:track-moved')
+    ipcRenderer.removeAllListeners('watcher:track-deleted')
+    ipcRenderer.removeAllListeners('watcher:root-offline')
+    ipcRenderer.removeAllListeners('watcher:root-online')
+  },
 
   offAnalysisListeners: () => {
     ipcRenderer.removeAllListeners('library:track-analyzed')
@@ -69,7 +84,7 @@ const api = {
   // Library roots
   roots: {
     all: () => ipcRenderer.invoke('roots:all'),
-    add: (name: string, path: string) => ipcRenderer.invoke('roots:add', name, path),
+    add: (folderPath: string) => ipcRenderer.invoke('roots:add', folderPath),
     remove: (id: number) => ipcRenderer.invoke('roots:remove', id)
   },
 
@@ -90,6 +105,13 @@ const api = {
     renameFile: (filepath: string, newName: string) => ipcRenderer.invoke('fs:rename-file', filepath, newName),
     createFolder: (parent: string, name: string) => ipcRenderer.invoke('fs:create-folder', parent, name),
     readFolder: (folderPath: string) => ipcRenderer.invoke('fs:read-folder', folderPath),
+  },
+  watcher: {
+    pendingChanges: () => ipcRenderer.invoke('watcher:pending-changes'),
+    acceptChange: (id: number) => ipcRenderer.invoke('watcher:accept-change', id),
+    ignoreChange: (id: number) => ipcRenderer.invoke('watcher:ignore-change', id),
+    start: (rootId: number, rootPath: string) => ipcRenderer.invoke('watcher:start', rootId, rootPath),
+    stop: (rootId: number) => ipcRenderer.invoke('watcher:stop', rootId)
   }
 }
 

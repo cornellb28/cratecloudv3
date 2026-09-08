@@ -20,7 +20,7 @@ test.beforeEach(async () => {
 
   // Always start in library view — prevents test order dependency
   await page.waitForTimeout(500)
-  const allTracksBtn = page.getByText('All tracks')
+  const allTracksBtn = page.getByText('All tracks').first()
   if (await allTracksBtn.isVisible()) {
     await allTracksBtn.click()
   }
@@ -57,7 +57,8 @@ test('import folder button is visible', async () => {
 
 test('library starts with a track count', async () => {
   const trackCount = page.getByTestId('track-count')
-  await expect(trackCount).toBeVisible({ timeout: 5000 })
+  const text = await trackCount.textContent()
+  expect(text).toMatch(/\d+ tracks? in library/)
 })
 
 // ─── Level 2 — Navigation ────────────────────────────────
@@ -204,7 +205,7 @@ test('board view columns render without errors', async () => {
 // })
 
 test('search filters track list', async () => {
-  await page.getByText('All tracks').click()
+  await page.getByText('All tracks').first().click()
   await page.waitForTimeout(300)
 
   const searchInput = page.getByTestId('search-input')

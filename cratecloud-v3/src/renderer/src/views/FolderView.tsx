@@ -307,7 +307,7 @@ export function FolderView({ libraryRoots }: FolderViewProps): React.JSX.Element
               variant="outline"
               size="sm"
             >
-              {isAnalyzing ? 'Importing...' : '+ Import this folder'}
+              {isAnalyzing ? 'Scanning...' : '↺ Re-scan this folder'}
             </Button>
           </div>
         </div>

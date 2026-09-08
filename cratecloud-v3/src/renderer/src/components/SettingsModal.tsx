@@ -22,8 +22,7 @@ export function SettingsModal({
     if (!folderPath) return
 
     setAdding(true)
-    const name = folderPath.split('/').filter(Boolean).pop() ?? folderPath
-    await window.api.roots.add(name, folderPath)
+    await window.api.roots.add(folderPath)
     setAdding(false)
     onRootsChanged()
   }
