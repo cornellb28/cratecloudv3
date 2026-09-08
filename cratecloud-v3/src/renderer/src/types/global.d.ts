@@ -1,4 +1,4 @@
-export { }
+export {}
 
 declare global {
   interface Window {
@@ -7,7 +7,13 @@ declare global {
       openFolder: () => Promise<string | null>
       openFiles: () => Promise<string[]>
       importFile: (filepath: string) => Promise<{ ok: boolean; trackId?: number; error?: string }>
-      importFiles: (filepaths: string[]) => Promise<{ ok: boolean; count: number; results: { ok: boolean; trackId?: number; error?: string }[] }>
+      importFiles: (
+        filepaths: string[]
+      ) => Promise<{
+        ok: boolean
+        count: number
+        results: { ok: boolean; trackId?: number; error?: string }[]
+      }>
       analyzeFile: (filepath: string) => Promise<{
         ok: boolean
         data?: AnalysisResult
@@ -23,25 +29,24 @@ declare global {
         error?: string
       }>
 
-      onImportProgress: (cb: (p: {
-        done: number
-        total: number
-        failed: number
-        filepath: string
-      }) => void) => void
+      onImportProgress: (
+        cb: (p: { done: number; total: number; failed: number; filepath: string }) => void
+      ) => void
 
       offImportProgress: () => void
 
-      onTrackAnalyzed: (cb: (data: {
-        trackId: number
-        bpm: number | null
-        key_camelot: string | null
-        key_full: string | null
-        duration_sec: number | null
-        duration_str: string | null
-        done: number
-        total: number
-      }) => void) => void
+      onTrackAnalyzed: (
+        cb: (data: {
+          trackId: number
+          bpm: number | null
+          key_camelot: string | null
+          key_full: string | null
+          duration_sec: number | null
+          duration_str: string | null
+          done: number
+          total: number
+        }) => void
+      ) => void
 
       onPhase1Complete: (cb: (data: { imported: number; total: number }) => void) => void
 
@@ -52,8 +57,12 @@ declare global {
       db: {
         allTracks: () => Promise<Track[]>
         trackById: (id: number) => Promise<Track | null>
-        insertTrack: (track: Partial<Track>) => Promise<{ ok: boolean; id?: number; error?: string }>
-        updateTrackMeta: (data: Partial<Track> & { id: number }) => Promise<{ ok: boolean; error?: string }>
+        insertTrack: (
+          track: Partial<Track>
+        ) => Promise<{ ok: boolean; id?: number; error?: string }>
+        updateTrackMeta: (
+          data: Partial<Track> & { id: number }
+        ) => Promise<{ ok: boolean; error?: string }>
         updateBoardId: (id: number, boardId: number) => Promise<{ ok: boolean; error?: string }>
         tracksByBoardId: (id: number, boardId: number) => Promise<Track[]>
         markMissing: (filepath: string) => Promise<{ ok: boolean; error?: string }>
@@ -67,9 +76,18 @@ declare global {
         apply: (trackId: number, tagId: number) => Promise<{ ok: boolean; error?: string }>
         remove: (trackId: number, tagId: number) => Promise<{ ok: boolean; error?: string }>
         checkCandidates: (candidates: string[], field: string) => Promise<TagCandidate[]>
-        confirmImport: (pendingId: number, trackId: number, approvedTags: string[], field: string) => Promise<{ ok: boolean; error?: string }>
+        confirmImport: (
+          pendingId: number,
+          trackId: number,
+          approvedTags: string[],
+          field: string
+        ) => Promise<{ ok: boolean; error?: string }>
         pending: () => Promise<PendingImport[]>
-        findOrCreate: (field: string, value: string, color: string) => Promise<{ ok: boolean; id?: number; error?: string }>
+        findOrCreate: (
+          field: string,
+          value: string,
+          color: string
+        ) => Promise<{ ok: boolean; id?: number; error?: string }>
       }
 
       roots: {
@@ -80,7 +98,10 @@ declare global {
 
       crates: {
         all: () => Promise<Crate[]>
-        insert: (name: string, color: string) => Promise<{ ok: boolean; id?: number; error?: string }>
+        insert: (
+          name: string,
+          color: string
+        ) => Promise<{ ok: boolean; id?: number; error?: string }>
         addTrack: (crateId: number, trackId: number) => Promise<{ ok: boolean; error?: string }>
         tracks: (crateId: number) => Promise<Track[]>
       }
@@ -96,11 +117,25 @@ declare global {
       }
 
       fs: {
-        moveFile: (from: string, to: string) => Promise<{ ok: boolean; newPath?: string; error?: string }>
-        moveFiles: (from: string[], to: string) => Promise<{ ok: boolean; succeeded: number; failed: number; results: FileMoveResult[] }>
-        renameFile: (filepath: string, newName: string) => Promise<{ ok: boolean; newPath?: string; error?: string }>
-        createFolder: (parent: string, name: string) => Promise<{ ok: boolean; path?: string; error?: string }>
-        readFolder: (folderPath: string) => Promise<{ ok: boolean; items?: FolderItem[]; error?: string }>
+        moveFile: (
+          from: string,
+          to: string
+        ) => Promise<{ ok: boolean; newPath?: string; error?: string }>
+        moveFiles: (
+          from: string[],
+          to: string
+        ) => Promise<{ ok: boolean; succeeded: number; failed: number; results: FileMoveResult[] }>
+        renameFile: (
+          filepath: string,
+          newName: string
+        ) => Promise<{ ok: boolean; newPath?: string; error?: string }>
+        createFolder: (
+          parent: string,
+          name: string
+        ) => Promise<{ ok: boolean; path?: string; error?: string }>
+        readFolder: (
+          folderPath: string
+        ) => Promise<{ ok: boolean; items?: FolderItem[]; error?: string }>
       }
     }
   }
@@ -216,6 +251,7 @@ declare global {
     isDirectory: boolean
     size: number
     modified: number
+    audioCount: number
   }
 
   interface FileMoveResult {

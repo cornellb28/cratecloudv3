@@ -71,6 +71,26 @@ function walkFolder(folderPath: string): string[] {
   return results
 }
 
+// Recursively count all audio files in a folder's subtree
+async function countAudioFiles(folderPath: string): Promise<number> {
+  try {
+    const entries = await readdir(folderPath, { withFileTypes: true })
+    let count = 0
+    for (const entry of entries) {
+      if (entry.name.startsWith('.')) continue // skip hidden files/folders (e.g. macOS ._ AppleDouble files, .DS_Store)
+      const fullPath = join(folderPath, entry.name)
+      if (entry.isDirectory()) {
+        count += await countAudioFiles(fullPath)
+      } else if (AUDIO_EXTENSIONS.has(extname(entry.name).toLowerCase())) {
+        count++
+      }
+    }
+    return count
+  } catch {
+    return 0
+  }
+}
+
 function saveArtwork(trackId: number, base64Data: string): string | null {
   try {
     const artworkDir = join(app.getPath('userData'), 'cratecloud', 'artwork')
@@ -86,7 +106,10 @@ function saveArtwork(trackId: number, base64Data: string): string | null {
 }
 
 // Build a consistent track data object from analysis result
-function buildTrackData(filepath: string, result: AnalysisResult): {
+function buildTrackData(
+  filepath: string,
+  result: AnalysisResult
+): {
   filepath: string
   filename: string
   title: string | null
@@ -163,9 +186,10 @@ async function moveFileToFolder(fromPath: string, toFolder: string): Promise<str
       const copiedSize = (await stat(toPath)).size
 
       if (copiedSize !== sourceSize) {
-        await unlink(toPath).catch(() => { })
+        await unlink(toPath).catch(() => {})
         throw new Error(
-          `Copy verification failed (${copiedSize} bytes copied, ` + `expected ${sourceSize}) — source left untouched`
+          `Copy verification failed (${copiedSize} bytes copied, ` +
+            `expected ${sourceSize}) — source left untouched`
         )
       }
 
@@ -236,7 +260,7 @@ protocol.registerSchemesAsPrivileged([
     privileges: {
       secure: true,
       supportFetchAPI: true,
-      bypassCSP: true,
+      bypassCSP: true
     }
   }
 ])
@@ -341,8 +365,13 @@ app.whenReady().then(() => {
         )
       }
 
-      // Register the imported folder as a library root so it shows up in Folders
-      addRoot(basename(folderPath), folderPath)
+      // Register the imported folder as a library root so it shows up in Folders —
+      // unless it's already nested inside a root that's registered
+      const existingRoots = getAllRoots()
+      const alreadyNested = existingRoots.some((root) => folderPath.startsWith(root.path))
+      if (!alreadyNested) {
+        addRoot(basename(folderPath), folderPath)
+      }
 
       // Tell renderer Phase 1 is done — tracks are visible
       event.sender.send('library:phase1-complete', { imported, total, failed })
@@ -357,7 +386,10 @@ app.whenReady().then(() => {
     }
   })
 
-  async function importSingleFile(event: Electron.IpcMainInvokeEvent, filepath: string): Promise<{ ok: boolean; trackId?: number; error?: string }> {
+  async function importSingleFile(
+    event: Electron.IpcMainInvokeEvent,
+    filepath: string
+  ): Promise<{ ok: boolean; trackId?: number; error?: string }> {
     try {
       // Phase 1
       const fastResult = await readTagsFast(filepath)
@@ -411,14 +443,14 @@ app.whenReady().then(() => {
     if (unanalyzed.length === 0) {
       event.sender.send('library:analysis-complete', {
         analyzed: 0,
-        total: 0,
+        total: 0
       })
       return
     }
 
     const total = unanalyzed.length
     let done = 0
-    const concurrency = 4  // librosa is heavy — keep this lower
+    const concurrency = 4 // librosa is heavy — keep this lower
 
     for (let i = 0; i < unanalyzed.length; i += concurrency) {
       const batch = unanalyzed.slice(i, i + concurrency)
@@ -441,7 +473,7 @@ app.whenReady().then(() => {
                 comment: track.comment,
                 artwork_path: track.artwork_path,
                 needs_sync: 0,
-                pending_changes: null,
+                pending_changes: null
               })
 
               // Mark as analyzed
@@ -458,7 +490,7 @@ app.whenReady().then(() => {
                 duration_sec: result.duration_sec,
                 duration_str: result.duration_str,
                 done,
-                total,
+                total
               })
             }
           } catch {
@@ -471,7 +503,7 @@ app.whenReady().then(() => {
 
     event.sender.send('library:analysis-complete', {
       analyzed: done,
-      total,
+      total
     })
   }
 
@@ -499,7 +531,7 @@ app.whenReady().then(() => {
           name: 'Audio',
           extensions: ['mp3', 'flac', 'wav', 'aiff', 'aif', 'm4a', 'ogg']
         }
-      ],
+      ]
     })
     return canceled ? [] : filePaths
   })
@@ -560,185 +592,194 @@ app.whenReady().then(() => {
 
   // ── Move a single file to a folder ──────────────────────
 
-  ipcMain.handle('fs:move-file',
-    async (_e, fromPath: string, toFolder: string) => {
-      try {
-        // Validate — source must exist
-        await stat(fromPath)
+  ipcMain.handle('fs:move-file', async (_e, fromPath: string, toFolder: string) => {
+    try {
+      // Validate — source must exist
+      await stat(fromPath)
 
-        // Validate — destination must be a directory
-        const destStat = await stat(toFolder)
-        if (!destStat.isDirectory()) {
-          return { ok: false, error: 'Destination is not a folder' }
-        }
-
-        // Move the file
-        const newPath = await moveFileToFolder(fromPath, toFolder)
-
-        // Update DB — filepath changed
-        updateTrackFilepath(fromPath, newPath)
-
-        return { ok: true, newPath }
-      } catch (err) {
-        return { ok: false, error: (err as Error).message }
+      // Validate — destination must be a directory
+      const destStat = await stat(toFolder)
+      if (!destStat.isDirectory()) {
+        return { ok: false, error: 'Destination is not a folder' }
       }
+
+      // Move the file
+      const newPath = await moveFileToFolder(fromPath, toFolder)
+
+      // Update DB — filepath changed
+      updateTrackFilepath(fromPath, newPath)
+
+      return { ok: true, newPath }
+    } catch (err) {
+      return { ok: false, error: (err as Error).message }
     }
-  )
+  })
 
   // ── Move multiple files to a folder ─────────────────────
 
-  ipcMain.handle('fs:move-files',
-    async (_e, fromPaths: string[], toFolder: string) => {
-      const results: { path: string; ok: boolean; newPath?: string; error?: string }[] = []
+  ipcMain.handle('fs:move-files', async (_e, fromPaths: string[], toFolder: string) => {
+    const results: { path: string; ok: boolean; newPath?: string; error?: string }[] = []
 
-      for (const fromPath of fromPaths) {
-        try {
-          const newPath = await moveFileToFolder(fromPath, toFolder)
-          updateTrackFilepath(fromPath, newPath)
-          results.push({ path: fromPath, ok: true, newPath })
-        } catch (err) {
-          results.push({
-            path: fromPath,
-            ok: false,
-            error: (err as Error).message,
-          })
-        }
+    for (const fromPath of fromPaths) {
+      try {
+        const newPath = await moveFileToFolder(fromPath, toFolder)
+        updateTrackFilepath(fromPath, newPath)
+        results.push({ path: fromPath, ok: true, newPath })
+      } catch (err) {
+        results.push({
+          path: fromPath,
+          ok: false,
+          error: (err as Error).message
+        })
       }
-
-      const succeeded = results.filter(r => r.ok).length
-      const failed = results.filter(r => !r.ok).length
-
-      return { ok: true, succeeded, failed, results }
     }
-  )
+
+    const succeeded = results.filter((r) => r.ok).length
+    const failed = results.filter((r) => !r.ok).length
+
+    return { ok: true, succeeded, failed, results }
+  })
 
   // ── Rename a file on disk ────────────────────────────────
 
-  ipcMain.handle('fs:rename-file',
-    async (_e, filepath: string, newName: string) => {
-      try {
-        // Validate newName — no path separators, no empty string
-        if (!newName.trim()) {
-          return { ok: false, error: 'Name cannot be empty' }
-        }
-        if (newName.includes('/') || newName.includes('\\')) {
-          return { ok: false, error: 'Name cannot contain slashes' }
-        }
-
-        const dir = dirname(filepath)
-        const ext = extname(filepath)
-        const newPath = join(dir, newName + ext)
-
-        // Check for collision
-        try {
-          await stat(newPath)
-          return { ok: false, error: 'A file with that name already exists' }
-        } catch {
-          // Good — file does not exist
-        }
-
-        await rename(filepath, newPath)
-
-        // Update DB
-        updateTrackFilepath(filepath, newPath)
-
-        // Update title in DB to match new filename
-        const track = getTrackByFilepath(newPath) as Track | undefined
-        if (track) {
-          updateTrackMeta({
-            id: track.id,
-            title: newName,
-            artist: track.artist,
-            genre: track.genre,
-            bpm: track.bpm,
-            key_camelot: track.key_camelot,
-            energy: track.energy,
-            comment: track.comment,
-            artwork_path: track.artwork_path,
-            needs_sync: track.needs_sync,
-            pending_changes: track.pending_changes,
-          })
-        }
-
-        return { ok: true, newPath }
-      } catch (err) {
-        return { ok: false, error: (err as Error).message }
+  ipcMain.handle('fs:rename-file', async (_e, filepath: string, newName: string) => {
+    try {
+      // Validate newName — no path separators, no empty string
+      if (!newName.trim()) {
+        return { ok: false, error: 'Name cannot be empty' }
       }
+      if (newName.includes('/') || newName.includes('\\')) {
+        return { ok: false, error: 'Name cannot contain slashes' }
+      }
+
+      const dir = dirname(filepath)
+      const ext = extname(filepath)
+      const newPath = join(dir, newName + ext)
+
+      // Check for collision
+      try {
+        await stat(newPath)
+        return { ok: false, error: 'A file with that name already exists' }
+      } catch {
+        // Good — file does not exist
+      }
+
+      await rename(filepath, newPath)
+
+      // Update DB
+      updateTrackFilepath(filepath, newPath)
+
+      // Update title in DB to match new filename
+      const track = getTrackByFilepath(newPath) as Track | undefined
+      if (track) {
+        updateTrackMeta({
+          id: track.id,
+          title: newName,
+          artist: track.artist,
+          genre: track.genre,
+          bpm: track.bpm,
+          key_camelot: track.key_camelot,
+          energy: track.energy,
+          comment: track.comment,
+          artwork_path: track.artwork_path,
+          needs_sync: track.needs_sync,
+          pending_changes: track.pending_changes
+        })
+      }
+
+      return { ok: true, newPath }
+    } catch (err) {
+      return { ok: false, error: (err as Error).message }
     }
-  )
+  })
 
   // ── Create a new folder ──────────────────────────────────
 
-  ipcMain.handle('fs:create-folder',
-    async (_e, parentPath: string, folderName: string) => {
-      try {
-        if (!folderName.trim()) {
-          return { ok: false, error: 'Folder name cannot be empty' }
-        }
-
-        const newFolderPath = join(parentPath, folderName)
-
-        // Check for collision
-        try {
-          await stat(newFolderPath)
-          return { ok: false, error: 'A folder with that name already exists' }
-        } catch {
-          // Good — does not exist
-        }
-
-        await mkdir(newFolderPath, { recursive: false })
-        return { ok: true, path: newFolderPath }
-      } catch (err) {
-        return { ok: false, error: (err as Error).message }
+  ipcMain.handle('fs:create-folder', async (_e, parentPath: string, folderName: string) => {
+    try {
+      if (!folderName.trim()) {
+        return { ok: false, error: 'Folder name cannot be empty' }
       }
+
+      const newFolderPath = join(parentPath, folderName)
+
+      // Check for collision
+      try {
+        await stat(newFolderPath)
+        return { ok: false, error: 'A folder with that name already exists' }
+      } catch {
+        // Good — does not exist
+      }
+
+      await mkdir(newFolderPath, { recursive: false })
+      return { ok: true, path: newFolderPath }
+    } catch (err) {
+      return { ok: false, error: (err as Error).message }
     }
-  )
+  })
 
   // ── Read folder contents ─────────────────────────────────
 
-  ipcMain.handle('fs:read-folder',
-    async (_e, folderPath: string) => {
-      try {
-        const entries = await readdir(folderPath, { withFileTypes: true })
+  ipcMain.handle('fs:read-folder', async (_e, folderPath: string) => {
+    try {
+      const entries = await readdir(folderPath, { withFileTypes: true })
 
-        const AUDIO_EXT = new Set([
-          '.mp3', '.flac', '.wav', '.aiff', '.aif', '.m4a', '.ogg'
-        ])
+      const AUDIO_EXT = new Set(['.mp3', '.flac', '.wav', '.aiff', '.aif', '.m4a', '.ogg'])
 
-        const items = await Promise.all(
-          entries
-            .filter(e => {
-              // Include directories and audio files only
-              if (e.isDirectory()) return true
-              return AUDIO_EXT.has(extname(e.name).toLowerCase())
-            })
-            .map(async (e) => {
-              const fullPath = join(folderPath, e.name)
-              const s = await stat(fullPath)
+      const rawItems = await Promise.all(
+        entries
+          .filter((e) => {
+            if (e.name.startsWith('.')) return false // skip hidden files/folders (e.g. macOS ._ AppleDouble files, .DS_Store)
+            // Include directories and audio files only
+            if (e.isDirectory()) return true
+            return AUDIO_EXT.has(extname(e.name).toLowerCase())
+          })
+          .map(async (e) => {
+            const fullPath = join(folderPath, e.name)
+            const s = await stat(fullPath)
+
+            if (e.isDirectory()) {
+              // Skip folders with no audio anywhere in their subtree
+              const audioCount = await countAudioFiles(fullPath)
+              if (audioCount === 0) return null
+
               return {
                 name: e.name,
                 path: fullPath,
-                isDirectory: e.isDirectory(),
+                isDirectory: true,
                 size: s.size,
                 modified: s.mtimeMs,
+                audioCount
               }
-            })
-        )
+            }
 
-        // Folders first, then files, both alphabetical
-        items.sort((a, b) => {
-          if (a.isDirectory !== b.isDirectory) {
-            return a.isDirectory ? -1 : 1
-          }
-          return a.name.localeCompare(b.name)
-        })
+            // Already filtered to audio extensions above
+            return {
+              name: e.name,
+              path: fullPath,
+              isDirectory: false,
+              size: s.size,
+              modified: s.mtimeMs,
+              audioCount: 1
+            }
+          })
+      )
 
-        return { ok: true, items }
-      } catch (err) {
-        return { ok: false, error: (err as Error).message }
-      }
+      const items = rawItems.filter((item): item is NonNullable<typeof item> => item !== null)
+
+      // Folders first, then files, both alphabetical
+      items.sort((a, b) => {
+        if (a.isDirectory !== b.isDirectory) {
+          return a.isDirectory ? -1 : 1
+        }
+        return a.name.localeCompare(b.name)
+      })
+
+      return { ok: true, items }
+    } catch (err) {
+      return { ok: false, error: (err as Error).message }
     }
-  )
+  })
 
   // ── Tags ────────────────────────────────────────────────
 
@@ -750,16 +791,14 @@ app.whenReady().then(() => {
 
   ipcMain.handle('tags:tracks-by-tag', (_e, tagId: number) => getTagTracks(tagId))
 
-  ipcMain.handle('tags:find-or-create',
-    (_e, field: string, value: string, color: string) => {
-      try {
-        const id = findOrCreateTag(field, value, color)
-        return { ok: true, id }
-      } catch (err) {
-        return { ok: false, error: (err as Error).message }
-      }
+  ipcMain.handle('tags:find-or-create', (_e, field: string, value: string, color: string) => {
+    try {
+      const id = findOrCreateTag(field, value, color)
+      return { ok: true, id }
+    } catch (err) {
+      return { ok: false, error: (err as Error).message }
     }
-  )
+  })
 
   ipcMain.handle('tags:apply', (_e, trackId: number, tagId: number) => {
     try {
@@ -779,17 +818,22 @@ app.whenReady().then(() => {
     }
   })
 
-  ipcMain.handle('tags:check-candidates', (_e, candidates: string[], field: string) => checkCandidates(candidates, field))
+  ipcMain.handle('tags:check-candidates', (_e, candidates: string[], field: string) =>
+    checkCandidates(candidates, field)
+  )
 
-  ipcMain.handle('tags:confirm-import', (_e, pendingId: number, trackId: number, approvedTags: string[], field: string) => {
-    try {
-      confirmPendingImport(pendingId, trackId, approvedTags, field)
-      return { ok: true }
-    } catch (err) {
-      console.error('tags:comfirm-import failed', err)
-      return { ok: false, error: (err as Error).message }
+  ipcMain.handle(
+    'tags:confirm-import',
+    (_e, pendingId: number, trackId: number, approvedTags: string[], field: string) => {
+      try {
+        confirmPendingImport(pendingId, trackId, approvedTags, field)
+        return { ok: true }
+      } catch (err) {
+        console.error('tags:comfirm-import failed', err)
+        return { ok: false, error: (err as Error).message }
+      }
     }
-  })
+  )
 
   ipcMain.handle('tags:pending', () => getPendingImports())
 

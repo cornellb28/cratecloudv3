@@ -599,7 +599,7 @@ const stmts = {
   // ── Library roots ─────────────────────────────────────
 
   getAllRoots: db.prepare(`
-    SELECT * FROM library_roots ORDER BY name
+    SELECT * FROM library_roots ORDER BY created_at ASC
   `),
 
   addRoot: db.prepare(`

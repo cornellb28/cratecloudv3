@@ -5,21 +5,14 @@ import { MosaicArtwork } from '../components/MosaicArtwork'
 import { TrackRow } from '../components/TrackRow'
 import { TrackCard } from '../components/TrackCard'
 import { BulkBar } from '../components/BulkBar'
-
-interface FolderItem {
-  name: string
-  path: string
-  isDirectory: boolean
-  size: number
-  modified: number
-}
+import { Button } from '@renderer/components/ui/button'
 
 interface FolderViewProps {
   libraryRoots: LibraryRoot[] // all registered library roots
 }
 
 export function FolderView({ libraryRoots }: FolderViewProps): React.JSX.Element {
-  const { tracks, displayMode } = useLibraryStore()
+  const { tracks, displayMode, isAnalyzing, setAnalyzing, setTracks } = useLibraryStore()
 
   // Navigation stack — array of folder paths. Empty = top-level root picker.
   const [navStack, setNavStack] = useState<string[]>([])
@@ -76,6 +69,18 @@ export function FolderView({ libraryRoots }: FolderViewProps): React.JSX.Element
   function navigateInto(path: string): void {
     setNavStack((prev) => [...prev, path])
     setSelectedIds(new Set())
+  }
+
+  // Import everything under the folder currently being browsed — recurses into
+  // every subfolder, same scanner the Toolbar's "+ Import folder" button uses
+  async function handleImportThisFolder(folderPath: string): Promise<void> {
+    setAnalyzing(true)
+    const result = await window.api.importFolder(folderPath)
+    if (result.ok) {
+      const all = await window.api.db.allTracks()
+      setTracks(all)
+    }
+    setAnalyzing(false)
   }
 
   // Top level — no folder selected yet — show all registered library roots
@@ -175,6 +180,75 @@ export function FolderView({ libraryRoots }: FolderViewProps): React.JSX.Element
         overflow: 'hidden'
       }}
     >
+      {/* ── Breadcrumb bar ──────────────────────────── */}
+      <div
+        style={{
+          display: 'flex',
+          alignItems: 'center',
+          gap: '6px',
+          background: '#13131b',
+          padding: '8px 24px',
+          borderBottom: '0.5px solid #1e1e2a',
+          flexShrink: 0
+        }}
+      >
+        {/* Back button — one level up, hidden at the root of this library folder */}
+        {navStack.length > 1 && (
+          <button
+            onClick={() => setNavStack(navStack.slice(0, -1))}
+            title="Back"
+            style={{
+              background: 'none',
+              border: 'none',
+              color: '#888',
+              fontSize: '13px',
+              cursor: 'pointer',
+              padding: '2px 4px',
+              marginRight: '4px',
+              lineHeight: 1,
+              fontFamily: 'inherit'
+            }}
+            onMouseEnter={(e) => (e.currentTarget.style.color = '#e8e8f0')}
+            onMouseLeave={(e) => (e.currentTarget.style.color = '#888')}
+          >
+            ←
+          </button>
+        )}
+
+        {breadcrumbs.map((crumb, i) => {
+          const isLast = i === breadcrumbs.length - 1
+          return (
+            <React.Fragment key={crumb.path}>
+              {isLast ? (
+                <span style={{ color: '#e8e8f0', fontSize: '12px', fontWeight: 500 }}>
+                  {crumb.name}
+                </span>
+              ) : (
+                <button
+                  onClick={() => setNavStack(navStack.slice(0, i + 1))}
+                  style={{
+                    background: 'none',
+                    border: 'none',
+                    color: '#555',
+                    fontSize: '12px',
+                    cursor: 'pointer',
+                    padding: 0,
+                    fontFamily: 'inherit',
+                    fontWeight: 400,
+                    textDecoration: 'none'
+                  }}
+                  onMouseEnter={(e) => (e.currentTarget.style.textDecoration = 'underline')}
+                  onMouseLeave={(e) => (e.currentTarget.style.textDecoration = 'none')}
+                >
+                  {crumb.name}
+                </button>
+              )}
+              {!isLast && <span style={{ color: '#333', fontSize: '11px' }}>›</span>}
+            </React.Fragment>
+          )
+        })}
+      </div>
+
       {/* ── Hero section ──────────────────────────── */}
       <div
         style={{
@@ -183,44 +257,6 @@ export function FolderView({ libraryRoots }: FolderViewProps): React.JSX.Element
           flexShrink: 0
         }}
       >
-        {/* Breadcrumb */}
-        <div
-          style={{
-            display: 'flex',
-            alignItems: 'center',
-            gap: '6px',
-            marginBottom: '16px',
-            flexWrap: 'wrap'
-          }}
-        >
-          {breadcrumbs.map((crumb, i) => (
-            <React.Fragment key={crumb.path}>
-              <button
-                onClick={() => {
-                  if (i < breadcrumbs.length - 1) {
-                    setNavStack(navStack.slice(0, i + 1))
-                  }
-                }}
-                style={{
-                  background: 'none',
-                  border: 'none',
-                  color: i === breadcrumbs.length - 1 ? '#e8e8f0' : '#555',
-                  fontSize: '12px',
-                  cursor: i === breadcrumbs.length - 1 ? 'default' : 'pointer',
-                  padding: '0',
-                  fontFamily: 'inherit',
-                  fontWeight: i === breadcrumbs.length - 1 ? 500 : 400
-                }}
-              >
-                {crumb.name}
-              </button>
-              {i < breadcrumbs.length - 1 && (
-                <span style={{ color: '#333', fontSize: '11px' }}>›</span>
-              )}
-            </React.Fragment>
-          ))}
-        </div>
-
         {/* Hero content */}
         <div style={{ display: 'flex', gap: '20px', alignItems: 'flex-end' }}>
           {/* Mosaic artwork — large */}
@@ -256,7 +292,7 @@ export function FolderView({ libraryRoots }: FolderViewProps): React.JSX.Element
             >
               {folderName}
             </h1>
-            <div style={{ fontSize: '12px', color: '#555' }}>
+            <div style={{ fontSize: '12px', color: '#555', marginBottom: '10px' }}>
               {totalTracks} track{totalTracks !== 1 ? 's' : ''}
               {subfolders.length > 0 && (
                 <span>
@@ -265,6 +301,14 @@ export function FolderView({ libraryRoots }: FolderViewProps): React.JSX.Element
                 </span>
               )}
             </div>
+            <Button
+              onClick={() => handleImportThisFolder(currentPath)}
+              disabled={isAnalyzing}
+              variant="outline"
+              size="sm"
+            >
+              {isAnalyzing ? 'Importing...' : '+ Import this folder'}
+            </Button>
           </div>
         </div>
       </div>
@@ -299,6 +343,7 @@ export function FolderView({ libraryRoots }: FolderViewProps): React.JSX.Element
                   name={folder.name}
                   path={folder.path}
                   trackCount={getTrackCount(folder.path)}
+                  audioCount={folder.audioCount}
                   artworkPaths={getArtworkForFolder(folder.path)}
                   onClick={() => navigateInto(folder.path)}
                 />
