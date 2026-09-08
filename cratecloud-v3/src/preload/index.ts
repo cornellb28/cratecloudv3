@@ -47,6 +47,7 @@ const api = {
   // Tags
   tags: {
     all: () => ipcRenderer.invoke('tags:all'),
+    mostUsed: (limit?: number) => ipcRenderer.invoke('tags:most-used', limit),
     forTrack: (trackId: number) => ipcRenderer.invoke('tags:for-track', trackId),
     tracksByTag: (tagId: number) => ipcRenderer.invoke('tags:tracks-by-tag', tagId),
     apply: (trackId: number, tagId: number) => ipcRenderer.invoke('tags:apply', trackId, tagId),
@@ -63,6 +64,13 @@ const api = {
     insert: (name: string, color: string) => ipcRenderer.invoke('crates:insert', name, color),
     addTrack: (crateId: number, trackId: number) => ipcRenderer.invoke('crates:add-track', crateId, trackId),
     tracks: (crateId: number) => ipcRenderer.invoke('crates:tracks', crateId),
+  },
+
+  // Library roots
+  roots: {
+    all: () => ipcRenderer.invoke('roots:all'),
+    add: (name: string, path: string) => ipcRenderer.invoke('roots:add', name, path),
+    remove: (id: number) => ipcRenderer.invoke('roots:remove', id)
   },
 
   // Boards

@@ -61,6 +61,7 @@ declare global {
 
       tags: {
         all: () => Promise<Tag[]>
+        mostUsed: (limit?: number) => Promise<Tag[]>
         forTrack: (trackId: number) => Promise<Tag[]>
         tracksByTag: (tagId: number) => Promise<Track[]>
         apply: (trackId: number, tagId: number) => Promise<{ ok: boolean; error?: string }>
@@ -69,6 +70,12 @@ declare global {
         confirmImport: (pendingId: number, trackId: number, approvedTags: string[], field: string) => Promise<{ ok: boolean; error?: string }>
         pending: () => Promise<PendingImport[]>
         findOrCreate: (field: string, value: string, color: string) => Promise<{ ok: boolean; id?: number; error?: string }>
+      }
+
+      roots: {
+        all: () => Promise<LibraryRoot[]>
+        add: (name: string, path: string) => Promise<{ ok: boolean; error?: string }>
+        remove: (id: number) => Promise<{ ok: boolean; error?: string }>
       }
 
       crates: {
@@ -216,5 +223,14 @@ declare global {
     ok: boolean
     newPath?: string
     error?: string
+  }
+
+  interface LibraryRoot {
+    id: number
+    name: string
+    path: string
+    created_at: number
+    last_scanned_at: number | null
+    status: string
   }
 }

@@ -5,14 +5,30 @@ import { Toolbar } from './components/Toolbar'
 import { LibraryView } from './components/LibraryView'
 import { BoardView } from './components/BoardView'
 import { Inspector } from './components/Inpector'
+import { FolderView } from './views/FolderView'
+import { SettingsModal } from './components/SettingsModal'
 
-type View = 'library' | 'board'
+type View = 'library' | 'board' | 'folders'
 
 const COLLAPSE_THRESHOLD = 900 // px
 
 function App(): React.JSX.Element {
-  const { tracks, setTracks, setAnalyzing, activeTrackId, setBoards, updateTrack, sidebarCollapsed, setSidebarCollapsed, setTags } = useLibraryStore()
+  const {
+    tracks,
+    setTracks,
+    setAnalyzing,
+    activeTrackId,
+    setBoards,
+    updateTrack,
+    sidebarCollapsed,
+    setSidebarCollapsed,
+    setTags,
+    setQuickTags
+  } = useLibraryStore()
   const [activeView, setActiveView] = useState<View>('library')
+  // Add library roots to app state
+  const [libraryRoots, setLibraryRoots] = useState<LibraryRoot[]>([])
+  const [settingsOpen, setSettingsOpen] = useState(false)
   const [progress, setProgress] = useState<{
     done: number
     total: number
@@ -39,14 +55,18 @@ function App(): React.JSX.Element {
   // Load existing tracks from SQLite on startup
   useEffect(() => {
     async function load(): Promise<void> {
-      const [tracks, boards, tags] = await Promise.all([
+      const [tracks, boards, tags, quickTags, roots] = await Promise.all([
         window.api.db.allTracks(),
         window.api.boards.all(),
-        window.api.tags.all()
+        window.api.tags.all(),
+        window.api.tags.mostUsed(),
+        window.api.roots.all()
       ])
       setTracks(tracks)
       setBoards(boards)
       setTags(tags)
+      setQuickTags(quickTags)
+      setLibraryRoots(roots)
     }
     load()
   })
@@ -68,7 +88,7 @@ function App(): React.JSX.Element {
         key_camelot: data.key_camelot,
         key_full: data.key_full,
         duration_sec: data.duration_sec,
-        duration_str: data.duration_str,
+        duration_str: data.duration_str
       })
       setAnalysisProgress({
         done: data.done,
@@ -117,31 +137,67 @@ function App(): React.JSX.Element {
     }
   }
 
-  const pct = progress && progress.total > 0 ? Math.round((progress.done / progress.total) * 100) : 0
+  async function reloadRoots(): Promise<void> {
+    const roots = await window.api.roots.all()
+    setLibraryRoots(roots)
+  }
+
+  const pct =
+    progress && progress.total > 0 ? Math.round((progress.done / progress.total) * 100) : 0
 
   return (
-    <div style={{ padding: '2rem', fontFamily: 'monospace', color: '#e8e8f0', background: '#0e0e12', height: '100vh', display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
+    <div
+      style={{
+        padding: '2rem',
+        fontFamily: 'monospace',
+        color: '#e8e8f0',
+        background: '#0e0e12',
+        height: '100vh',
+        display: 'flex',
+        flexDirection: 'column',
+        overflow: 'hidden'
+      }}
+    >
       <h2 style={{ marginBottom: '0.5rem' }}>CrateCloud v2</h2>
       <p data-testid="track-count" style={{ color: '#555', marginBottom: '1rem' }}>
         {tracks.length} track{tracks.length !== 1 ? 's' : ''} in library
       </p>
 
       {/* Toolbar at the top */}
-      <Toolbar onImport={handleImportFolder} activeView={activeView} onImportFiles={handleImportFiles} />
+      <Toolbar
+        onImport={handleImportFolder}
+        activeView={activeView}
+        onImportFiles={handleImportFiles}
+      />
 
       {analysisProgress && (
-        <div style={{ padding: '4px 16px', background: '#13131b', borderBottom: '0.5px solid #1e1e2a' }}>
+        <div
+          style={{
+            padding: '4px 16px',
+            background: '#13131b',
+            borderBottom: '0.5px solid #1e1e2a'
+          }}
+        >
           <div className="text-xs text-muted-foreground mb-1">
             Analyzing BPM + key — {analysisProgress.done} / {analysisProgress.total}
           </div>
-          <div style={{ background: '#1e1e2a', borderRadius: '4px', height: '3px', overflow: 'hidden' }}>
-            <div style={{
-              background: '#1d9e75',
-              height: '100%',
-              width: `${Math.round(analysisProgress.done / analysisProgress.total * 100)}%`,
-              transition: 'width 0.3s ease',
+          <div
+            style={{
+              background: '#1e1e2a',
               borderRadius: '4px',
-            }} />
+              height: '3px',
+              overflow: 'hidden'
+            }}
+          >
+            <div
+              style={{
+                background: '#1d9e75',
+                height: '100%',
+                width: `${Math.round((analysisProgress.done / analysisProgress.total) * 100)}%`,
+                transition: 'width 0.3s ease',
+                borderRadius: '4px'
+              }}
+            />
           </div>
         </div>
       )}
@@ -152,26 +208,35 @@ function App(): React.JSX.Element {
           <div style={{ color: '#7f77dd', marginBottom: '4px', fontSize: '12px' }}>
             {progress.done} / {progress.total} — {progress.filepath}
           </div>
-          <div style={{ background: '#1e1e2a', borderRadius: '4px', height: '6px', overflow: 'hidden' }}>
-            <div style={{
-              background: '#7f77dd',
-              height: '100%',
-              width: `${pct}%`,
-              transition: 'width 0.2s ease',
+          <div
+            style={{
+              background: '#1e1e2a',
               borderRadius: '4px',
-            }} />
+              height: '6px',
+              overflow: 'hidden'
+            }}
+          >
+            <div
+              style={{
+                background: '#7f77dd',
+                height: '100%',
+                width: `${pct}%`,
+                transition: 'width 0.2s ease',
+                borderRadius: '4px'
+              }}
+            />
           </div>
         </div>
       )}
 
       {/* Main area — sidebar + content side by side */}
       <div style={{ display: 'flex', flex: 1, overflow: 'hidden' }}>
-
         <Sidebar
           activeView={activeView}
           onViewChange={setActiveView}
           collapsed={sidebarCollapsed}
           onToggleCollapsed={() => setSidebarCollapsed(!sidebarCollapsed)}
+          onOpenSettings={() => setSettingsOpen(true)}
         />
 
         {/* Content area */}
@@ -182,11 +247,50 @@ function App(): React.JSX.Element {
               <BoardView />
             </div>
           )}
+          {activeView === 'folders' &&
+            (libraryRoots.length > 0 ? (
+              <FolderView libraryRoots={libraryRoots} />
+            ) : (
+              <div
+                style={{
+                  flex: 1,
+                  display: 'flex',
+                  flexDirection: 'column',
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                  gap: '12px',
+                  color: '#333'
+                }}
+              >
+                <span style={{ fontSize: '48px' }}>⊟</span>
+                <div style={{ fontSize: '14px' }}>No library folders registered</div>
+                <button
+                  onClick={() => setSettingsOpen(true)}
+                  style={{
+                    fontSize: '12px',
+                    color: '#7f77dd',
+                    background: 'none',
+                    border: 'none',
+                    cursor: 'pointer',
+                    padding: 0
+                  }}
+                >
+                  Open Settings to add a music folder
+                </button>
+              </div>
+            ))}
         </div>
 
         {/* Inspector slides in from the right when a track is selected */}
         <Inspector key={activeTrackId ?? 'none'} />
       </div>
+
+      <SettingsModal
+        open={settingsOpen}
+        onClose={() => setSettingsOpen(false)}
+        libraryRoots={libraryRoots}
+        onRootsChanged={reloadRoots}
+      />
     </div>
   )
 }

@@ -12,6 +12,10 @@ import {
   updateTrackMeta,
   markTrackMissing,
   getAllTags,
+  getMostUsedTags,
+  getAllRoots,
+  addRoot,
+  removeRoot,
   applyTag,
   removeTag,
   getTrackTags,
@@ -336,6 +340,9 @@ app.whenReady().then(() => {
           })
         )
       }
+
+      // Register the imported folder as a library root so it shows up in Folders
+      addRoot(basename(folderPath), folderPath)
 
       // Tell renderer Phase 1 is done — tracks are visible
       event.sender.send('library:phase1-complete', { imported, total, failed })
@@ -737,6 +744,8 @@ app.whenReady().then(() => {
 
   ipcMain.handle('tags:all', () => getAllTags())
 
+  ipcMain.handle('tags:most-used', (_e, limit?: number) => getMostUsedTags(limit))
+
   ipcMain.handle('tags:for-track', (_e, trackId: number) => getTrackTags(trackId))
 
   ipcMain.handle('tags:tracks-by-tag', (_e, tagId: number) => getTagTracks(tagId))
@@ -807,6 +816,28 @@ app.whenReady().then(() => {
   })
 
   ipcMain.handle('crates:tracks', (_e, crateId: number) => getCrateTracks(crateId))
+
+  // ── Library roots ────────────────────────────────────────
+
+  ipcMain.handle('roots:all', () => getAllRoots())
+
+  ipcMain.handle('roots:add', (_e, name: string, rootPath: string) => {
+    try {
+      addRoot(name, rootPath)
+      return { ok: true }
+    } catch (err) {
+      return { ok: false, error: (err as Error).message }
+    }
+  })
+
+  ipcMain.handle('roots:remove', (_e, id: number) => {
+    try {
+      removeRoot(id)
+      return { ok: true }
+    } catch (err) {
+      return { ok: false, error: (err as Error).message }
+    }
+  })
 
   // ── Boards ──────────────────────────────────────────────
 

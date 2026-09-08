@@ -1,16 +1,23 @@
 import { useLibraryStore } from '../store/useLibraryStore'
 
 // The views a DJ cab navigate between
-type View = 'library' | 'board'
+type View = 'library' | 'board' | 'folders'
 
 interface SidebarProps {
   activeView: View
   onViewChange: (view: View) => void
   collapsed: boolean
   onToggleCollapsed: () => void
+  onOpenSettings: () => void
 }
 
-export function Sidebar({ activeView, onViewChange, collapsed, onToggleCollapsed }: SidebarProps): React.JSX.Element {
+export function Sidebar({
+  activeView,
+  onViewChange,
+  collapsed,
+  onToggleCollapsed,
+  onOpenSettings
+}: SidebarProps): React.JSX.Element {
   const { tracks } = useLibraryStore()
 
   const navItem = (view: View, label: string, icon: string, count?: number): React.JSX.Element => {
@@ -115,6 +122,32 @@ export function Sidebar({ activeView, onViewChange, collapsed, onToggleCollapsed
 
       {navItem('library', 'All tracks', '♪', tracks.length)}
       {navItem('board', 'Board view', '▤')}
+      {navItem('folders', 'Folders', '⊟')}
+
+      <div style={{ flex: 1 }} />
+
+      <button
+        onClick={onOpenSettings}
+        title={collapsed ? 'Settings' : undefined}
+        style={{
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: collapsed ? 'center' : 'flex-start',
+          gap: '8px',
+          width: '100%',
+          padding: collapsed ? '7px 0' : '7px 12px',
+          background: 'none',
+          border: 'none',
+          borderRadius: '6px',
+          color: '#555',
+          fontSize: '13px',
+          cursor: 'pointer',
+          textAlign: 'left'
+        }}
+      >
+        <span>⚙</span>
+        {!collapsed && <span>Settings</span>}
+      </button>
     </div>
   )
 }

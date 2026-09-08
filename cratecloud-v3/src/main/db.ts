@@ -511,6 +511,17 @@ const stmts = {
     ORDER BY tg.value
   `),
 
+  getMostUsedTags: db.prepare(`
+    SELECT
+      tg.*,
+      COUNT(tt.track_id) as track_count
+    FROM tags tg
+    LEFT JOIN track_tags tt ON tt.tag_id = tg.id
+    GROUP BY tg.id
+    ORDER BY track_count DESC, tg.value
+    LIMIT ?
+  `),
+
   getTrackTags: db.prepare(`
     SELECT tg.* FROM tags tg
     JOIN track_tags tt ON tt.tag_id = tg.id
@@ -583,6 +594,21 @@ const stmts = {
     JOIN crate_tracks ct ON ct.track_id = t.id
     WHERE ct.crate_id = ?
     ORDER BY t.artist, t.title
+  `),
+
+  // ── Library roots ─────────────────────────────────────
+
+  getAllRoots: db.prepare(`
+    SELECT * FROM library_roots ORDER BY name
+  `),
+
+  addRoot: db.prepare(`
+    INSERT OR IGNORE INTO library_roots (name, path)
+    VALUES (@name, @path)
+  `),
+
+  removeRoot: db.prepare(`
+    DELETE FROM library_roots WHERE id = ?
   `),
 
   // ── Boards ──────────────────────────────────────────
@@ -774,6 +800,22 @@ export function getTagTracks(tagId: number): Track[] {
 
 export function getAllTags(): Tag[] {
   return stmts.getAllTags.all() as Tag[]
+}
+
+export function getMostUsedTags(limit = 12): Tag[] {
+  return stmts.getMostUsedTags.all(limit) as Tag[]
+}
+
+export function getAllRoots(): LibraryRoot[] {
+  return stmts.getAllRoots.all() as LibraryRoot[]
+}
+
+export function addRoot(name: string, path: string): RunResult {
+  return stmts.addRoot.run({ name, path })
+}
+
+export function removeRoot(id: number): RunResult {
+  return stmts.removeRoot.run(id)
 }
 
 export function getUnanalyzedTracks(): unknown[] {
