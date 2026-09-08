@@ -6,7 +6,7 @@ import { Input } from '@renderer/components/ui/input'
 interface ToolbarProps {
   onImport: () => void
   onImportFiles: () => void
-  activeView: 'library' | 'board' | 'folders'
+  activeView: 'dashboard' | 'library' | 'board' | 'genre' | 'artist' | 'folders' | 'crates' | 'settings'
 }
 
 export function Toolbar({ onImport, activeView, onImportFiles }: ToolbarProps): React.JSX.Element {

@@ -7,8 +7,11 @@ import { BoardView } from './components/BoardView'
 import { Inspector } from './components/Inpector'
 import { FolderView } from './views/FolderView'
 import { SettingsModal } from './components/SettingsModal'
+import { EmptyState } from './views/EmptyState'
+import { DashboardView } from '@renderer/views/DashboardView'
+import type { View } from './components/Sidebar'
 
-type View = 'library' | 'board' | 'folders'
+// type View = 'dashboard' | 'library' | 'board' | 'genre' | 'artist' | 'folders' | 'crates' | 'settings'
 
 const COLLAPSE_THRESHOLD = 900 // px
 
@@ -25,7 +28,7 @@ function App(): React.JSX.Element {
     setTags,
     setQuickTags
   } = useLibraryStore()
-  const [activeView, setActiveView] = useState<View>('library')
+  const [activeView, setActiveView] = useState<View>('dashboard')
   // Add library roots to app state
   const [libraryRoots, setLibraryRoots] = useState<LibraryRoot[]>([])
   const [settingsOpen, setSettingsOpen] = useState(false)
@@ -39,7 +42,7 @@ function App(): React.JSX.Element {
     total: number
   } | null>(null)
 
-  // Auto-collapse on narrow window
+  // ── Auto-collapse on narrow window ────────────────────
   useEffect(() => {
     function handleResize(): void {
       if (window.innerWidth < COLLAPSE_THRESHOLD) {
@@ -50,9 +53,10 @@ function App(): React.JSX.Element {
     window.addEventListener('resize', handleResize)
     handleResize() // check on mount
     return () => window.removeEventListener('resize', handleResize)
-  })
+  }, [setSidebarCollapsed])
 
   // Load existing tracks from SQLite on startup
+  // ── Load data on startup ──────────────────────────────
   useEffect(() => {
     async function load(): Promise<void> {
       const [tracks, boards, tags, quickTags, roots] = await Promise.all([
@@ -72,6 +76,7 @@ function App(): React.JSX.Element {
   })
 
   // Listen for progress events from the import handler
+  // ── Import progress listeners ─────────────────────────
   useEffect(() => {
     window.api.onImportProgress((p) => {
       setProgress(p)
@@ -106,6 +111,7 @@ function App(): React.JSX.Element {
     }
   }, [setTracks])
 
+  // ── Import handlers ───────────────────────────────────
   async function handleImportFolder(): Promise<void> {
     const folderPath = await window.api.openFolder()
     if (!folderPath) return
@@ -137,11 +143,18 @@ function App(): React.JSX.Element {
     }
   }
 
+  // ── Roots reload ──────────────────────────────────────
   async function reloadRoots(): Promise<void> {
     const roots = await window.api.roots.all()
     setLibraryRoots(roots)
   }
 
+  // ── View change ───────────────────────────────────────
+  function handleViewChange(view: View): void {
+    setActiveView(view)
+  }
+
+  // ── Progress percentage ───────────────────────────────
   const pct =
     progress && progress.total > 0 ? Math.round((progress.done / progress.total) * 100) : 0
 
@@ -233,7 +246,7 @@ function App(): React.JSX.Element {
       <div style={{ display: 'flex', flex: 1, overflow: 'hidden' }}>
         <Sidebar
           activeView={activeView}
-          onViewChange={setActiveView}
+          onViewChange={handleViewChange}
           collapsed={sidebarCollapsed}
           onToggleCollapsed={() => setSidebarCollapsed(!sidebarCollapsed)}
           onOpenSettings={() => setSettingsOpen(true)}
@@ -241,6 +254,7 @@ function App(): React.JSX.Element {
 
         {/* Content area */}
         <div style={{ flex: 1, display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
+          {activeView === 'dashboard' && (tracks.length === 0 ? <EmptyState onImport={handleImportFolder} /> : <DashboardView />)}
           {activeView === 'library' && <LibraryView />}
           {activeView === 'board' && (
             <div style={{ flex: 1, display: 'flex', justifyContent: 'center', color: '#333' }}>
@@ -279,6 +293,45 @@ function App(): React.JSX.Element {
                 </button>
               </div>
             ))}
+
+          {activeView === 'genre' && (
+            <div style={{
+              flex: 1,
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'center',
+              color: '#333',
+              fontSize: '14px',
+            }}>
+              Genre view — coming soon
+            </div>
+          )}
+
+          {activeView === 'artist' && (
+            <div style={{
+              flex: 1,
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'center',
+              color: '#333',
+              fontSize: '14px',
+            }}>
+              Artist view — coming soon
+            </div>
+          )}
+
+          {activeView === 'crates' && (
+            <div style={{
+              flex: 1,
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'center',
+              color: '#333',
+              fontSize: '14px',
+            }}>
+              Crates — coming soon
+            </div>
+          )}
         </div>
 
         {/* Inspector slides in from the right when a track is selected */}
