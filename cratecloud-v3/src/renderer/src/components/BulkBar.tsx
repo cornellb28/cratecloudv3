@@ -12,8 +12,7 @@ interface BulkBarProps {
 }
 
 export function BulkBar({ selectedIds, onClearSelect, totalCount, onSelectAll }: BulkBarProps): React.JSX.Element | null {
-  const { quickTags, trackTags, setTrackTags } = useLibraryStore()
-  const [applying, setApplying] = useState(false)
+  const { trackTags, setTrackTags } = useLibraryStore()
   const [editModalOpen, setEditModalOpen] = useState(false)
 
   // Hide when nothing is selected
@@ -22,24 +21,6 @@ export function BulkBar({ selectedIds, onClearSelect, totalCount, onSelectAll }:
   const selectedArray = Array.from(selectedIds)
 
   // Apply a tag to every selected track
-  async function applyTagToAll(tag: Tag): Promise<void> {
-    setApplying(true)
-
-    for (const trackId of selectedArray) {
-      const current = trackTags.get(trackId) ?? []
-      const already = current.some(t => t.id === tag.id)
-      if (already) continue
-
-      // Optimistic update
-      const updated = [...current, tag]
-      setTrackTags(trackId, updated)
-
-      // Persist
-      await window.api.tags.apply(trackId, tag.id)
-    }
-
-    setApplying(false)
-  }
 
   return (
     <>
@@ -97,32 +78,6 @@ export function BulkBar({ selectedIds, onClearSelect, totalCount, onSelectAll }:
         >
           Edit labels
         </Button>
-
-        {/* Quick apply tags */}
-        {quickTags.length > 0 && (
-          <>
-            <span style={{ fontSize: '11px', color: '#555' }}>
-              Apply:
-            </span>
-            {quickTags.map(tag => (
-              <Badge
-                key={tag.id}
-                variant="outline"
-                onClick={() => !applying && applyTagToAll(tag)}
-                style={{
-                  fontSize: '11px',
-                  cursor: applying ? 'wait' : 'pointer',
-                  background: tag.color + '22',
-                  color: tag.color,
-                  borderColor: tag.color + '44',
-                  opacity: applying ? 0.6 : 1,
-                }}
-              >
-                {tag.value}
-              </Badge>
-            ))}
-          </>
-        )}
 
         {/* Deselect */}
         <Button

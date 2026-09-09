@@ -1,4 +1,4 @@
-import React, { useRef, useEffect } from 'react'
+import React, { useRef, useEffect, useState } from 'react'
 import { useLibraryStore } from '../store/useLibraryStore'
 import { Slider } from '@renderer/components/ui/slider'
 import { Separator } from '@renderer/components/ui/separator'
@@ -7,16 +7,20 @@ import { MoveFileButton } from './MoveFileButton'
 import { Input } from '@renderer/components/ui/input'
 import { getYearOptions } from '../utils/years'
 
+const CAMELOT_KEYS = [
+  '1A', '2A', '3A', '4A', '5A', '6A', '7A', '8A', '9A', '10A', '11A', '12A',
+  '1B', '2B', '3B', '4B', '5B', '6B', '7B', '8B', '9B', '10B', '11B', '12B',
+]
+
 export function Inspector(): React.JSX.Element {
   const { tracks, activeTrackId, setActiveTrack, updateTrack, setTrackTags } = useLibraryStore()
 
   const track = tracks.find((t) => t.id === activeTrackId) ?? null
   const isOpen = track !== null
-
   const titleRef = useRef<HTMLInputElement>(null)
+  const [analyzing, setAnalyzing] = useState(false)
 
-  // Preload ALL tags for this track into the store
-  // so every TagInput shows applied badges instantly on mount
+  // Preload all tags for this track into store on open
   useEffect(() => {
     if (!activeTrackId) return
     async function preload(): Promise<void> {
@@ -26,12 +30,49 @@ export function Inspector(): React.JSX.Element {
     preload()
   }, [activeTrackId])
 
+  // Auto-analyze if BPM or key is missing
+  useEffect(() => {
+    if (!track) return
+    if (!track.bpm || !track.key_camelot) {
+      autoAnalyze()
+    }
+  }, [activeTrackId])
+
   useEffect(() => {
     if (isOpen && titleRef.current) {
       titleRef.current.focus()
       titleRef.current.select()
     }
   }, [activeTrackId, isOpen])
+
+  async function autoAnalyze(): Promise<void> {
+    if (!track || analyzing) return
+    setAnalyzing(true)
+    try {
+      const result = await window.api.analyzeFile(track.filepath)
+      if (result.ok && result.data) {
+        const { bpm, key_camelot, key_full, duration_sec, duration_str } = result.data
+        updateTrack(track.id, { bpm, key_camelot, key_full, duration_sec, duration_str })
+        await window.api.db.updateTrackMeta({
+          id: track.id,
+          title: track.title,
+          artist: track.artist,
+          genre: track.genre,
+          bpm,
+          key_camelot,
+          energy: track.energy,
+          comment: track.comment,
+          needs_sync: track.needs_sync,
+          pending_changes: track.pending_changes,
+        })
+        await window.api.db.markAnalyzed(track.id)
+      }
+    } catch (err) {
+      console.error('Auto-analyze failed:', err)
+    } finally {
+      setAnalyzing(false)
+    }
+  }
 
   async function saveField(field: string, value: string): Promise<void> {
     if (!track) return
@@ -103,7 +144,8 @@ export function Inspector(): React.JSX.Element {
               width: '100%', aspectRatio: '1',
               borderRadius: '8px', overflow: 'hidden',
               background: '#1e1e2a', marginBottom: '4px',
-              display: 'flex', alignItems: 'center', justifyContent: 'center'
+              display: 'flex', alignItems: 'center', justifyContent: 'center',
+              position: 'relative',
             }}>
               {track.artwork_path ? (
                 <img
@@ -115,6 +157,28 @@ export function Inspector(): React.JSX.Element {
                 />
               ) : (
                 <span style={{ fontSize: '48px', color: '#333' }}>♪</span>
+              )}
+              {/* Analyzing overlay */}
+              {analyzing && (
+                <div style={{
+                  position: 'absolute',
+                  inset: 0,
+                  background: 'rgba(0,0,0,0.5)',
+                  display: 'flex',
+                  flexDirection: 'column',
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                  gap: '8px',
+                }}>
+                  <div style={{
+                    fontSize: '24px',
+                    color: '#7f77dd',
+                    animation: 'spin 1s linear infinite',
+                  }}>⟳</div>
+                  <span style={{ fontSize: '11px', color: '#a09be8' }}>
+                    Detecting BPM + key...
+                  </span>
+                </div>
               )}
             </div>
 
@@ -131,7 +195,6 @@ export function Inspector(): React.JSX.Element {
           }}>
             <div style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
 
-              {/* Title — plain input, single value */}
               <EditField
                 ref={titleRef}
                 data-testid="inspector-field-title"
@@ -141,87 +204,82 @@ export function Inspector(): React.JSX.Element {
                 onKeyDown={(e) => onKeyDown(e, 'title')}
               />
 
-              {/* Artist — tag system, type once reuse everywhere */}
-              <TagInput
-                trackId={track.id}
-                field="artist"
-                label="Artist"
-                color="#d4537e"
-              />
+              <TagInput trackId={track.id} field="artist" label="Artist" color="#d4537e" />
+              <TagInput trackId={track.id} field="genre" label="Genre" color="#9b8ed4" />
+              <TagInput trackId={track.id} field="comment" label="Comment" color="#7f77dd" />
+              <TagInput trackId={track.id} field="grouping" label="Grouping" color="#1d9e75" />
+              <TagInput trackId={track.id} field="remixer" label="Remixer" color="#d85a30" />
+              <TagInput trackId={track.id} field="label" label="Label" color="#378add" />
+              <TagInput trackId={track.id} field="composer" label="Composer" color="#ba7517" />
+              <TagInput trackId={track.id} field="album" label="Album" color="#888780" />
 
-              {/* Genre — tag system */}
-              <TagInput
-                trackId={track.id}
-                field="genre"
-                label="Genre"
-                color="#9b8ed4"
-              />
+              {/* BPM — auto-detects if empty */}
+              <div>
+                <label className="text-[10px] font-medium tracking-widest uppercase text-muted-foreground">
+                  BPM
+                </label>
+                <div style={{ position: 'relative' }}>
+                  <Input
+                    key={`bpm-${track.id}-${track.bpm}`}
+                    data-testid="inspector-field-bpm"
+                    defaultValue={track.bpm?.toString() ?? ''}
+                    disabled={analyzing}
+                    placeholder={analyzing ? 'Detecting...' : ''}
+                    onBlur={(e) => saveField('bpm', e.target.value)}
+                    onKeyDown={(e) => onKeyDown(e, 'bpm')}
+                    onFocus={(e) => e.target.select()}
+                    className="h-7 text-xs font-mono bg-[#1a1a26] border-[#252535] text-[#c0c0d8] focus-visible:ring-[#7f77dd] pr-8"
+                  />
+                  {analyzing && (
+                    <span style={{
+                      position: 'absolute',
+                      right: '8px',
+                      top: '50%',
+                      transform: 'translateY(-50%)',
+                      fontSize: '12px',
+                      color: '#7f77dd',
+                    }}>
+                      ⟳
+                    </span>
+                  )}
+                </div>
+              </div>
 
-              {/* Comment — tag system */}
-              <TagInput
-                trackId={track.id}
-                field="comment"
-                label="Comment"
-                color="#7f77dd"
-              />
-
-              {/* Grouping — tag system */}
-              <TagInput
-                trackId={track.id}
-                field="grouping"
-                label="Grouping"
-                color="#1d9e75"
-              />
-
-              {/* Remixer — tag system */}
-              <TagInput
-                trackId={track.id}
-                field="remixer"
-                label="Remixer"
-                color="#d85a30"
-              />
-
-              {/* Label — tag system */}
-              <TagInput
-                trackId={track.id}
-                field="label"
-                label="Label"
-                color="#378add"
-              />
-
-              {/* Composer — tag system */}
-              <TagInput
-                trackId={track.id}
-                field="composer"
-                label="Composer"
-                color="#ba7517"
-              />
-
-              {/* Album — tag system */}
-              <TagInput
-                trackId={track.id}
-                field="album"
-                label="Album"
-                color="#888780"
-              />
-
-              {/* BPM — stays as plain input (numeric) */}
-              <EditField
-                data-testid="inspector-field-bpm"
-                label="BPM"
-                defaultValue={track.bpm?.toString() ?? ''}
-                onSave={(v) => saveField('bpm', v)}
-                onKeyDown={(e) => onKeyDown(e, 'bpm')}
-              />
-
-              {/* Key — stays as plain input (structured) */}
-              <EditField
-                data-testid="inspector-field-key"
-                label="Key"
-                defaultValue={track.key_camelot ?? ''}
-                onSave={(v) => saveField('key_camelot', v)}
-                onKeyDown={(e) => onKeyDown(e, 'key_camelot')}
-              />
+              {/* Key — Camelot dropdown */}
+              <div>
+                <label className="text-[10px] font-medium tracking-widest uppercase text-muted-foreground">
+                  Key
+                </label>
+                <select
+                  key={`key-${track.id}-${track.key_camelot}`}
+                  data-testid="inspector-field-key"
+                  defaultValue={track.key_camelot ?? ''}
+                  disabled={analyzing}
+                  onChange={(e) => saveField('key_camelot', e.target.value)}
+                  style={{
+                    width: '100%',
+                    background: '#1a1a26',
+                    border: '0.5px solid #252535',
+                    borderRadius: '5px',
+                    padding: '5px 8px',
+                    color: track.key_camelot ? '#c0c0d8' : '#555',
+                    fontSize: '12px',
+                    fontFamily: 'monospace',
+                    outline: 'none',
+                    cursor: analyzing ? 'wait' : 'pointer',
+                    height: '28px',
+                  }}
+                  onFocus={(e) => (e.target.style.borderColor = '#7f77dd')}
+                  onBlur={(e) => (e.target.style.borderColor = '#252535')}
+                >
+                  <option value="">
+                    {analyzing ? 'Detecting...' : '— pick key —'}
+                  </option>
+                  {CAMELOT_KEYS.map(k => (
+                    <option key={k} value={k}>{k}</option>
+                  ))}
+                </select>
+              </div>
 
               {/* Energy slider */}
               <div className="flex flex-col gap-2">
@@ -251,7 +309,7 @@ export function Inspector(): React.JSX.Element {
                   Year
                 </div>
                 <select
-                  key={`inspector-year-${track.id}`}
+                  key={`year-${track.id}`}
                   defaultValue={track.year ?? String(new Date().getFullYear())}
                   onChange={(e) => saveField('year', e.target.value)}
                   style={{
@@ -259,7 +317,7 @@ export function Inspector(): React.JSX.Element {
                     border: '0.5px solid #252535', borderRadius: '5px',
                     padding: '5px 8px', color: '#c0c0d8',
                     fontSize: '12px', fontFamily: 'monospace',
-                    outline: 'none', cursor: 'pointer'
+                    outline: 'none', cursor: 'pointer', height: '28px',
                   }}
                   onFocus={(e) => (e.target.style.borderColor = '#7f77dd')}
                   onBlur={(e) => (e.target.style.borderColor = '#252535')}
@@ -331,6 +389,7 @@ const EditField = React.forwardRef<HTMLInputElement, EditFieldProps>(
         defaultValue={defaultValue}
         onBlur={(e) => onSave(e.target.value)}
         onKeyDown={onKeyDown}
+        onFocus={(e) => e.target.select()}
         className="h-7 text-xs font-mono bg-[#1a1a26] border-[#252535] text-[#c0c0d8] focus-visible:ring-[#7f77dd]"
       />
     </div>

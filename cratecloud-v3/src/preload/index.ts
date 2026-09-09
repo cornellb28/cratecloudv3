@@ -56,7 +56,8 @@ const api = {
     updateTrackMeta: (data: unknown) => ipcRenderer.invoke('db:update-track-meta', data),
     updateBoardId: (id: number, boardId: number) => ipcRenderer.invoke('db:update-board-id', id, boardId),
     tracksByBoardId: (boardId: number) => ipcRenderer.invoke('db:tracks-by-board-id', boardId),
-    markMissing: (filepath: string) => ipcRenderer.invoke('db:mark-missing', filepath)
+    markMissing: (filepath: string) => ipcRenderer.invoke('db:mark-missing', filepath),
+    markAnalyzed: (id: number) => ipcRenderer.invoke('db:mark-analyzed', id)
   },
 
   // Tags

@@ -71,6 +71,7 @@ declare global {
         updateBoardId: (id: number, boardId: number) => Promise<{ ok: boolean; error?: string }>
         tracksByBoardId: (id: number, boardId: number) => Promise<Track[]>
         markMissing: (filepath: string) => Promise<{ ok: boolean; error?: string }>
+        markAnalyzed: (id: number) => Promise<{ ok: boolean; error?: string }>
       }
 
       watcher: {

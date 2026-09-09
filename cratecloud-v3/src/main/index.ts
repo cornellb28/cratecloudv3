@@ -889,6 +889,15 @@ app.whenReady().then(() => {
 
   // ── Library roots ────────────────────────────────────────
 
+  ipcMain.handle('db:mark-analyzed', (_e, id: number) => {
+    try {
+      markTrackAnalyzed(id)
+      return { ok: true }
+    } catch (err) {
+      return { ok: false, error: (err as Error).message }
+    }
+  })
+
   ipcMain.handle('roots:all', () => getAllRoots())
 
   ipcMain.handle('roots:add', async (event, folderPath: string) => {

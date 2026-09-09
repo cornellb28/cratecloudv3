@@ -161,10 +161,11 @@ export function BoardCardModal({ track, open, onClose }: BoardCardModalProps): R
             )}
           </div>
 
-          <MoveFileButton track={track} />
+
 
           {/* Info */}
           <div style={{ flex: 1, minWidth: 0 }}>
+
             <div
               style={{
                 fontSize: '15px',
@@ -245,6 +246,10 @@ export function BoardCardModal({ track, open, onClose }: BoardCardModalProps): R
 
         {/* ── Workflow section ──────────────────────── */}
         <div style={{ padding: '14px 16px' }}>
+          <div style={{ marginBottom: '14px' }}>
+            <MoveFileButton track={track} />
+          </div>
+
           {/* Column picker */}
           <div style={{ marginBottom: '14px' }}>
             <div
@@ -284,49 +289,6 @@ export function BoardCardModal({ track, open, onClose }: BoardCardModalProps): R
               })}
             </div>
           </div>
-
-          {/* Quick tags */}
-          {quickTags.length > 0 && (
-            <div style={{ marginBottom: '14px' }}>
-              <div
-                style={{
-                  fontSize: '10px',
-                  fontWeight: 500,
-                  letterSpacing: '0.8px',
-                  textTransform: 'uppercase',
-                  color: '#444',
-                  marginBottom: '8px'
-                }}
-              >
-                Quick tags
-              </div>
-              <div style={{ display: 'flex', gap: '6px', flexWrap: 'wrap' }}>
-                {quickTags.map((tag) => {
-                  const isApplied = commentTagIds.has(tag.id)
-                  return (
-                    <Badge
-                      key={tag.id}
-                      variant="outline"
-                      onClick={() => toggleQuickTag(tag)}
-                      style={{
-                        cursor: 'pointer',
-                        fontSize: '11px',
-                        padding: '3px 10px',
-                        background: isApplied ? tag.color : tag.color + '22',
-                        color: isApplied ? '#fff' : tag.color,
-                        borderColor: tag.color + '88',
-                        fontWeight: 500,
-                        transition: 'all 0.1s',
-                        userSelect: 'none'
-                      }}
-                    >
-                      {tag.value}
-                    </Badge>
-                  )
-                })}
-              </div>
-            </div>
-          )}
 
           {/* Quick editable fields — tab through fast */}
           <div style={{ marginBottom: '14px' }}>
@@ -392,129 +354,101 @@ export function BoardCardModal({ track, open, onClose }: BoardCardModalProps): R
 
         <Separator className="bg-[#1e1e2a]" />
 
-        {/* ── Collapsible full metadata ─────────────── */}
+        {/* ── full metadata ─────────────── */}
         <div>
-          <button
-            onClick={() => setMetaOpen((o) => !o)}
-            style={{
-              width: '100%',
-              padding: '10px 16px',
-              background: 'none',
-              border: 'none',
-              color: '#555',
-              fontSize: '12px',
-              cursor: 'pointer',
-              display: 'flex',
-              alignItems: 'center',
-              justifyContent: 'space-between',
-              fontFamily: 'inherit'
-            }}
-          >
-            <span>Full metadata</span>
-            <span
-              style={{
-                transform: metaOpen ? 'rotate(180deg)' : 'none',
-                transition: 'transform 0.2s',
-                fontSize: '10px'
-              }}
-            >
-              ▾
-            </span>
-          </button>
 
-          {metaOpen && (
-            <div style={{ padding: '0 16px 16px' }}>
-              {/* All tag fields */}
-              {[
-                { field: 'genre', label: 'Genre', color: '#9b8ed4' },
-                { field: 'comment', label: 'Comment', color: '#7f77dd' },
-                { field: 'grouping', label: 'Grouping', color: '#1d9e75' },
-                { field: 'remixer', label: 'Remixer', color: '#d85a30' },
-                { field: 'label', label: 'Label', color: '#378add' }
-              ].map(({ field, label, color }) => (
-                <TagInput
-                  key={field}
-                  trackId={track.id}
-                  field={field}
-                  label={label}
-                  color={color}
-                />
-              ))}
+          <div style={{ padding: '0 16px 16px' }}>
+            {/* All tag fields */}
+            {[
+              { field: 'genre', label: 'Genre', color: '#9b8ed4' },
+              { field: 'comment', label: 'Comment', color: '#7f77dd' },
+              { field: 'grouping', label: 'Grouping', color: '#1d9e75' },
+              { field: 'remixer', label: 'Remixer', color: '#d85a30' },
+              { field: 'label', label: 'Label', color: '#378add' }
+            ].map(({ field, label, color }) => (
+              <TagInput
+                key={field}
+                trackId={track.id}
+                field={field}
+                label={label}
+                color={color}
+              />
+            ))}
 
-              {/* Energy slider */}
-              <div style={{ marginTop: '8px' }}>
-                <div
-                  style={{
-                    fontSize: '10px',
-                    fontWeight: 500,
-                    letterSpacing: '0.8px',
-                    textTransform: 'uppercase',
-                    color: '#444',
-                    marginBottom: '6px'
-                  }}
-                >
-                  Energy
-                </div>
-                <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
-                  <Slider
-                    defaultValue={[track.energy ?? 5]}
-                    min={1}
-                    max={10}
-                    step={1}
-                    onValueCommit={(val) => saveField('energy', val[0].toString())}
-                    className="flex-1"
-                  />
-                  <span style={{ fontSize: '12px', color: '#555', minWidth: '16px' }}>
-                    {track.energy ?? '—'}
-                  </span>
-                </div>
-              </div>
-
-              {/* Read-only info */}
+            {/* Energy slider */}
+            <div style={{ marginTop: '8px' }}>
               <div
-                style={{ marginTop: '12px', display: 'flex', flexDirection: 'column', gap: '6px' }}
+                style={{
+                  fontSize: '10px',
+                  fontWeight: 500,
+                  letterSpacing: '0.8px',
+                  textTransform: 'uppercase',
+                  color: '#444',
+                  marginBottom: '6px'
+                }}
               >
-                {[
-                  { label: 'Duration', value: track.duration_str },
-                  { label: 'Format', value: track.format },
-                  { label: 'Year', value: track.year }
-                ].map(({ label, value }) =>
-                  value ? (
-                    <div key={label} style={{ display: 'flex', justifyContent: 'space-between' }}>
-                      <span
-                        style={{
-                          fontSize: '11px',
-                          color: '#444',
-                          textTransform: 'uppercase',
-                          letterSpacing: '0.6px'
-                        }}
-                      >
-                        {label}
-                      </span>
-                      <span style={{ fontSize: '12px', color: '#c0c0d8' }}>{value}</span>
-                    </div>
-                  ) : null
-                )}
+                Energy
               </div>
-
-              {/* Filepath */}
-              <div style={{ marginTop: '12px' }}>
-                <div style={{ fontSize: '10px', color: '#333', marginBottom: '3px' }}>
-                  FILE PATH
-                </div>
-                <div
-                  style={{
-                    fontSize: '10px',
-                    color: '#444',
-                    wordBreak: 'break-all',
-                    lineHeight: 1.5
-                  }}
-                >
-                  {track.filepath}
-                </div>
+              <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+                <Slider
+                  defaultValue={[track.energy ?? 5]}
+                  min={1}
+                  max={10}
+                  step={1}
+                  onValueCommit={(val) => saveField('energy', val[0].toString())}
+                  className="flex-1"
+                />
+                <span style={{ fontSize: '12px', color: '#555', minWidth: '16px' }}>
+                  {track.energy ?? '—'}
+                </span>
               </div>
             </div>
-          )}
+
+            {/* Read-only info */}
+            <div
+              style={{ marginTop: '12px', display: 'flex', flexDirection: 'column', gap: '6px' }}
+            >
+              {[
+                { label: 'Duration', value: track.duration_str },
+                { label: 'Format', value: track.format },
+                { label: 'Year', value: track.year }
+              ].map(({ label, value }) =>
+                value ? (
+                  <div key={label} style={{ display: 'flex', justifyContent: 'space-between' }}>
+                    <span
+                      style={{
+                        fontSize: '11px',
+                        color: '#444',
+                        textTransform: 'uppercase',
+                        letterSpacing: '0.6px'
+                      }}
+                    >
+                      {label}
+                    </span>
+                    <span style={{ fontSize: '12px', color: '#c0c0d8' }}>{value}</span>
+                  </div>
+                ) : null
+              )}
+            </div>
+
+            {/* Filepath */}
+            <div style={{ marginTop: '12px' }}>
+              <div style={{ fontSize: '10px', color: '#333', marginBottom: '3px' }}>
+                FILE PATH
+              </div>
+              <div
+                style={{
+                  fontSize: '10px',
+                  color: '#444',
+                  wordBreak: 'break-all',
+                  lineHeight: 1.5
+                }}
+              >
+                {track.filepath}
+              </div>
+            </div>
+          </div>
+
         </div>
       </DialogContent>
     </Dialog>
