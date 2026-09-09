@@ -66,16 +66,39 @@ export function TagInput({ trackId, field, label, color = '#7f77dd' }: TagInputP
   }, [])
 
   // Apply an existing tag to the track
+  // In applyTag — after optimistic update:
   async function applyTag(tag: Tag): Promise<void> {
-    // Optimistic update
-    setAppliedTags(prev => [...prev, tag])
+    const updated = [...appliedTags, tag]
+    setAppliedTags(updated)
     setQuery('')
     setDropdownOpen(false)
 
+    // Sync full track tags to store so cache is fresh on remount
+    const allCurrent = useLibraryStore.getState().trackTags.get(trackId) ?? []
+    const merged = [...allCurrent.filter(t => t.id !== tag.id), tag]
+    useLibraryStore.getState().setTrackTags(trackId, merged)
+
     const result = await window.api.tags.apply(trackId, tag.id)
     if (!result.ok) {
-      // Revert on failure
-      setAppliedTags(prev => prev.filter(t => t.id !== tag.id))
+      setAppliedTags((prev) => prev.filter(t => t.id !== tag.id))
+      useLibraryStore.getState().setTrackTags(trackId, allCurrent)
+    }
+  }
+
+  // In removeAppliedTag — after optimistic update:
+  async function removeAppliedTag(tag: Tag): Promise<void> {
+    const updated = appliedTags.filter(t => t.id !== tag.id)
+    setAppliedTags(updated)
+
+    // Sync to store
+    const allCurrent = useLibraryStore.getState().trackTags.get(trackId) ?? []
+    const merged = allCurrent.filter(t => t.id !== tag.id)
+    useLibraryStore.getState().setTrackTags(trackId, merged)
+
+    const result = await window.api.tags.remove(trackId, tag.id)
+    if (!result.ok) {
+      setAppliedTags((prev) => [...prev, tag])
+      useLibraryStore.getState().setTrackTags(trackId, allCurrent)
     }
   }
 
@@ -100,18 +123,6 @@ export function TagInput({ trackId, field, label, color = '#7f77dd' }: TagInputP
 
     // Apply to track
     await applyTag(newTag)
-  }
-
-  // Remove a tag from the track
-  async function removeAppliedTag(tag: Tag): Promise<void> {
-    // Optimistic update
-    setAppliedTags(prev => prev.filter(t => t.id !== tag.id))
-
-    const result = await window.api.tags.remove(trackId, tag.id)
-    if (!result.ok) {
-      // Revert on failure
-      setAppliedTags(prev => [...prev, tag])
-    }
   }
 
   function onKeyDown(e: React.KeyboardEvent<HTMLInputElement>): void {
