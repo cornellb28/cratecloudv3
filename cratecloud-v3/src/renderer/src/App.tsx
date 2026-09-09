@@ -11,6 +11,7 @@ import { EmptyState } from './views/EmptyState'
 import { DashboardView } from '@renderer/views/DashboardView'
 import type { View } from './components/Sidebar'
 import { Breadcrumb } from './components/Breadcrumb'
+import { ReconciliationModal } from './components/ReconciliationModal'
 
 // type View = 'dashboard' | 'library' | 'board' | 'genre' | 'artist' | 'folders' | 'crates' | 'settings'
 
@@ -33,6 +34,7 @@ function App(): React.JSX.Element {
   // Add library roots to app state
   const [libraryRoots, setLibraryRoots] = useState<LibraryRoot[]>([])
   const [settingsOpen, setSettingsOpen] = useState(false)
+  const [reconcileOpen, setReconcileOpen] = useState(false)
   const [progress, setProgress] = useState<{
     done: number
     total: number
@@ -73,6 +75,10 @@ function App(): React.JSX.Element {
     window.api.onTrackDeleted(async () => {
       const all = await window.api.db.allTracks()
       setTracks(all)
+    })
+
+    window.api.onRootOnline(() => {
+      setReconcileOpen(true)
     })
 
     // Root went offline
@@ -385,6 +391,7 @@ function App(): React.JSX.Element {
         libraryRoots={libraryRoots}
         onRootsChanged={reloadRoots}
       />
+      <ReconciliationModal open={reconcileOpen} onClose={() => setReconcileOpen(false)} />
     </div>
   )
 }

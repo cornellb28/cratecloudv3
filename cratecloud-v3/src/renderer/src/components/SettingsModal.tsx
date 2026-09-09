@@ -1,6 +1,7 @@
 import React, { useState } from 'react'
 import { Dialog, DialogContent } from '@renderer/components/ui/dialog'
 import { Button } from '@renderer/components/ui/button'
+import { ReconciliationModal } from './ReconciliationModal'
 
 interface SettingsModalProps {
   open: boolean
@@ -16,6 +17,7 @@ export function SettingsModal({
   onRootsChanged
 }: SettingsModalProps): React.JSX.Element {
   const [adding, setAdding] = useState(false)
+  const [reconcileOpen, setReconcileOpen] = useState(false)
 
   async function handleAddFolder(): Promise<void> {
     const folderPath = await window.api.openFolder()
@@ -122,6 +124,19 @@ export function SettingsModal({
           <Button onClick={handleAddFolder} disabled={adding} variant="outline" size="sm">
             {adding ? 'Adding...' : '+ Add library folder'}
           </Button>
+        </div>
+        <div style={{ padding: '16px', borderBottom: '0.5px solid #1e1e2a' }}>
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={() => setReconcileOpen(true)}
+            className="text-xs"
+          >
+            Review pending changes
+          </Button>
+
+          <ReconciliationModal open={reconcileOpen} onClose={() => setReconcileOpen(false)}
+          />
         </div>
       </DialogContent>
     </Dialog>

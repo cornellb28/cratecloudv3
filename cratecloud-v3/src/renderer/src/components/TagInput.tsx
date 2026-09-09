@@ -1,6 +1,7 @@
 import React, { useState, useRef, useEffect } from 'react'
 import { useLibraryStore } from '../store/useLibraryStore'
 import { Badge } from './ui/badge'
+import { getYearOptions } from '../utils/years'
 
 interface TagInputProps {
   trackId: number
@@ -32,17 +33,21 @@ export function TagInput({ trackId, field, label, color = '#7f77dd' }: TagInputP
 
   // Load applied tags for this track on mount
   useEffect(() => {
+    // Read from store cache first — Inspector preloads all tags
+    // so badges appear instantly without waiting for IPC
+    const cached = useLibraryStore.getState().trackTags.get(trackId)
+    if (cached) {
+      setAppliedTags(cached.filter((t: Tag) => t.field === field))
+      setLoading(false)
+      return
+    }
+
+    // Cache miss — fetch from DB
     async function load(): Promise<void> {
       setLoading(true)
       const result = await window.api.tags.forTrack(trackId)
-
-      // Filter to only tags for this field
       setAppliedTags(result.filter((t: Tag) => t.field === field))
-
-      // Sync ALL tags for this track to the store
-      // so TrackRow can show badges without its own IPC call
       useLibraryStore.getState().setTrackTags(trackId, result)
-
       setLoading(false)
     }
     load()

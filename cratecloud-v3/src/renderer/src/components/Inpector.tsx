@@ -1,37 +1,41 @@
 import React, { useRef, useEffect } from 'react'
 import { useLibraryStore } from '../store/useLibraryStore'
-import { Input } from '@renderer/components/ui/input'
 import { Slider } from '@renderer/components/ui/slider'
 import { Separator } from '@renderer/components/ui/separator'
 import { TagInput } from './TagInput'
-import { getYearOptions } from '../utils/years'
 import { MoveFileButton } from './MoveFileButton'
+import { Input } from '@renderer/components/ui/input'
+import { getYearOptions } from '../utils/years'
 
 export function Inspector(): React.JSX.Element {
-  const { tracks, activeTrackId, setActiveTrack, updateTrack } = useLibraryStore()
+  const { tracks, activeTrackId, setActiveTrack, updateTrack, setTrackTags } = useLibraryStore()
 
   const track = tracks.find((t) => t.id === activeTrackId) ?? null
   const isOpen = track !== null
 
-  // Focus the title field when a track is selected
   const titleRef = useRef<HTMLInputElement>(null)
+
+  // Preload ALL tags for this track into the store
+  // so every TagInput shows applied badges instantly on mount
+  useEffect(() => {
+    if (!activeTrackId) return
+    async function preload(): Promise<void> {
+      const result = await window.api.tags.forTrack(activeTrackId!)
+      setTrackTags(activeTrackId!, result)
+    }
+    preload()
+  }, [activeTrackId])
 
   useEffect(() => {
     if (isOpen && titleRef.current) {
       titleRef.current.focus()
       titleRef.current.select()
     }
-  }, [activeTrackId, isOpen]) // re-run when the active track changes
+  }, [activeTrackId, isOpen])
 
-  // Save a single field to SQLite and the store
   async function saveField(field: string, value: string): Promise<void> {
     if (!track) return
-
-    // Update the store immediately — optimistic update
-    // The UI reflects the change before the IPC call finishes
     updateTrack(track.id, { [field]: value })
-
-    // Save to SQLite via IPC
     await window.api.db.updateTrackMeta({
       id: track.id,
       title: track.title,
@@ -43,20 +47,13 @@ export function Inspector(): React.JSX.Element {
       comment: track.comment,
       needs_sync: track.needs_sync,
       pending_changes: track.pending_changes,
-      // Override with the new value
       [field]: field === 'bpm' ? parseFloat(value) || null : value || null
     })
   }
 
-  // Handle Enter key — saves and moves focus to next field
   function onKeyDown(e: React.KeyboardEvent<HTMLInputElement>, field: string): void {
-    if (e.key === 'Enter') {
-      saveField(field, e.currentTarget.value)
-      e.currentTarget.blur()
-    }
-    if (e.key === 'Escape') {
-      e.currentTarget.blur()
-    }
+    if (e.key === 'Enter') { saveField(field, e.currentTarget.value); e.currentTarget.blur() }
+    if (e.key === 'Escape') { e.currentTarget.blur() }
   }
 
   return (
@@ -74,61 +71,46 @@ export function Inspector(): React.JSX.Element {
       }}
     >
       {isOpen && track && (
-        <div
-          style={{
+        <div style={{
+          display: 'flex',
+          flexDirection: 'column',
+          minWidth: '260px',
+          height: '100%',
+          overflow: 'hidden'
+        }}>
+
+          {/* Fixed header */}
+          <div style={{
+            padding: '16px 16px 0 16px',
             display: 'flex',
             flexDirection: 'column',
-            minWidth: '260px',
-            height: '100%',
-            overflow: 'hidden'
-          }}
-        >
-          {/* Fixed header: close button + artwork */}
-          <div
-            style={{
-              padding: '16px 16px 0 16px',
-              display: 'flex',
-              flexDirection: 'column',
-              gap: '12px',
-              flexShrink: 0
-            }}
-          >
-            {/* Close button */}
+            gap: '12px',
+            flexShrink: 0
+          }}>
             <div style={{ display: 'flex', justifyContent: 'flex-end' }}>
               <button
                 onClick={() => setActiveTrack(null)}
                 style={{
-                  background: 'none',
-                  border: 'none',
-                  color: '#444',
-                  cursor: 'pointer',
-                  fontSize: '16px',
-                  padding: '0',
-                  lineHeight: 1
+                  background: 'none', border: 'none',
+                  color: '#444', cursor: 'pointer',
+                  fontSize: '16px', padding: '0', lineHeight: 1
                 }}
-              >
-                ✕
-              </button>
+              >✕</button>
             </div>
 
             {/* Artwork */}
-            <div
-              style={{
-                width: '100%',
-                aspectRatio: '1',
-                borderRadius: '8px',
-                overflow: 'hidden',
-                background: '#1e1e2a',
-                marginBottom: '4px',
-                display: 'flex',
-                alignItems: 'center',
-                justifyContent: 'center'
-              }}
-            >
+            <div style={{
+              width: '100%', aspectRatio: '1',
+              borderRadius: '8px', overflow: 'hidden',
+              background: '#1e1e2a', marginBottom: '4px',
+              display: 'flex', alignItems: 'center', justifyContent: 'center'
+            }}>
               {track.artwork_path ? (
                 <img
                   src={`artwork://${track.artwork_path}`}
                   alt=""
+                  loading="lazy"
+                  decoding="async"
                   style={{ width: '100%', height: '100%', objectFit: 'cover' }}
                 />
               ) : (
@@ -136,24 +118,20 @@ export function Inspector(): React.JSX.Element {
               )}
             </div>
 
-            {/* Divider */}
             <Separator className="bg-[#1e1e2a]" />
           </div>
 
           <MoveFileButton track={track} />
 
           {/* Scrollable editing section */}
-          <div
-            data-testid="inspector-editing-section"
-            style={{
-              flex: 1,
-              minHeight: 0,
-              overflowY: 'auto',
-              overflowX: 'hidden',
-              padding: '12px 16px'
-            }}
-          >
+          <div style={{
+            flex: 1, minHeight: 0,
+            overflowY: 'auto', overflowX: 'hidden',
+            padding: '12px 16px'
+          }}>
             <div style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
+
+              {/* Title — plain input, single value */}
               <EditField
                 ref={titleRef}
                 data-testid="inspector-field-title"
@@ -163,44 +141,89 @@ export function Inspector(): React.JSX.Element {
                 onKeyDown={(e) => onKeyDown(e, 'title')}
               />
 
-              <EditField
+              {/* Artist — tag system, type once reuse everywhere */}
+              <TagInput
+                trackId={track.id}
+                field="artist"
                 label="Artist"
-                data-testid="inspector-field-artist"
-                defaultValue={track.artist ?? ''}
-                onSave={(v) => saveField('artist', v)}
-                onKeyDown={(e) => onKeyDown(e, 'artist')}
+                color="#d4537e"
               />
 
-              <EditField
+              {/* Genre — tag system */}
+              <TagInput
+                trackId={track.id}
+                field="genre"
                 label="Genre"
-                data-testid="inspector-field-genre"
-                defaultValue={track.genre ?? ''}
-                onSave={(v) => saveField('genre', v)}
-                onKeyDown={(e) => onKeyDown(e, 'genre')}
+                color="#9b8ed4"
               />
 
-              <TagInput trackId={track.id} field="comment" label="Comment tags" color="#7f77dd" />
+              {/* Comment — tag system */}
+              <TagInput
+                trackId={track.id}
+                field="comment"
+                label="Comment"
+                color="#7f77dd"
+              />
 
-              <TagInput trackId={track.id} field="grouping" label="Grouping tags" color="#1d9e75" />
+              {/* Grouping — tag system */}
+              <TagInput
+                trackId={track.id}
+                field="grouping"
+                label="Grouping"
+                color="#1d9e75"
+              />
 
-              <TagInput trackId={track.id} field="remixer" label="Remixer tags" color="#d85a30" />
+              {/* Remixer — tag system */}
+              <TagInput
+                trackId={track.id}
+                field="remixer"
+                label="Remixer"
+                color="#d85a30"
+              />
 
+              {/* Label — tag system */}
+              <TagInput
+                trackId={track.id}
+                field="label"
+                label="Label"
+                color="#378add"
+              />
+
+              {/* Composer — tag system */}
+              <TagInput
+                trackId={track.id}
+                field="composer"
+                label="Composer"
+                color="#ba7517"
+              />
+
+              {/* Album — tag system */}
+              <TagInput
+                trackId={track.id}
+                field="album"
+                label="Album"
+                color="#888780"
+              />
+
+              {/* BPM — stays as plain input (numeric) */}
               <EditField
-                label="BPM"
                 data-testid="inspector-field-bpm"
+                label="BPM"
                 defaultValue={track.bpm?.toString() ?? ''}
                 onSave={(v) => saveField('bpm', v)}
                 onKeyDown={(e) => onKeyDown(e, 'bpm')}
               />
 
+              {/* Key — stays as plain input (structured) */}
               <EditField
-                label="Key"
                 data-testid="inspector-field-key"
+                label="Key"
                 defaultValue={track.key_camelot ?? ''}
                 onSave={(v) => saveField('key_camelot', v)}
                 onKeyDown={(e) => onKeyDown(e, 'key_camelot')}
               />
 
+              {/* Energy slider */}
               <div className="flex flex-col gap-2">
                 <label className="text-[10px] font-medium tracking-widest uppercase text-muted-foreground">
                   Energy
@@ -208,9 +231,7 @@ export function Inspector(): React.JSX.Element {
                 <div className="flex items-center gap-3">
                   <Slider
                     defaultValue={[track.energy ?? 5]}
-                    min={1}
-                    max={10}
-                    step={1}
+                    min={1} max={10} step={1}
                     onValueCommit={(val) => saveField('energy', val[0].toString())}
                     className="flex-1"
                   />
@@ -220,25 +241,13 @@ export function Inspector(): React.JSX.Element {
                 </div>
               </div>
 
-              <EditField
-                label="Album"
-                defaultValue={track.album ?? ''}
-                onSave={(v) => saveField('album', v)}
-                onKeyDown={(e) => onKeyDown(e, 'album')}
-              />
-
-              {/* Year selector in Inspector */}
+              {/* Year */}
               <div>
-                <div
-                  style={{
-                    fontSize: '10px',
-                    fontWeight: 500,
-                    letterSpacing: '0.8px',
-                    textTransform: 'uppercase',
-                    color: '#333',
-                    marginBottom: '3px'
-                  }}
-                >
+                <div style={{
+                  fontSize: '10px', fontWeight: 500,
+                  letterSpacing: '0.8px', textTransform: 'uppercase',
+                  color: '#333', marginBottom: '3px'
+                }}>
                   Year
                 </div>
                 <select
@@ -246,85 +255,61 @@ export function Inspector(): React.JSX.Element {
                   defaultValue={track.year ?? String(new Date().getFullYear())}
                   onChange={(e) => saveField('year', e.target.value)}
                   style={{
-                    width: '100%',
-                    background: '#1a1a26',
-                    border: '0.5px solid #252535',
-                    borderRadius: '5px',
-                    padding: '5px 8px',
-                    color: '#c0c0d8',
-                    fontSize: '12px',
-                    fontFamily: 'monospace',
-                    outline: 'none',
-                    cursor: 'pointer'
+                    width: '100%', background: '#1a1a26',
+                    border: '0.5px solid #252535', borderRadius: '5px',
+                    padding: '5px 8px', color: '#c0c0d8',
+                    fontSize: '12px', fontFamily: 'monospace',
+                    outline: 'none', cursor: 'pointer'
                   }}
                   onFocus={(e) => (e.target.style.borderColor = '#7f77dd')}
                   onBlur={(e) => (e.target.style.borderColor = '#252535')}
                 >
-                  {/* Replace the Array.from(...) calls with */}
                   {getYearOptions().map((year) => (
-                    <option key={year} value={String(year)}>
-                      {year}
-                    </option>
+                    <option key={year} value={String(year)}>{year}</option>
                   ))}
                 </select>
               </div>
+
             </div>
           </div>
 
-          {/* Fixed footer: read-only fields + file path */}
-          <div
-            style={{
-              padding: '0 16px 16px 16px',
-              display: 'flex',
-              flexDirection: 'column',
-              gap: '12px',
-              flexShrink: 0
-            }}
-          >
-            {/* Divider */}
+          {/* Fixed footer */}
+          <div style={{
+            padding: '0 16px 16px 16px',
+            display: 'flex',
+            flexDirection: 'column',
+            gap: '12px',
+            flexShrink: 0
+          }}>
             <Separator className="bg-[#1e1e2a]" />
-
-            {/* Read-only fields */}
             <ReadField label="Duration" value={track.duration_str} />
             <ReadField label="Format" value={track.format} />
             <ReadField label="Key full" value={track.key_full} />
-
-            {/* Divider */}
             <Separator className="bg-[#1e1e2a]" />
-
-            {/* File path — read only */}
             <div>
-              <div
-                style={{
-                  fontSize: '10px',
-                  fontWeight: 500,
-                  letterSpacing: '0.8px',
-                  textTransform: 'uppercase',
-                  color: '#333',
-                  marginBottom: '4px'
-                }}
-              >
+              <div style={{
+                fontSize: '10px', fontWeight: 500,
+                letterSpacing: '0.8px', textTransform: 'uppercase',
+                color: '#333', marginBottom: '4px'
+              }}>
                 File path
               </div>
-              <div
-                style={{
-                  fontSize: '10px',
-                  color: '#444',
-                  wordBreak: 'break-all',
-                  lineHeight: 1.5
-                }}
-              >
+              <div style={{
+                fontSize: '10px', color: '#444',
+                wordBreak: 'break-all', lineHeight: 1.5
+              }}>
                 {track.filepath}
               </div>
             </div>
           </div>
+
         </div>
       )}
     </div>
   )
 }
 
-// ─── Editable field ───────────────────────────────────────
+// ─── EditField ────────────────────────────────────────────
 
 interface EditFieldProps {
   label: string
@@ -335,49 +320,34 @@ interface EditFieldProps {
 }
 
 const EditField = React.forwardRef<HTMLInputElement, EditFieldProps>(
-  ({ label, defaultValue, onSave, onKeyDown, 'data-testid': testId }, ref) => {
-    return (
-      <div>
-        <label className="text-[10px] font-medium tracking-widest uppercase text-muted-foreground">
-          {label}
-        </label>
-        <Input
-          ref={ref}
-          data-testid={testId}
-          defaultValue={defaultValue}
-          onBlur={(e) => onSave(e.target.value)}
-          onKeyDown={onKeyDown}
-          className="h-7 text-xs font-mono bg-[#1a1a26] border-[#252535] text-[#c0c0d8] focus-visible:ring-[#7f77dd]"
-        />
-      </div>
-    )
-  }
+  ({ label, defaultValue, onSave, onKeyDown, 'data-testid': testId }, ref) => (
+    <div>
+      <label className="text-[10px] font-medium tracking-widest uppercase text-muted-foreground">
+        {label}
+      </label>
+      <Input
+        ref={ref}
+        data-testid={testId}
+        defaultValue={defaultValue}
+        onBlur={(e) => onSave(e.target.value)}
+        onKeyDown={onKeyDown}
+        className="h-7 text-xs font-mono bg-[#1a1a26] border-[#252535] text-[#c0c0d8] focus-visible:ring-[#7f77dd]"
+      />
+    </div>
+  )
 )
-
 EditField.displayName = 'EditField'
 
-// ─── Read-only field ──────────────────────────────────────
+// ─── ReadField ────────────────────────────────────────────
 
-function ReadField({
-  label,
-  value
-}: {
-  label: string
-  value?: string | null
-}): React.JSX.Element | null {
+function ReadField({ label, value }: { label: string; value?: string | null }): React.JSX.Element | null {
   if (!value) return null
-
   return (
     <div style={{ display: 'flex', justifyContent: 'space-between' }}>
-      <span
-        style={{
-          fontSize: '11px',
-          fontWeight: 500,
-          letterSpacing: '0.6px',
-          textTransform: 'uppercase',
-          color: '#444'
-        }}
-      >
+      <span style={{
+        fontSize: '11px', fontWeight: 500,
+        letterSpacing: '0.6px', textTransform: 'uppercase', color: '#444'
+      }}>
         {label}
       </span>
       <span style={{ fontSize: '12px', color: '#c0c0d8' }}>{value}</span>
