@@ -4,10 +4,12 @@ import { writeFileSync, mkdirSync } from 'fs'
 import { electronApp, optimizer, is } from '@electron-toolkit/utils'
 import icon from '../../resources/icon.png?asset'
 import { execSync } from 'child_process'
+import { randomUUID } from 'crypto'
 import { rename, stat, copyFile, unlink, mkdir, readdir, readFile } from 'fs/promises'
 import { startWatcher, stopWatcher, stopAllWatchers, setWatcherCallbacks } from './libraryWatcher'
 import {
   insertTrack,
+  insertTracksBatch,
   getAllTracks,
   getTrackById,
   updateTrackMeta,
@@ -51,18 +53,100 @@ import { analyzeFile, readTagsFast } from './sidecar'
 // Raise file handle limit for large libraries
 try {
   execSync('ulimit -n 4096')
-} catch { /* ignore on Windows */ }
+} catch {
+  /* ignore on Windows */
+}
 
 // console.log('DB path:', join(app.getPath('userData'), 'cratecloud', 'library.db'))
 
 // ── Walk a folder and find all audio files ──────────────────────────────────────────────
 const AUDIO_EXTENSIONS = new Set(['.mp3', '.flac', '.wav', '.aiff', '.aif', '.m4a', '.ogg'])
-async function walkFolder(folderPath: string): Promise<string[]> {
+
+// ── Import job state (in-memory only) ────────────────────────────────────────────────────
+// TODO: persist import jobs (id, folderPath, filepaths, nextIndex) to a DB table so a
+// cancelled/interrupted job can be resumed after an app restart. This was proposed and
+// explicitly deferred — needs a schema change and separate approval. As-is, resume only
+// works within the same running app session (job state lives in `importJobs` below).
+type ImportPhase = 'counting' | 'parsing' | 'done' | 'cancelled' | 'error'
+
+interface ImportProgressPayload {
+  jobId: string
+  phase: ImportPhase
+  scanned: number
+  total: number
+  found: number
+  skipped: number
+  currentFolder: string
+  estimateSeconds?: number
+}
+
+interface ImportJob {
+  id: string
+  folderPath: string
+  filepaths: string[]
+  nextIndex: number
+  scanned: number
+  found: number
+  skipped: number
+  total: number
+  cancelRequested: boolean
+  status: ImportPhase
+  batchThroughputs: number[] // files/sec, rolling window — used for the ETA
+}
+
+const importJobs = new Map<string, ImportJob>()
+
+const COUNT_PROGRESS_INTERVAL_MS = 250
+const PARSE_PROGRESS_FILES = 50
+const PARSE_PROGRESS_INTERVAL_MS = 250
+const INSERT_BATCH_SIZE = 200
+const THROUGHPUT_WINDOW = 10 // batches
+const ESTIMATE_ELIGIBLE_RATIO = 0.1 // don't show an ETA before 10% scanned
+
+function buildProgressPayload(
+  job: ImportJob,
+  phaseOverride?: ImportPhase,
+  currentFolder = ''
+): ImportProgressPayload {
+  const payload: ImportProgressPayload = {
+    jobId: job.id,
+    phase: phaseOverride ?? job.status,
+    scanned: job.scanned,
+    total: job.total,
+    found: job.found,
+    skipped: job.skipped,
+    currentFolder
+  }
+
+  // Rolling-window throughput, not average-since-start — the first files are
+  // often slow due to cache warmup and would skew an early estimate.
+  const ratio = job.total > 0 ? job.scanned / job.total : 0
+  if (ratio >= ESTIMATE_ELIGIBLE_RATIO && job.batchThroughputs.length > 0) {
+    const avgThroughput =
+      job.batchThroughputs.reduce((a, b) => a + b, 0) / job.batchThroughputs.length
+    const remaining = job.total - job.scanned
+    if (avgThroughput > 0) {
+      payload.estimateSeconds = Math.round(remaining / avgThroughput)
+    }
+  }
+
+  return payload
+}
+
+// Pass 1 (count) — walk the tree collecting audio file paths only, no metadata
+// reads. Same EMFILE-safe one-directory-at-a-time queue as before, but now
+// reports progress as it goes instead of staying silent until fully walked.
+async function scanFolderPaths(
+  folderPath: string,
+  job: ImportJob,
+  emit: (p: ImportProgressPayload) => void
+): Promise<string[]> {
   const results: string[] = []
   const queue: string[] = [folderPath]
+  let lastEmit = Date.now()
 
-  // Process directories one at a time — avoids EMFILE on large libraries
   while (queue.length > 0) {
+    if (job.cancelRequested) break
     const dir = queue.shift()!
     try {
       const entries = await readdir(dir, { withFileTypes: true })
@@ -77,6 +161,20 @@ async function walkFolder(folderPath: string): Promise<string[]> {
       }
     } catch {
       // skip unreadable directories
+    }
+
+    const now = Date.now()
+    if (now - lastEmit >= COUNT_PROGRESS_INTERVAL_MS) {
+      lastEmit = now
+      emit({
+        jobId: job.id,
+        phase: 'counting',
+        scanned: 0,
+        total: 0,
+        found: results.length,
+        skipped: 0,
+        currentFolder: dir
+      })
     }
   }
 
@@ -233,63 +331,192 @@ function updateTrackAnalysis(trackId: number, result: AnalysisResult): void {
 
 async function runFolderImport(
   event: Electron.IpcMainInvokeEvent,
-  folderPath: string
-): Promise<{ imported: number; failed: number; total: number }> {
+  folderPath: string,
+  jobId?: string
+): Promise<{
+  imported: number
+  failed: number
+  total: number
+  jobId: string
+  cancelled?: boolean
+}> {
   // Pause watcher for this root during import to avoid EMFILE
   const roots = getAllRoots()
-  const matchingRoot = roots.find(r => folderPath.startsWith(r.path))
+  const matchingRoot = roots.find((r) => folderPath.startsWith(r.path))
   if (matchingRoot) await stopWatcher(matchingRoot.id)
 
-  const filepaths = await walkFolder(folderPath)
-  const total = filepaths.length
+  const id = jobId ?? randomUUID()
+  const job: ImportJob = importJobs.get(id) ?? {
+    id,
+    folderPath,
+    filepaths: [],
+    nextIndex: 0,
+    scanned: 0,
+    found: 0,
+    skipped: 0,
+    total: 0,
+    cancelRequested: false,
+    status: 'counting',
+    batchThroughputs: []
+  }
+  importJobs.set(id, job)
 
-  if (total === 0) {
+  const emit = (p: ImportProgressPayload): void => event.sender.send('import:progress', p)
+
+  // Pass 1 (count) — skipped when resuming a job that already has its file list
+  if (job.filepaths.length === 0) {
+    job.status = 'counting'
+    const scanned = await scanFolderPaths(folderPath, job, emit)
+
+    if (job.cancelRequested) {
+      // Discard the partial count — a future resume should redo pass 1 cleanly
+      // rather than resume over an incomplete file list.
+      job.filepaths = []
+      job.status = 'cancelled'
+      emit(buildProgressPayload(job, 'cancelled'))
+      if (matchingRoot) startWatcher(matchingRoot.id, matchingRoot.path)
+      return {
+        imported: job.found,
+        failed: job.skipped,
+        total: job.total,
+        jobId: id,
+        cancelled: true
+      }
+    }
+
+    job.filepaths = scanned
+    job.total = job.filepaths.length
+  }
+
+  if (job.total === 0) {
+    job.status = 'done'
+    emit(buildProgressPayload(job, 'done'))
     if (matchingRoot) startWatcher(matchingRoot.id, matchingRoot.path)
-    return { imported: 0, failed: 0, total: 0 }
+    importJobs.delete(id)
+    return { imported: 0, failed: 0, total: 0, jobId: id }
   }
 
-  let imported = 0
-  let failed = 0
+  // Pass 2 (parse) — fast tag read + insert, batched into ~200-row transactions
+  job.status = 'parsing'
   const concurrency = 4
+  let sinceEmit = 0
+  let lastEmit = Date.now()
+  let currentFolderLabel = ''
 
-  for (let i = 0; i < filepaths.length; i += concurrency) {
-    const batch = filepaths.slice(i, i + concurrency)
-
-    await Promise.all(
-      batch.map(async (filepath) => {
-        try {
-          const result = await readTagsFast(filepath)
-          if (!result.success) { failed++; return }
-
-          const trackData = buildTrackData(filepath, result)
-          const insertResult = insertTrack(trackData) as { lastInsertRowid: number | bigint }
-          const trackId = Number(insertResult.lastInsertRowid)
-
-          if (result.artwork_base64 && trackId > 0) {
-            const artworkPath = saveArtwork(trackId, result.artwork_base64)
-            if (artworkPath) updateArtworkPath(trackId, artworkPath)
-          }
-
-          imported++
-
-          event.sender.send('library:import-progress', {
-            done: imported,
-            total,
-            failed,
-            filepath: basename(filepath)
-          })
-        } catch { failed++ }
-      })
-    )
+  // Checked after every concurrency chunk (every ~4 files), not just once per
+  // 200-row batch — a batch can take many seconds on a real library, and the
+  // spec's "every 50 files or 250ms" cadence would otherwise go unmet for the
+  // whole batch.
+  const maybeEmitParsingProgress = (force = false): void => {
+    const now = Date.now()
+    if (
+      force ||
+      sinceEmit >= PARSE_PROGRESS_FILES ||
+      now - lastEmit >= PARSE_PROGRESS_INTERVAL_MS
+    ) {
+      lastEmit = now
+      sinceEmit = 0
+      emit(buildProgressPayload(job, 'parsing', currentFolderLabel))
+    }
   }
+
+  for (let i = job.nextIndex; i < job.filepaths.length; i += INSERT_BATCH_SIZE) {
+    if (job.cancelRequested) {
+      job.status = 'cancelled'
+      job.nextIndex = i
+      emit(
+        buildProgressPayload(
+          job,
+          'cancelled',
+          dirname(job.filepaths[Math.max(i - 1, 0)] ?? folderPath)
+        )
+      )
+      if (matchingRoot) startWatcher(matchingRoot.id, matchingRoot.path)
+      runPhase2Analysis(event) // analyze whatever made it in before the cancel
+      return {
+        imported: job.found,
+        failed: job.skipped,
+        total: job.total,
+        jobId: id,
+        cancelled: true
+      }
+    }
+
+    const batchStart = Date.now()
+    const batchPaths = job.filepaths.slice(i, i + INSERT_BATCH_SIZE)
+    const parsedRows: { data: ReturnType<typeof buildTrackData>; artwork: string | null }[] = []
+
+    for (let j = 0; j < batchPaths.length; j += concurrency) {
+      const chunk = batchPaths.slice(j, j + concurrency)
+      await Promise.all(
+        chunk.map(async (filepath) => {
+          try {
+            const result = await readTagsFast(filepath)
+            job.scanned++
+            if (!result.success) {
+              job.skipped++
+              return
+            }
+            parsedRows.push({
+              data: buildTrackData(filepath, result),
+              artwork: result.artwork_base64
+            })
+          } catch {
+            job.scanned++
+            job.skipped++
+          }
+        })
+      )
+
+      sinceEmit += chunk.length
+      currentFolderLabel = dirname(chunk[chunk.length - 1])
+      maybeEmitParsingProgress()
+    }
+
+    // One transaction per batch instead of one fsync-backed write per file
+    if (parsedRows.length > 0) {
+      const inserted = insertTracksBatch(parsedRows.map((r) => r.data))
+      inserted.forEach((row, idx) => {
+        job.found++
+        const artwork = parsedRows[idx].artwork
+        if (artwork && row.id > 0) {
+          const artworkPath = saveArtwork(row.id, artwork)
+          if (artworkPath) updateArtworkPath(row.id, artworkPath)
+        }
+      })
+    }
+
+    job.nextIndex = i + batchPaths.length
+
+    // Batch committed — renderer refetches on this, debounced on that side so
+    // a burst of fast batches collapses into a single reload.
+    event.sender.send('import:batch-committed', { jobId: id })
+
+    const batchMs = Date.now() - batchStart
+    if (batchMs > 0) {
+      job.batchThroughputs.push((batchPaths.length / batchMs) * 1000)
+      if (job.batchThroughputs.length > THROUGHPUT_WINDOW) job.batchThroughputs.shift()
+    }
+
+    // Force a progress emit right after the commit so `found` reflects the
+    // batch that just landed, instead of waiting for the next chunk's throttle.
+    maybeEmitParsingProgress(true)
+
+    // Yield to the event loop after each committed batch so the main process
+    // stays responsive to other IPC (folder browsing, playback, etc.) mid-import.
+    await new Promise((resolve) => setImmediate(resolve))
+  }
+
+  job.status = 'done'
+  emit(buildProgressPayload(job, 'done'))
+  importJobs.delete(id)
 
   // Restart watcher after import completes
   if (matchingRoot) startWatcher(matchingRoot.id, matchingRoot.path)
 
-  event.sender.send('library:phase1-complete', { imported, total, failed })
   runPhase2Analysis(event)
 
-  return { imported, failed, total }
+  return { imported: job.found, failed: job.skipped, total: job.total, jobId: id }
 }
 
 async function runPhase2Analysis(event: Electron.IpcMainInvokeEvent): Promise<void> {
@@ -416,7 +643,6 @@ protocol.registerSchemesAsPrivileged([
 // initialization and is ready to create browser windows.
 // Some APIs can only be used after this event occurs.
 app.whenReady().then(() => {
-
   let artworkInFlight = 0
   const ARTWORK_CONCURRENCY = 8
   // ── Register a custom protocol for serving local artwork ──────────────────────────────────────────────
@@ -435,7 +661,7 @@ app.whenReady().then(() => {
     } catch {
       return new Response(null, { status: 404 })
     } finally {
-        artworkInFlight--
+      artworkInFlight--
     }
   })
 
@@ -479,6 +705,30 @@ app.whenReady().then(() => {
         startWatcher(rootId, folderPath)
       }
 
+      return { ok: true, ...result }
+    } catch (err) {
+      return { ok: false, error: (err as Error).message }
+    }
+  })
+
+  ipcMain.handle('import:cancel', (_e, jobId: string) => {
+    const job = importJobs.get(jobId)
+    if (!job) return { ok: false, error: 'Unknown or already-finished job' }
+    job.cancelRequested = true
+    return { ok: true }
+  })
+
+  ipcMain.handle('import:resume', async (event, jobId: string) => {
+    const job = importJobs.get(jobId)
+    if (!job) {
+      return {
+        ok: false,
+        error: 'Job not found — in-memory resume does not survive an app restart'
+      }
+    }
+    job.cancelRequested = false
+    try {
+      const result = await runFolderImport(event, job.folderPath, jobId)
       return { ok: true, ...result }
     } catch (err) {
       return { ok: false, error: (err as Error).message }
@@ -1000,8 +1250,8 @@ app.whenReady().then(() => {
         })
 
         console.log(`[watcher] auto-imported: ${filepath}`)
-        } catch (err) {
-          console.error('[watcher] onFileAdded error:', err)
+      } catch (err) {
+        console.error('[watcher] onFileAdded error:', err)
       }
     },
 

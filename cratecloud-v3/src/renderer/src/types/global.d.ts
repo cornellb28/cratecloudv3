@@ -23,13 +23,26 @@ declare global {
         imported?: number
         failed?: number
         total?: number
+        jobId?: string
+        cancelled?: boolean
         message?: string
         error?: string
       }>
 
-      onImportProgress: (
-        cb: (p: { done: number; total: number; failed: number; filepath: string }) => void
-      ) => void
+      cancelImport: (jobId: string) => Promise<{ ok: boolean; error?: string }>
+      resumeImport: (jobId: string) => Promise<{
+        ok: boolean
+        imported?: number
+        failed?: number
+        total?: number
+        jobId?: string
+        cancelled?: boolean
+        error?: string
+      }>
+
+      onImportProgress: (cb: (p: ImportProgressPayload) => void) => void
+
+      onImportBatchCommitted: (cb: (data: { jobId: string }) => void) => void
 
       offImportProgress: () => void
 
@@ -46,14 +59,14 @@ declare global {
         }) => void
       ) => void
 
-      onPhase1Complete: (cb: (data: { imported: number; total: number, failed: number }) => void) => void
-
       onAnalysisComplete: (cb: (data: { analyzed: number; total: number }) => void) => void
 
       offAnalysisListeners: () => void
 
       onTrackAdded: (cb: (data: { trackId: number; filepath: string }) => void) => void
-      onTrackMoved: (cb: (data: { trackId: number; oldPath: string; newPath: string }) => void) => void
+      onTrackMoved: (
+        cb: (data: { trackId: number; oldPath: string; newPath: string }) => void
+      ) => void
       onTrackDeleted: (cb: (data: { filepath: string; trackId: number | null }) => void) => void
       onRootOffline: (cb: (data: { rootId: number; rootPath: string }) => void) => void
       onRootOnline: (cb: (data: { rootId: number; rootPath: string }) => void) => void
@@ -258,6 +271,17 @@ declare global {
     bpm_tag: string | null
     artwork_base64: string | null
     analyzed: boolean
+  }
+
+  interface ImportProgressPayload {
+    jobId: string
+    phase: 'counting' | 'parsing' | 'done' | 'cancelled' | 'error'
+    scanned: number
+    total: number
+    found: number
+    skipped: number
+    currentFolder: string
+    estimateSeconds?: number
   }
 
   interface FolderItem {

@@ -145,5 +145,14 @@ export function useFilteredTracks(): Track[] {
 
   const q = searchQuery.toLowerCase()
 
-  return tracks.filter((t) => t.title?.toLowerCase().includes(q) || t.artist?.toLowerCase().includes(q) || t.genre?.toLowerCase().includes(q) || t.key_camelot?.toLowerCase().includes(q) || t.bpm?.toString().includes(q) || t.album?.toLowerCase().includes(q) || t.comment?.toLowerCase().includes(q))
+  return tracks.filter(
+    (t) =>
+      t.title?.toLowerCase().includes(q) ||
+      t.artist?.toLowerCase().includes(q) ||
+      t.genre?.toLowerCase().includes(q) ||
+      t.key_camelot?.toLowerCase().includes(q) ||
+      t.bpm?.toString().includes(q) ||
+      t.album?.toLowerCase().includes(q) ||
+      t.comment?.toLowerCase().includes(q)
+  )
 }

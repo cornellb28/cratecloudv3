@@ -1,6 +1,17 @@
 import { contextBridge, ipcRenderer } from 'electron'
 import { electronAPI } from '@electron-toolkit/preload'
 
+interface ImportProgressPayload {
+  jobId: string
+  phase: 'counting' | 'parsing' | 'done' | 'cancelled' | 'error'
+  scanned: number
+  total: number
+  found: number
+  skipped: number
+  currentFolder: string
+  estimateSeconds?: number
+}
+
 // Custom APIs for renderer
 const api = {
   // ── Audio analysis ─────────────────────────────────────────────────────
@@ -11,29 +22,41 @@ const api = {
   importFiles: (filepaths: string[]) => ipcRenderer.invoke('library:import-files', filepaths),
   analyzeFile: (filepath: string) => ipcRenderer.invoke('sidecar:analyze', filepath),
   importFolder: (folderPath: string) => ipcRenderer.invoke('library:import-folder', folderPath),
-  onImportProgress: (cb: (p: { done: number; total: number; failed: number; filepath: string }) => void) => ipcRenderer.on('library:import-progress', (_e, p) => cb(p)),
+  cancelImport: (jobId: string) => ipcRenderer.invoke('import:cancel', jobId),
+  resumeImport: (jobId: string) => ipcRenderer.invoke('import:resume', jobId),
+  onImportProgress: (cb: (p: ImportProgressPayload) => void) =>
+    ipcRenderer.on('import:progress', (_e, p) => cb(p)),
+  onImportBatchCommitted: (cb: (data: { jobId: string }) => void) =>
+    ipcRenderer.on('import:batch-committed', (_e, d) => cb(d)),
   offImportProgress: () => {
-    ipcRenderer.removeAllListeners('library:import-progress')
-    ipcRenderer.removeAllListeners('library:phase1-complete')
+    ipcRenderer.removeAllListeners('import:progress')
+    ipcRenderer.removeAllListeners('import:batch-committed')
   },
-  onTrackAnalyzed: (cb: (data: {
-    trackId: number
-    bpm: number | null
-    key_camelot: string | null
-    key_full: string | null
-    duration_sec: number | null
-    duration_str: string | null
-    done: number
-    total: number
-  }) => void) => ipcRenderer.on('library:track-analyzed', (_e, d) => cb(d)),
-  onPhase1Complete: (cb: (data: { imported: number, total: number, failed: number }) => void) => ipcRenderer.on('library:phase1-complete', (_e, d) => cb(d)),
-  onAnalysisComplete: (cb: (data: { analyzed: number, total: number }) => void) => ipcRenderer.on('library:analysis-complete', (_e, d) => cb(d)),
+  onTrackAnalyzed: (
+    cb: (data: {
+      trackId: number
+      bpm: number | null
+      key_camelot: string | null
+      key_full: string | null
+      duration_sec: number | null
+      duration_str: string | null
+      done: number
+      total: number
+    }) => void
+  ) => ipcRenderer.on('library:track-analyzed', (_e, d) => cb(d)),
+  onAnalysisComplete: (cb: (data: { analyzed: number; total: number }) => void) =>
+    ipcRenderer.on('library:analysis-complete', (_e, d) => cb(d)),
 
-  onTrackAdded: (cb: (data: { trackId: number; filepath: string }) => void) => ipcRenderer.on('watcher:track-added', (_e, d) => cb(d)),
-  onTrackMoved: (cb: (data: { trackId: number; oldPath: string; newPath: string }) => void) => ipcRenderer.on('watcher:track-moved', (_e, d) => cb(d)),
-  onTrackDeleted: (cb: (data: { filepath: string; trackId: number | null }) => void) => ipcRenderer.on('watcher:track-deleted', (_e, d) => cb(d)),
-  onRootOffline: (cb: (data: { rootId: number; rootPath: string }) => void) => ipcRenderer.on('watcher:root-offline', (_e, d) => cb(d)),
-  onRootOnline: (cb: (data: { rootId: number; rootPath: string }) => void) => ipcRenderer.on('watcher:root-online', (_e, d) => cb(d)),
+  onTrackAdded: (cb: (data: { trackId: number; filepath: string }) => void) =>
+    ipcRenderer.on('watcher:track-added', (_e, d) => cb(d)),
+  onTrackMoved: (cb: (data: { trackId: number; oldPath: string; newPath: string }) => void) =>
+    ipcRenderer.on('watcher:track-moved', (_e, d) => cb(d)),
+  onTrackDeleted: (cb: (data: { filepath: string; trackId: number | null }) => void) =>
+    ipcRenderer.on('watcher:track-deleted', (_e, d) => cb(d)),
+  onRootOffline: (cb: (data: { rootId: number; rootPath: string }) => void) =>
+    ipcRenderer.on('watcher:root-offline', (_e, d) => cb(d)),
+  onRootOnline: (cb: (data: { rootId: number; rootPath: string }) => void) =>
+    ipcRenderer.on('watcher:root-online', (_e, d) => cb(d)),
   offWatcherListeners: () => {
     ipcRenderer.removeAllListeners('watcher:track-added')
     ipcRenderer.removeAllListeners('watcher:track-moved')
@@ -44,7 +67,6 @@ const api = {
 
   offAnalysisListeners: () => {
     ipcRenderer.removeAllListeners('library:track-analyzed')
-    ipcRenderer.removeAllListeners('library:phase1-complete')
     ipcRenderer.removeAllListeners('library:analysis-complete')
   },
   getArtworkUrl: (filepath: string) => `artwork://${filepath}`,
@@ -54,7 +76,8 @@ const api = {
     trackById: (id: number) => ipcRenderer.invoke('db:track-by-id', id),
     insertTrack: (track: unknown) => ipcRenderer.invoke('db:insert-track', track),
     updateTrackMeta: (data: unknown) => ipcRenderer.invoke('db:update-track-meta', data),
-    updateBoardId: (id: number, boardId: number) => ipcRenderer.invoke('db:update-board-id', id, boardId),
+    updateBoardId: (id: number, boardId: number) =>
+      ipcRenderer.invoke('db:update-board-id', id, boardId),
     tracksByBoardId: (boardId: number) => ipcRenderer.invoke('db:tracks-by-board-id', boardId),
     markMissing: (filepath: string) => ipcRenderer.invoke('db:mark-missing', filepath),
     markAnalyzed: (id: number) => ipcRenderer.invoke('db:mark-analyzed', id)
@@ -69,18 +92,22 @@ const api = {
     tracksByTag: (tagId: number) => ipcRenderer.invoke('tags:tracks-by-tag', tagId),
     apply: (trackId: number, tagId: number) => ipcRenderer.invoke('tags:apply', trackId, tagId),
     remove: (trackId: number, tagId: number) => ipcRenderer.invoke('tags:remove', trackId, tagId),
-    checkCandidates: (candidates: string[], field: string) => ipcRenderer.invoke('tags:check-candidates', candidates, field),
-    confirmImport: (pendingId: number, trackId: number, approvedTags: string[], field: string) => ipcRenderer.invoke('tags:confirm-import', pendingId, trackId, approvedTags, field),
+    checkCandidates: (candidates: string[], field: string) =>
+      ipcRenderer.invoke('tags:check-candidates', candidates, field),
+    confirmImport: (pendingId: number, trackId: number, approvedTags: string[], field: string) =>
+      ipcRenderer.invoke('tags:confirm-import', pendingId, trackId, approvedTags, field),
     pending: () => ipcRenderer.invoke('tags:pending'),
-    findOrCreate: (field: string, value: string, color: string) => ipcRenderer.invoke('tags:find-or-create', field, value, color)
+    findOrCreate: (field: string, value: string, color: string) =>
+      ipcRenderer.invoke('tags:find-or-create', field, value, color)
   },
 
   // Crates
   crates: {
     all: () => ipcRenderer.invoke('crates:all'),
     insert: (name: string, color: string) => ipcRenderer.invoke('crates:insert', name, color),
-    addTrack: (crateId: number, trackId: number) => ipcRenderer.invoke('crates:add-track', crateId, trackId),
-    tracks: (crateId: number) => ipcRenderer.invoke('crates:tracks', crateId),
+    addTrack: (crateId: number, trackId: number) =>
+      ipcRenderer.invoke('crates:add-track', crateId, trackId),
+    tracks: (crateId: number) => ipcRenderer.invoke('crates:tracks', crateId)
   },
 
   // Library roots
@@ -104,15 +131,18 @@ const api = {
   fs: {
     moveFile: (from: string, to: string) => ipcRenderer.invoke('fs:move-file', from, to),
     moveFiles: (from: string[], to: string) => ipcRenderer.invoke('fs:move-files', from, to),
-    renameFile: (filepath: string, newName: string) => ipcRenderer.invoke('fs:rename-file', filepath, newName),
-    createFolder: (parent: string, name: string) => ipcRenderer.invoke('fs:create-folder', parent, name),
-    readFolder: (folderPath: string) => ipcRenderer.invoke('fs:read-folder', folderPath),
+    renameFile: (filepath: string, newName: string) =>
+      ipcRenderer.invoke('fs:rename-file', filepath, newName),
+    createFolder: (parent: string, name: string) =>
+      ipcRenderer.invoke('fs:create-folder', parent, name),
+    readFolder: (folderPath: string) => ipcRenderer.invoke('fs:read-folder', folderPath)
   },
   watcher: {
     pendingChanges: () => ipcRenderer.invoke('watcher:pending-changes'),
     acceptChange: (id: number) => ipcRenderer.invoke('watcher:accept-change', id),
     ignoreChange: (id: number) => ipcRenderer.invoke('watcher:ignore-change', id),
-    start: (rootId: number, rootPath: string) => ipcRenderer.invoke('watcher:start', rootId, rootPath),
+    start: (rootId: number, rootPath: string) =>
+      ipcRenderer.invoke('watcher:start', rootId, rootPath),
     stop: (rootId: number) => ipcRenderer.invoke('watcher:stop', rootId)
   }
 }

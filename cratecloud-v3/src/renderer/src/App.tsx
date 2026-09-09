@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react'
+import React, { useEffect, useRef, useState } from 'react'
 import { useLibraryStore } from './store/useLibraryStore'
 import { Sidebar } from './components/Sidebar'
 import { Toolbar } from './components/Toolbar'
@@ -16,6 +16,31 @@ import { ReconciliationModal } from './components/ReconciliationModal'
 // type View = 'dashboard' | 'library' | 'board' | 'genre' | 'artist' | 'folders' | 'crates' | 'settings'
 
 const COLLAPSE_THRESHOLD = 900 // px
+
+// Round to whole minutes — never show seconds ticking
+function formatEstimate(seconds: number): string {
+  if (seconds < 60) return 'under a minute'
+  return `about ${Math.round(seconds / 60)} min`
+}
+
+function importStatusLabel(p: ImportProgressPayload): string {
+  if (p.phase === 'counting') {
+    return `Scanning… ${p.found} tracks found — ${p.currentFolder}`
+  }
+  if (p.phase === 'parsing') {
+    const base = `${p.scanned} of ${p.total} · ${p.found} tracks found · Scanning ${p.currentFolder}`
+    return p.estimateSeconds !== undefined
+      ? `${base} · ${formatEstimate(p.estimateSeconds)} left`
+      : base
+  }
+  if (p.phase === 'cancelled') {
+    return `Cancelled — ${p.found} of ${p.total} imported`
+  }
+  if (p.phase === 'done') {
+    return `Done — ${p.found} of ${p.total} imported`
+  }
+  return 'Import error'
+}
 
 function App(): React.JSX.Element {
   const {
@@ -36,15 +61,14 @@ function App(): React.JSX.Element {
   const [libraryRoots, setLibraryRoots] = useState<LibraryRoot[]>([])
   const [settingsOpen, setSettingsOpen] = useState(false)
   const [reconcileOpen, setReconcileOpen] = useState(false)
-  const [progress, setProgress] = useState<{
-    done: number
-    total: number
-    filepath: string
-  } | null>(null)
+  const [importProgress, setImportProgress] = useState<ImportProgressPayload | null>(null)
   const [analysisProgress, setAnalysisProgress] = useState<{
     done: number
     total: number
   } | null>(null)
+  // Batch-committed events fire once per ~200-row transaction — debounce the
+  // resulting track-list refetch so a burst of fast batches collapses into one.
+  const batchRefreshTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
 
   // ── Auto-collapse on narrow window ────────────────────
   useEffect(() => {
@@ -121,16 +145,21 @@ function App(): React.JSX.Element {
   // ── Import progress listeners ─────────────────────────
   useEffect(() => {
     window.api.onImportProgress((p) => {
-      setProgress(p)
+      setImportProgress(p)
 
-      // Reload the store after each track is saved
-      // so it appears in the list immediately
-      window.api.db.allTracks().then(setTracks)
+      if (p.phase === 'done') {
+        setTimeout(() => setImportProgress(null), 1500)
+      }
     })
 
-    // Phase 1 complete - hide the progress bar
-    window.api.onPhase1Complete(() => {
-      setTimeout(() => setProgress(null), 1500)
+    // A ~200-row batch just committed — debounce the refetch so a burst of
+    // fast batches (small files, warm cache) collapses into one reload
+    // instead of hammering the store on every commit.
+    window.api.onImportBatchCommitted(() => {
+      if (batchRefreshTimer.current) clearTimeout(batchRefreshTimer.current)
+      batchRefreshTimer.current = setTimeout(() => {
+        window.api.db.allTracks().then(setTracks)
+      }, 500)
     })
 
     // Phase 2 — update individual tracks as BPM/key comes in
@@ -156,6 +185,7 @@ function App(): React.JSX.Element {
     return () => {
       window.api.offAnalysisListeners()
       window.api.offImportProgress()
+      if (batchRefreshTimer.current) clearTimeout(batchRefreshTimer.current)
     }
   }, [setTracks, updateTrack])
 
@@ -165,7 +195,7 @@ function App(): React.JSX.Element {
     if (!folderPath) return
 
     setAnalyzing(true)
-    setProgress({ done: 0, total: 0, filepath: '' })
+    setImportProgress(null)
 
     const result = await window.api.importFolder(folderPath)
 
@@ -175,12 +205,24 @@ function App(): React.JSX.Element {
       setTracks(all)
     }
 
-    // Clear progress after 2 seconds
     setAnalyzing(false)
-    // Progress bar is cleared by onPhase1Complete event
-    // Analysis bar is cleared by onAnalysisComplete event
-    // setProgress(null)
-    // setTimeout(() => setProgress(null), 2000)
+    // Progress bar is cleared by the 'done' phase of onImportProgress
+  }
+
+  async function handleCancelImport(): Promise<void> {
+    if (!importProgress) return
+    await window.api.cancelImport(importProgress.jobId)
+  }
+
+  async function handleResumeImport(): Promise<void> {
+    if (!importProgress) return
+    setAnalyzing(true)
+    const result = await window.api.resumeImport(importProgress.jobId)
+    if (result.ok) {
+      const all = await window.api.db.allTracks()
+      setTracks(all)
+    }
+    setAnalyzing(false)
   }
 
   // Add import files handler
@@ -206,8 +248,10 @@ function App(): React.JSX.Element {
   }
 
   // ── Progress percentage ───────────────────────────────
-  const pct =
-    progress && progress.total > 0 ? Math.round((progress.done / progress.total) * 100) : 0
+  const importPct =
+    importProgress && importProgress.total > 0
+      ? Math.round((importProgress.scanned / importProgress.total) * 100)
+      : 0
 
   return (
     <div
@@ -230,36 +274,81 @@ function App(): React.JSX.Element {
       </div>
 
       {/* Toolbar at the top */}
-      <Toolbar
-        onImport={handleImport}
-        activeView={activeView}
-        onImportFiles={handleImportFiles}
-      />
+      <Toolbar onImport={handleImport} activeView={activeView} onImportFiles={handleImportFiles} />
 
-      {/* Phase 1 — import progress bar */}
-      {progress !== null && progress.total > 0 && (
+      {/* Import scan — non-modal, stays visible across navigation */}
+      {importProgress !== null && (
         <div style={{ marginBottom: '1rem' }}>
-          <div style={{ color: '#7f77dd', marginBottom: '4px', fontSize: '12px' }}>
-            {progress.done} / {progress.total} — {progress.filepath}
-          </div>
           <div
             style={{
-              background: '#1e1e2a',
-              borderRadius: '4px',
-              height: '6px',
-              overflow: 'hidden'
+              color: '#7f77dd',
+              marginBottom: '4px',
+              fontSize: '12px',
+              display: 'flex',
+              justifyContent: 'space-between',
+              alignItems: 'center',
+              gap: '12px'
             }}
           >
+            <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+              {importStatusLabel(importProgress)}
+            </span>
+            {importProgress.phase === 'parsing' && (
+              <button
+                onClick={handleCancelImport}
+                style={{
+                  flexShrink: 0,
+                  background: 'transparent',
+                  border: '1px solid #33334a',
+                  color: '#e8e8f0',
+                  borderRadius: '4px',
+                  padding: '2px 8px',
+                  fontSize: '11px',
+                  cursor: 'pointer'
+                }}
+              >
+                Cancel
+              </button>
+            )}
+            {importProgress.phase === 'cancelled' && (
+              <button
+                onClick={handleResumeImport}
+                style={{
+                  flexShrink: 0,
+                  background: 'transparent',
+                  border: '1px solid #7f77dd',
+                  color: '#7f77dd',
+                  borderRadius: '4px',
+                  padding: '2px 8px',
+                  fontSize: '11px',
+                  cursor: 'pointer'
+                }}
+              >
+                Resume
+              </button>
+            )}
+          </div>
+          {/* Indeterminate during the counting pass — total isn't known yet */}
+          {importProgress.phase !== 'counting' && (
             <div
               style={{
-                background: '#7f77dd',
-                height: '100%',
-                width: `${pct}%`,
-                transition: 'width 0.2s ease',
-                borderRadius: '4px'
+                background: '#1e1e2a',
+                borderRadius: '4px',
+                height: '6px',
+                overflow: 'hidden'
               }}
-            />
-          </div>
+            >
+              <div
+                style={{
+                  background: '#7f77dd',
+                  height: '100%',
+                  width: `${importPct}%`,
+                  transition: 'width 0.2s ease',
+                  borderRadius: '4px'
+                }}
+              />
+            </div>
+          )}
         </div>
       )}
 
@@ -312,7 +401,8 @@ function App(): React.JSX.Element {
           {/* App-level breadcrumb */}
           <Breadcrumb activeView={activeView} onNavigate={setActiveView} />
           {/* Views */}
-          {activeView === 'dashboard' && (tracks.length === 0 ? <EmptyState onImport={handleImport} /> : <DashboardView />)}
+          {activeView === 'dashboard' &&
+            (tracks.length === 0 ? <EmptyState onImport={handleImport} /> : <DashboardView />)}
           {activeView === 'library' && <LibraryView />}
           {activeView === 'board' && <BoardView />}
           {activeView === 'folders' &&
@@ -349,40 +439,46 @@ function App(): React.JSX.Element {
             ))}
 
           {activeView === 'genre' && (
-            <div style={{
-              flex: 1,
-              display: 'flex',
-              alignItems: 'center',
-              justifyContent: 'center',
-              color: '#333',
-              fontSize: '14px',
-            }}>
+            <div
+              style={{
+                flex: 1,
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+                color: '#333',
+                fontSize: '14px'
+              }}
+            >
               Genre view — coming soon
             </div>
           )}
 
           {activeView === 'artist' && (
-            <div style={{
-              flex: 1,
-              display: 'flex',
-              alignItems: 'center',
-              justifyContent: 'center',
-              color: '#333',
-              fontSize: '14px',
-            }}>
+            <div
+              style={{
+                flex: 1,
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+                color: '#333',
+                fontSize: '14px'
+              }}
+            >
               Artist view — coming soon
             </div>
           )}
 
           {activeView === 'crates' && (
-            <div style={{
-              flex: 1,
-              display: 'flex',
-              alignItems: 'center',
-              justifyContent: 'center',
-              color: '#333',
-              fontSize: '14px',
-            }}>
+            <div
+              style={{
+                flex: 1,
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+                color: '#333',
+                fontSize: '14px'
+              }}
+            >
               Crates — coming soon
             </div>
           )}

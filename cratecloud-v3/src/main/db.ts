@@ -748,6 +748,22 @@ export function insertTrack(track: Record<string, unknown>): { lastInsertRowid: 
   return { lastInsertRowid: existing?.id ?? 0 }
 }
 
+// Batched version of insertTrack — wraps N rows in a single transaction so a
+// large folder import commits in chunks instead of one fsync per file.
+// Reuses insertTrack's per-row upsert + safe-defaulting so batched and
+// single-file inserts stay byte-for-byte identical.
+export function insertTracksBatch(
+  tracks: Record<string, unknown>[]
+): { id: number; filepath: string }[] {
+  const insertMany = db.transaction((rows: Record<string, unknown>[]) => {
+    return rows.map((track) => {
+      const result = insertTrack(track)
+      return { id: Number(result.lastInsertRowid), filepath: track.filepath as string }
+    })
+  })
+  return insertMany(tracks)
+}
+
 export function getAllTracks(): Track[] {
   return stmts.getAllTracks.all() as Track[]
 }
@@ -1010,14 +1026,11 @@ export function getTracksByColumn(column: string): Track[] {
 }
 
 // ─── Move functions ──────────────────────────────────────
-export function updateTrackFilepath(
-  oldPath: string,
-  newPath: string
-): RunResult {
+export function updateTrackFilepath(oldPath: string, newPath: string): RunResult {
   return stmts.updateFilepath.run({
     oldPath,
     newPath,
-    filename: basename(newPath),
+    filename: basename(newPath)
   })
 }
 
@@ -1055,8 +1068,7 @@ export function setSetting(key: string, value: string): RunResult {
 }
 
 export function getArtworkPath(trackId: number): string | null {
-  const row = db
-    .prepare('SELECT artwork_path FROM tracks WHERE id = ?')
-    .get(trackId) as { artwork_path: string | null } | undefined
+  const row = db.prepare('SELECT artwork_path FROM tracks WHERE id = ?').get(trackId) as
+    { artwork_path: string | null } | undefined
   return row?.artwork_path ?? null
 }
