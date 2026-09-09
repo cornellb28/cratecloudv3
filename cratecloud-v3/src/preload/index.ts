@@ -65,6 +65,7 @@ const api = {
     all: () => ipcRenderer.invoke('tags:all'),
     mostUsed: (limit?: number) => ipcRenderer.invoke('tags:most-used', limit),
     forTrack: (trackId: number) => ipcRenderer.invoke('tags:for-track', trackId),
+    forTracks: (trackIds: number[]) => ipcRenderer.invoke('tags:for-tracks', trackIds),
     tracksByTag: (tagId: number) => ipcRenderer.invoke('tags:tracks-by-tag', tagId),
     apply: (trackId: number, tagId: number) => ipcRenderer.invoke('tags:apply', trackId, tagId),
     remove: (trackId: number, tagId: number) => ipcRenderer.invoke('tags:remove', trackId, tagId),

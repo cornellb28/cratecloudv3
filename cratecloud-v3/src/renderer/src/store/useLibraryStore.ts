@@ -36,6 +36,9 @@ interface LibraryState {
   addTag: (tag: Tag) => void
   removeTag: (id: number) => void
   setTrackTags: (trackId: number, tags: Tag[]) => void
+  // Bulk version of setTrackTags — one Map build for many tracks instead of
+  // one set() per track (each set() rebuilds the whole Map, O(n) per call).
+  setAllTrackTags: (tagsByTrack: Record<number, Tag[]>) => void
 }
 
 // ─── Store ───────────────────────────────────────────────
@@ -118,7 +121,16 @@ export const useLibraryStore = create<LibraryState>((set) => ({
   setTrackTags: (trackId, tags) =>
     set((state) => ({
       trackTags: new Map(state.trackTags).set(trackId, tags)
-    }))
+    })),
+
+  setAllTrackTags: (tagsByTrack) =>
+    set((state) => {
+      const next = new Map(state.trackTags)
+      for (const [trackId, tags] of Object.entries(tagsByTrack)) {
+        next.set(Number(trackId), tags)
+      }
+      return { trackTags: next }
+    })
 }))
 
 // ─── Derived state ────────────────────────────────────────

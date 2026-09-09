@@ -28,7 +28,8 @@ function App(): React.JSX.Element {
     sidebarCollapsed,
     setSidebarCollapsed,
     setTags,
-    setQuickTags
+    setQuickTags,
+    setAllTrackTags
   } = useLibraryStore()
   const [activeView, setActiveView] = useState<View>('dashboard')
   // Add library roots to app state
@@ -106,6 +107,12 @@ function App(): React.JSX.Element {
       setTags(tags)
       setQuickTags(quickTags)
       setLibraryRoots(roots)
+
+      // Hydrate trackTags for every track up front — one bulk query instead
+      // of one tags.forTrack round trip per track — so badges show without
+      // clicking a row first.
+      const tagsByTrack = await window.api.tags.forTracks(tracks.map((t) => t.id))
+      setAllTrackTags(tagsByTrack)
     }
     load()
   }, [])

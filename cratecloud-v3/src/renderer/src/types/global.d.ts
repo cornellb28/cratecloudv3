@@ -86,6 +86,7 @@ declare global {
         all: () => Promise<Tag[]>
         mostUsed: (limit?: number) => Promise<Tag[]>
         forTrack: (trackId: number) => Promise<Tag[]>
+        forTracks: (trackIds: number[]) => Promise<Record<number, Tag[]>>
         tracksByTag: (tagId: number) => Promise<Track[]>
         apply: (trackId: number, tagId: number) => Promise<{ ok: boolean; error?: string }>
         remove: (trackId: number, tagId: number) => Promise<{ ok: boolean; error?: string }>

@@ -19,6 +19,7 @@ import {
   applyTag,
   removeTag,
   getTrackTags,
+  getTrackTagsForTracks,
   getTagTracks,
   checkCandidates,
   confirmPendingImport,
@@ -814,6 +815,8 @@ app.whenReady().then(() => {
   ipcMain.handle('tags:most-used', (_e, limit?: number) => getMostUsedTags(limit))
 
   ipcMain.handle('tags:for-track', (_e, trackId: number) => getTrackTags(trackId))
+
+  ipcMain.handle('tags:for-tracks', (_e, trackIds: number[]) => getTrackTagsForTracks(trackIds))
 
   ipcMain.handle('tags:tracks-by-tag', (_e, tagId: number) => getTagTracks(tagId))
 

@@ -836,6 +836,42 @@ export function getTrackTags(trackId: number): Tag[] {
   return stmts.getTrackTags.all(trackId) as Tag[]
 }
 
+// Bulk version of getTrackTags — one query (chunked under SQLite's ~999 bound
+// parameter limit) instead of one round trip per track. Same tags.* row shape
+// as getTrackTags, just grouped by track_id.
+const TAG_LOOKUP_CHUNK_SIZE = 900
+
+export function getTrackTagsForTracks(trackIds: number[]): Record<number, Tag[]> {
+  const result: Record<number, Tag[]> = {}
+  if (trackIds.length === 0) return result
+
+  // Pre-seed every requested id with [] so callers get a complete map back —
+  // tracks with no tags never produce a row in the JOIN below.
+  for (const id of trackIds) result[id] = []
+
+  for (let i = 0; i < trackIds.length; i += TAG_LOOKUP_CHUNK_SIZE) {
+    const chunk = trackIds.slice(i, i + TAG_LOOKUP_CHUNK_SIZE)
+    const placeholders = chunk.map(() => '?').join(',')
+    const rows = db
+      .prepare(
+        `
+        SELECT tt.track_id as track_id, tg.*
+        FROM tags tg
+        JOIN track_tags tt ON tt.tag_id = tg.id
+        WHERE tt.track_id IN (${placeholders})
+        ORDER BY tt.track_id, tg.field, tg.value
+      `
+      )
+      .all(...chunk) as (Tag & { track_id: number })[]
+
+    for (const { track_id, ...tag } of rows) {
+      result[track_id].push(tag as Tag)
+    }
+  }
+
+  return result
+}
+
 export function getTagTracks(tagId: number): Track[] {
   return stmts.getTagTracks.all(tagId) as Track[]
 }
