@@ -1,10 +1,10 @@
-import { app, shell, BrowserWindow, ipcMain, dialog, protocol, net } from 'electron'
-import { pathToFileURL } from 'url'
+import { app, shell, BrowserWindow, ipcMain, dialog, protocol } from 'electron'
 import { join, extname, basename, dirname } from 'path'
-import { readdirSync, statSync, writeFileSync, mkdirSync } from 'fs'
+import { writeFileSync, mkdirSync } from 'fs'
 import { electronApp, optimizer, is } from '@electron-toolkit/utils'
 import icon from '../../resources/icon.png?asset'
-import { rename, stat, copyFile, unlink, mkdir, readdir } from 'fs/promises'
+import { execSync } from 'child_process'
+import { rename, stat, copyFile, unlink, mkdir, readdir, readFile } from 'fs/promises'
 import { startWatcher, stopWatcher, stopAllWatchers, setWatcherCallbacks } from './libraryWatcher'
 import {
   insertTrack,
@@ -47,32 +47,38 @@ import {
 } from './db'
 import { analyzeFile, readTagsFast } from './sidecar'
 
+// Raise file handle limit for large libraries
+try {
+  execSync('ulimit -n 4096')
+} catch { /* ignore on Windows */ }
+
 // console.log('DB path:', join(app.getPath('userData'), 'cratecloud', 'library.db'))
 
 // ── Walk a folder and find all audio files ──────────────────────────────────────────────
 const AUDIO_EXTENSIONS = new Set(['.mp3', '.flac', '.wav', '.aiff', '.aif', '.m4a', '.ogg'])
-function walkFolder(folderPath: string): string[] {
+async function walkFolder(folderPath: string): Promise<string[]> {
   const results: string[] = []
+  const queue: string[] = [folderPath]
 
-  function walk(dir: string): void {
-    const entries = readdirSync(dir)
-    for (const entry of entries) {
-      if (entry.startsWith('.')) continue // skip hidden files/folders (e.g. macOS ._ AppleDouble files, .DS_Store)
-      const fullPath = join(dir, entry)
-      try {
-        const stat = statSync(fullPath)
-        if (stat.isDirectory()) {
-          walk(fullPath) // recurse into subfolders
-        } else if (AUDIO_EXTENSIONS.has(extname(entry).toLowerCase())) {
-          results.push(fullPath) // audio file found
+  // Process directories one at a time — avoids EMFILE on large libraries
+  while (queue.length > 0) {
+    const dir = queue.shift()!
+    try {
+      const entries = await readdir(dir, { withFileTypes: true })
+      for (const entry of entries) {
+        if (entry.name.startsWith('.')) continue
+        const fullPath = join(dir, entry.name)
+        if (entry.isDirectory()) {
+          queue.push(fullPath)
+        } else if (AUDIO_EXTENSIONS.has(extname(entry.name).toLowerCase())) {
+          results.push(fullPath)
         }
-      } catch {
-        // skip files we cannot read
       }
+    } catch {
+      // skip unreadable directories
     }
   }
 
-  walk(folderPath)
   return results
 }
 
@@ -228,14 +234,22 @@ async function runFolderImport(
   event: Electron.IpcMainInvokeEvent,
   folderPath: string
 ): Promise<{ imported: number; failed: number; total: number }> {
-  const filepaths = walkFolder(folderPath)
+  // Pause watcher for this root during import to avoid EMFILE
+  const roots = getAllRoots()
+  const matchingRoot = roots.find(r => folderPath.startsWith(r.path))
+  if (matchingRoot) await stopWatcher(matchingRoot.id)
+
+  const filepaths = await walkFolder(folderPath)
   const total = filepaths.length
 
-  if (total === 0) return { imported: 0, failed: 0, total: 0 }
+  if (total === 0) {
+    if (matchingRoot) startWatcher(matchingRoot.id, matchingRoot.path)
+    return { imported: 0, failed: 0, total: 0 }
+  }
 
   let imported = 0
   let failed = 0
-  const concurrency = 8
+  const concurrency = 4
 
   for (let i = 0; i < filepaths.length; i += concurrency) {
     const batch = filepaths.slice(i, i + concurrency)
@@ -267,6 +281,9 @@ async function runFolderImport(
       })
     )
   }
+
+  // Restart watcher after import completes
+  if (matchingRoot) startWatcher(matchingRoot.id, matchingRoot.path)
 
   event.sender.send('library:phase1-complete', { imported, total, failed })
   runPhase2Analysis(event)
@@ -338,6 +355,8 @@ async function runPhase2Analysis(event: Electron.IpcMainInvokeEvent): Promise<vo
         }
       })
     )
+
+    await new Promise((r) => setTimeout(r, 100))
   }
 
   event.sender.send('library:analysis-complete', {
@@ -396,11 +415,27 @@ protocol.registerSchemesAsPrivileged([
 // initialization and is ready to create browser windows.
 // Some APIs can only be used after this event occurs.
 app.whenReady().then(() => {
+
+  let artworkInFlight = 0
+  const ARTWORK_CONCURRENCY = 8
   // ── Register a custom protocol for serving local artwork ──────────────────────────────────────────────
-  protocol.handle('artwork', (request) => {
-    const url = request.url.replace('artwork://', '')
-    const decodedPath = decodeURIComponent(url)
-    return net.fetch(pathToFileURL(decodedPath).toString())
+  protocol.handle('artwork', async (request) => {
+    // Wait if too many concurrent requests
+    while (artworkInFlight >= ARTWORK_CONCURRENCY) {
+      await new Promise((r) => setTimeout(r, 50))
+    }
+    artworkInFlight++
+    try {
+      const artworkPath = decodeURIComponent(request.url.replace('artwork://', ''))
+      const data = await readFile(artworkPath)
+      return new Response(data, {
+        headers: { 'Content-Type': 'image/jpeg' }
+      })
+    } catch {
+      return new Response(null, { status: 404 })
+    } finally {
+        artworkInFlight--
+    }
   })
 
   // Set app user model id for windows

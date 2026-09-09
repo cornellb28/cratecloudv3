@@ -5,6 +5,7 @@ import { Slider } from '@renderer/components/ui/slider'
 import { Separator } from '@renderer/components/ui/separator'
 import { TagInput } from './TagInput'
 import { getYearOptions } from '../utils/years'
+import { MoveFileButton } from './MoveFileButton'
 
 export function Inspector(): React.JSX.Element {
   const { tracks, activeTrackId, setActiveTrack, updateTrack } = useLibraryStore()
@@ -138,6 +139,8 @@ export function Inspector(): React.JSX.Element {
             {/* Divider */}
             <Separator className="bg-[#1e1e2a]" />
           </div>
+
+          <MoveFileButton track={track} />
 
           {/* Scrollable editing section */}
           <div

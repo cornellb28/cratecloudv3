@@ -2,6 +2,7 @@ import React from 'react'
 import { useLibraryStore } from '../store/useLibraryStore'
 import { Badge } from '@renderer/components/ui/badge'
 import { Checkbox } from '@renderer/components/ui/checkbox'
+import { MoveFileButton } from './MoveFileButton'
 
 interface TrackCardProps {
   track: Track
@@ -60,12 +61,16 @@ export function TrackCard({
           <img
             src={artworkUrl}
             alt=""
+            loading="lazy"
+            decoding="async"
             style={{ width: '100%', height: '100%', objectFit: 'cover' }}
           />
         ) : (
           <span style={{ fontSize: '32px', color: '#2a2a3a' }}>♪</span>
         )}
       </div>
+
+      <MoveFileButton track={track} />
 
       {/* Info */}
       <div
@@ -80,7 +85,7 @@ export function TrackCard({
           marginBottom: '2px',
           whiteSpace: 'nowrap',
           overflow: 'hidden',
-          textOverflow: 'ellipsis',
+          textOverflow: 'ellipsis'
         }}>
           {track.title ?? track.filename ?? 'Untitled'}
         </div>

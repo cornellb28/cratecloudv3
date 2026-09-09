@@ -83,11 +83,9 @@ export function startWatcher(rootId: number, rootPath: string): void {
     followSymlinks: false,
     // Ignore hidden files and macOS AppleDouble files
     ignored: /(^|[/\\])\../,
-    // Wait 500ms after the last change before firing
-    // prevents duplicate events on slow drives
     awaitWriteFinish: {
-      stabilityThreshold: 500,
-      pollInterval: 100
+      stabilityThreshold: 1000,
+      pollInterval: 200
     }
   })
 

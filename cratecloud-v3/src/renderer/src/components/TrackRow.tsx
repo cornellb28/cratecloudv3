@@ -50,6 +50,8 @@ export function TrackRow({ track, isSelected, onSelected }: TrackRowProps): Reac
         {artworkUrl ? (
           <img
             src={artworkUrl}
+            loading="lazy"
+            decoding="async"
             alt=""
             style={{ width: '100%', height: '100%', objectFit: 'cover' }}
           />

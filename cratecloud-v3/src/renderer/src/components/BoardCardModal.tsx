@@ -5,6 +5,7 @@ import { Slider } from '@renderer/components/ui/slider'
 import { Separator } from '@renderer/components/ui/separator'
 import { TagInput } from './TagInput'
 import { useLibraryStore } from '../store/useLibraryStore'
+import { MoveFileButton } from './MoveFileButton'
 
 interface BoardCardModalProps {
   track: Track
@@ -159,6 +160,8 @@ export function BoardCardModal({ track, open, onClose }: BoardCardModalProps): R
               <span style={{ fontSize: '28px', color: '#333' }}>♪</span>
             )}
           </div>
+
+          <MoveFileButton track={track} />
 
           {/* Info */}
           <div style={{ flex: 1, minWidth: 0 }}>

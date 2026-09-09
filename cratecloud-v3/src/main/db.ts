@@ -871,6 +871,7 @@ export function updateArtworkPath(id: number, artworkPath: string): RunResult {
 export function getTagsByField(field: string): Tag[] {
   return stmts.getTagsByField.all(field) as Tag[]
 }
+
 export function parseCommentToCandidates(comment: string): string[] {
   return comment
     .split(' ')
@@ -1014,4 +1015,11 @@ export function getSetting(key: string): string | null {
 
 export function setSetting(key: string, value: string): RunResult {
   return stmts.setSetting.run({ key, value })
+}
+
+export function getArtworkPath(trackId: number): string | null {
+  const row = db
+    .prepare('SELECT artwork_path FROM tracks WHERE id = ?')
+    .get(trackId) as { artwork_path: string | null } | undefined
+  return row?.artwork_path ?? null
 }
