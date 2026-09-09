@@ -736,15 +736,16 @@ export function insertTrack(track: Record<string, unknown>): { lastInsertRowid: 
     analyzed_at: track.analyzed_at ?? null,
     board_id: track.board_id ?? 1 // default to Untagged (id: 1)
   }
-  const result = stmts.insertTrack.run(safe)
+  stmts.insertTrack.run(safe)
 
-  // ON CONFLICT returns lastInsertRowid 0 — fetch the real id
-  if (result.lastInsertRowid === 0n || result.lastInsertRowid === 0) {
-    const existing = stmts.getTrackByFilepath.get(safe.filepath) as { id: number } | undefined
-    return { lastInsertRowid: existing?.id ?? 0 }
-  }
-
-  return result
+  // better-sqlite3's lastInsertRowid is unreliable here: on the
+  // ON CONFLICT DO UPDATE path it is NOT reset to 0 — it holds
+  // whatever rowid the connection's last real INSERT produced,
+  // which may belong to a completely different track. Always
+  // resolve the id by filepath (UNIQUE, indexed) instead of
+  // trusting the statement result.
+  const existing = stmts.getTrackByFilepath.get(safe.filepath) as { id: number } | undefined
+  return { lastInsertRowid: existing?.id ?? 0 }
 }
 
 export function getAllTracks(): Track[] {
