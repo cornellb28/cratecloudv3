@@ -78,6 +78,16 @@ try {
 // ── Walk a folder and find all audio files ──────────────────────────────────────────────
 const AUDIO_EXTENSIONS = new Set(['.mp3', '.flac', '.wav', '.aiff', '.aif', '.m4a', '.ogg'])
 
+const AUDIO_MIME: Record<string, string> = {
+  '.mp3': 'audio/mpeg',
+  '.flac': 'audio/flac',
+  '.wav': 'audio/wav',
+  '.ogg': 'audio/ogg',
+  '.m4a': 'audio/mp4',
+  '.aiff': 'audio/aiff',
+  '.aif': 'audio/aiff'
+}
+
 // ── Import job state (in-memory only) ────────────────────────────────────────────────────
 // TODO: persist import jobs (id, folderPath, filepaths, nextIndex) to a DB table so a
 // cancelled/interrupted job can be resumed after an app restart. This was proposed and
@@ -1429,6 +1439,15 @@ protocol.registerSchemesAsPrivileged([
       supportFetchAPI: true,
       bypassCSP: true
     }
+  },
+  {
+    scheme: 'audio',
+    privileges: {
+      standard: true,
+      secure: true,
+      supportFetchAPI: true,
+      bypassCSP: true
+    }
   }
 ])
 
@@ -1456,6 +1475,72 @@ app.whenReady().then(() => {
     } finally {
       artworkInFlight--
     }
+  })
+
+  // ── Register a custom protocol for streaming audio playback ────────────
+  // Loopback-equivalent trust boundary: the renderer can request any path
+  // via this scheme, so every request is checked against a real track's
+  // filepath (exact match, never a prefix check) before the filesystem is
+  // touched — closed by construction against "../" traversal. Range-request
+  // support (206 Partial Content) is required for the <audio> element to
+  // be able to seek.
+  protocol.handle('audio', async (request) => {
+    const filePath = new URL(request.url).searchParams.get('path')
+
+    if (!filePath || !getTrackByFilepath(filePath)) {
+      return new Response(null, { status: 403 })
+    }
+
+    let fileSize: number
+    try {
+      fileSize = (await stat(filePath)).size
+    } catch {
+      return new Response(null, { status: 404 })
+    }
+
+    const mime = AUDIO_MIME[extname(filePath).toLowerCase()] ?? 'audio/mpeg'
+    const range = request.headers.get('range')
+
+    if (range) {
+      const [s, e] = range.replace('bytes=', '').split('-')
+      const start = parseInt(s, 10)
+      const end = e ? parseInt(e, 10) : fileSize - 1
+      const length = end - start + 1
+
+      // A Node Readable piped through Readable.toWeb() as the Response body
+      // silently fails to reach Chromium's media pipeline here (the <audio>
+      // element reports MEDIA_ERR_SRC_NOT_SUPPORTED even though the handler
+      // runs clean) — reading the exact byte range into a Buffer up front,
+      // like the artwork handler already does for whole files, sidesteps
+      // that Node-stream/Chromium-fetch interop gap entirely.
+      const buffer = Buffer.alloc(length)
+      const handle = await open(filePath, 'r')
+      try {
+        await handle.read(buffer, 0, length, start)
+      } finally {
+        await handle.close()
+      }
+
+      return new Response(buffer, {
+        status: 206,
+        headers: {
+          'Content-Range': `bytes ${start}-${end}/${fileSize}`,
+          'Accept-Ranges': 'bytes',
+          'Content-Length': String(length),
+          'Content-Type': mime
+        }
+      })
+    }
+
+    const data = await readFile(filePath)
+    return new Response(data, {
+      status: 200,
+      headers: {
+        'Content-Length': String(fileSize),
+        'Content-Type': mime,
+        'Accept-Ranges': 'bytes'
+      }
+    })
   })
 
   // Set app user model id for windows

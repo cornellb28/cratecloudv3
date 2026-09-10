@@ -113,7 +113,8 @@ export const VirtualizedTrackGrid = forwardRef<
                 transform: `translateY(${virtualRow.start}px)`,
                 display: 'grid',
                 gridTemplateColumns: `repeat(${columns}, 1fr)`,
-                gap: `${GAP}px`
+                gap: `${GAP}px`,
+                paddingBottom: '1rem'
               }}
             >
               {rowTracks.map((track) => (

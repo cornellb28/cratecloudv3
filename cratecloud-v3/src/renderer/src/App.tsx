@@ -15,6 +15,7 @@ import { Breadcrumb } from './components/Breadcrumb'
 import { ReconciliationModal } from './components/ReconciliationModal'
 import { Toaster } from './components/ui/sonner'
 import { BackgroundJobsPanel } from './components/BackgroundJobsPanel'
+import { PlayerBar } from './components/PlayerBar'
 
 // type View = 'dashboard' | 'library' | 'board' | 'genre' | 'artist' | 'folders' | 'crates' | 'settings'
 
@@ -425,7 +426,7 @@ function App(): React.JSX.Element {
   return (
     <div
       style={{
-        padding: '2rem',
+        padding: '1rem',
         fontFamily: 'monospace',
         color: '#e8e8f0',
         background: '#0e0e12',
@@ -435,7 +436,7 @@ function App(): React.JSX.Element {
         overflow: 'hidden'
       }}
     >
-      <h2 style={{ marginBottom: '0.5rem' }}>CrateCloud v2</h2>
+      {/* <h2 style={{ marginBottom: '0.5rem' }}>CrateCloud v2</h2> */}
 
       {/* Hidden track count — for Playwright tests */}
       <div data-testid="track-count" style={{ display: 'none' }}>
@@ -593,6 +594,8 @@ function App(): React.JSX.Element {
         {/* Inspector slides in from the right when a track is selected */}
         <Inspector key={activeTrackId ?? 'none'} />
       </div>
+
+      <PlayerBar />
 
       <SettingsModal
         open={settingsOpen}

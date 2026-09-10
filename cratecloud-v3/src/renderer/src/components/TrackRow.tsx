@@ -1,5 +1,6 @@
 import React from 'react'
 import { useLibraryStore } from '../store/useLibraryStore'
+import { usePlayerStore } from '../store/usePlayerStore'
 import { Badge } from '@renderer/components/ui/badge'
 import { Checkbox } from '@renderer/components/ui/checkbox'
 import { useArtworkUrl } from '../hooks/useArtworkUrl'
@@ -12,9 +13,20 @@ interface TrackRowProps {
 
 export function TrackRow({ track, isSelected, onSelected }: TrackRowProps): React.JSX.Element {
   const { activeTrackId, setActiveTrack, trackTags } = useLibraryStore()
+  const { currentTrack, isPlaying, playTrack, togglePlayPause } = usePlayerStore()
   const isActive = activeTrackId === track.id
   const appliedTags = trackTags.get(track.id) ?? []
   const artworkUrl = useArtworkUrl(track.artwork_hash, 'thumb')
+
+  const isCurrentTrack = currentTrack?.id === track.id
+  const isMissing = !!track.missing
+
+  function handlePlayToggle(e: React.MouseEvent): void {
+    e.stopPropagation()
+    if (isMissing || !track.filepath) return
+    if (isCurrentTrack) togglePlayPause()
+    else playTrack(track)
+  }
 
   return (
     <div
@@ -47,6 +59,7 @@ export function TrackRow({ track, isSelected, onSelected }: TrackRowProps): Reac
         display: 'flex',
         alignItems: 'center',
         justifyContent: 'center',
+        position: 'relative'
       }}>
         {artworkUrl ? (
           <img
@@ -58,6 +71,35 @@ export function TrackRow({ track, isSelected, onSelected }: TrackRowProps): Reac
           />
         ) : (
           <span style={{ fontSize: '18px', color: '#333' }}>♪</span>
+        )}
+
+        {!isMissing && track.filepath && (
+          <button
+            data-testid={`track-play-${track.id}`}
+            onClick={handlePlayToggle}
+            title={isCurrentTrack && isPlaying ? 'Pause' : 'Play'}
+            style={{
+              position: 'absolute',
+              inset: 0,
+              zIndex: 2,
+              border: 'none',
+              background: isCurrentTrack ? 'rgba(127,119,221,0.55)' : 'rgba(0,0,0,0.35)',
+              color: '#fff',
+              fontSize: '12px',
+              cursor: 'pointer',
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'center',
+              opacity: isCurrentTrack ? 1 : 0,
+              transition: 'opacity 0.1s'
+            }}
+            onMouseEnter={(e) => (e.currentTarget.style.opacity = '1')}
+            onMouseLeave={(e) => {
+              if (!isCurrentTrack) e.currentTarget.style.opacity = '0'
+            }}
+          >
+            {isCurrentTrack && isPlaying ? '⏸' : '▶'}
+          </button>
         )}
       </div>
       <div style={{ fontWeight: 500, fontSize: '13px' }}>
