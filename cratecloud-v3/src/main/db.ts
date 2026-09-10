@@ -1489,13 +1489,22 @@ function resolveFolderIdForPath(filepath: string): number | null {
 // same track via the file-level move heuristic (findMoveCandidate in
 // libraryWatcher.ts); whichever lands second must not leave a track stuck
 // missing with an otherwise-correct, live filepath.
+//
+// Emits folderEvents so App.tsx's onFoldersChanged subscription refetches
+// folderCounts — this changes a track's folder_id without necessarily
+// creating/reviving any folder row (the destination usually already
+// exists), so ensureFolderTree's own emit alone doesn't cover it. Without
+// this, a renamed/moved-into folder's card would show a stale count (often
+// 0) until something unrelated happened to trigger a refetch.
 export function updateTrackFilepath(oldPath: string, newPath: string): RunResult {
-  return stmts.updateFilepath.run({
+  const result = stmts.updateFilepath.run({
     oldPath,
     newPath,
     filename: basename(newPath),
     folder_id: resolveFolderIdForPath(newPath)
   })
+  folderEvents.emit('changed')
+  return result
 }
 
 // ─── Identity / relink reconciliation ─────────────────────
@@ -1546,8 +1555,14 @@ export function getMissingTracks(rootId?: number): MissingTrackCandidate[] {
 // Deliberately narrow: only what identifies WHERE the file is now. Tags,
 // board_id, energy, analyzed_at, artwork_hash all survive untouched, which
 // is the entire point versus letting it insert as a duplicate row.
+//
+// Emits folderEvents for the same reason updateTrackFilepath does — a
+// relink changes folder_id (and clears missing) on a folder row that
+// already exists, so ensureFolderTree's own emit never fires for it, and
+// folderCounts would otherwise go stale on exactly the folders reconcile
+// just repopulated.
 export function relinkTrack(trackId: number, newPath: string): RunResult {
-  return db
+  const result = db
     .prepare(
       `UPDATE tracks SET
          filepath     = @newPath,
@@ -1564,6 +1579,8 @@ export function relinkTrack(trackId: number, newPath: string): RunResult {
       filename: basename(newPath),
       folder_id: resolveFolderIdForPath(newPath)
     })
+  folderEvents.emit('changed')
+  return result
 }
 
 export function insertPendingChange(data: {
