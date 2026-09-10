@@ -3,6 +3,7 @@ import { useLibraryStore } from '../store/useLibraryStore'
 import { Badge } from '@renderer/components/ui/badge'
 import { Checkbox } from '@renderer/components/ui/checkbox'
 import { MoveFileButton } from './MoveFileButton'
+import { useArtworkUrl } from '../hooks/useArtworkUrl'
 
 interface TrackCardProps {
   track: Track
@@ -19,7 +20,7 @@ export function TrackCard({
   const isActive = activeTrackId === track.id
   const appliedTags = trackTags.get(track.id) ?? []
   const commentTags = appliedTags.filter(t => t.field === 'comment')
-  const artworkUrl = track.artwork_path ? `artwork://${track.artwork_path}` : null
+  const artworkUrl = useArtworkUrl(track.artwork_hash, 'thumb')
 
   return (
     <div

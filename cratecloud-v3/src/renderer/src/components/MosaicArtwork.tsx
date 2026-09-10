@@ -1,7 +1,8 @@
 import React from 'react'
+import { useArtworkUrl } from '../hooks/useArtworkUrl'
 
 interface MosaicArtworkProps {
-  artworkPaths: (string | null)[]
+  artworkHashes: (string | null)[]
   folderName: string
   size?: number
   borderRadius?: number
@@ -21,21 +22,46 @@ function folderColor(name: string): string {
   return colors[Math.abs(hash)]
 }
 
+function MosaicTile({ url }: { url: string | null }): React.JSX.Element {
+  return url ? (
+    <img src={url} alt="" style={{ width: '100%', height: '100%', objectFit: 'cover' }} />
+  ) : (
+    <div style={{
+      width: '100%',
+      height: '100%',
+      display: 'flex',
+      alignItems: 'center',
+      justifyContent: 'center',
+      background: '#1e1e2a',
+    }}>
+      <span style={{ fontSize: '20px', color: '#333' }}>♪</span>
+    </div>
+  )
+}
+
 export function MosaicArtwork({
-  artworkPaths,
+  artworkHashes,
   folderName,
   size = 200,
   borderRadius = 8,
 }: MosaicArtworkProps): React.JSX.Element {
 
-  // Filter to real artwork paths only
-  const realArtwork = artworkPaths.filter(Boolean).slice(0, 4) as string[]
+  // Filter to real hashes only
+  const realHashes = artworkHashes.filter(Boolean).slice(0, 4) as string[]
+
+  // Resolved as a fixed-arity set of hook calls (Rules of Hooks) — up to 4
+  // tiles regardless of how many hashes this folder actually has.
+  const url0 = useArtworkUrl(realHashes[0] ?? null, 'thumb')
+  const url1 = useArtworkUrl(realHashes[1] ?? null, 'thumb')
+  const url2 = useArtworkUrl(realHashes[2] ?? null, 'thumb')
+  const url3 = useArtworkUrl(realHashes[3] ?? null, 'thumb')
+  const urls = [url0, url1, url2, url3]
 
   const baseColor = folderColor(folderName)
 
   // ── No artwork — Option C: generated color ────────────
 
-  if (realArtwork.length === 0) {
+  if (realHashes.length === 0) {
     return (
       <div style={{
         width: size,
@@ -73,7 +99,7 @@ export function MosaicArtwork({
 
   // ── 1 artwork — full size ─────────────────────────────
 
-  if (realArtwork.length === 1) {
+  if (realHashes.length === 1) {
     return (
       <div style={{
         width: size,
@@ -83,11 +109,7 @@ export function MosaicArtwork({
         overflow: 'hidden',
         position: 'relative',
       }}>
-        <img
-          src={`artwork://${realArtwork[0]}`}
-          alt=""
-          style={{ width: '100%', height: '100%', objectFit: 'cover' }}
-        />
+        <MosaicTile url={urls[0]} />
         {/* Option A — folder name overlay on single image */}
         <div style={{
           position: 'absolute',
@@ -108,7 +130,7 @@ export function MosaicArtwork({
 
   // ── 2 artworks — side by side ─────────────────────────
 
-  if (realArtwork.length === 2) {
+  if (realHashes.length === 2) {
     return (
       <div style={{
         width: size,
@@ -121,13 +143,8 @@ export function MosaicArtwork({
         gap: '2px',
         background: '#1e1e2a',
       }}>
-        {realArtwork.map((path, i) => (
-          <img
-            key={i}
-            src={`artwork://${path}`}
-            alt=""
-            style={{ width: '100%', height: '100%', objectFit: 'cover' }}
-          />
+        {urls.slice(0, 2).map((url, i) => (
+          <MosaicTile key={i} url={url} />
         ))}
       </div>
     )
@@ -135,7 +152,7 @@ export function MosaicArtwork({
 
   // ── 3 artworks — left full + right split ──────────────
 
-  if (realArtwork.length === 3) {
+  if (realHashes.length === 3) {
     return (
       <div style={{
         width: size,
@@ -149,26 +166,11 @@ export function MosaicArtwork({
         gap: '2px',
         background: '#1e1e2a',
       }}>
-        <img
-          src={`artwork://${realArtwork[0]}`}
-          alt=""
-          style={{
-            width: '100%',
-            height: '100%',
-            objectFit: 'cover',
-            gridRow: '1 / 3',
-          }}
-        />
-        <img
-          src={`artwork://${realArtwork[1]}`}
-          alt=""
-          style={{ width: '100%', height: '100%', objectFit: 'cover' }}
-        />
-        <img
-          src={`artwork://${realArtwork[2]}`}
-          alt=""
-          style={{ width: '100%', height: '100%', objectFit: 'cover' }}
-        />
+        <div style={{ gridRow: '1 / 3' }}>
+          <MosaicTile url={urls[0]} />
+        </div>
+        <MosaicTile url={urls[1]} />
+        <MosaicTile url={urls[2]} />
       </div>
     )
   }
@@ -188,13 +190,8 @@ export function MosaicArtwork({
       gap: '2px',
       background: '#1e1e2a',
     }}>
-      {realArtwork.slice(0, 4).map((path, i) => (
-        <img
-          key={i}
-          src={`artwork://${path}`}
-          alt=""
-          style={{ width: '100%', height: '100%', objectFit: 'cover' }}
-        />
+      {urls.slice(0, 4).map((url, i) => (
+        <MosaicTile key={i} url={url} />
       ))}
     </div>
   )

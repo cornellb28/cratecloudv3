@@ -1,6 +1,7 @@
 import React from 'react'
 import { useLibraryStore } from '../store/useLibraryStore'
 import { Badge } from '@renderer/components/ui/badge'
+import { useArtworkUrl } from '../hooks/useArtworkUrl'
 
 interface DashboardStats {
   total: number
@@ -21,7 +22,7 @@ function computeStats(tracks: Track[], trackTags: Map<number, Tag[]>): Dashboard
   const missing = tracks.filter((t) => t.missing === 1).length
   const noBpm = tracks.filter((t) => !t.bpm).length
   const noKey = tracks.filter((t) => !t.key_camelot).length
-  const noArtwork = tracks.filter((t) => !t.artwork_path).length
+  const noArtwork = tracks.filter((t) => !t.artwork_hash).length
   const noGenre = tracks.filter((t) => !t.genre).length
   const totalDurationHr = Math.round(
     tracks.reduce((sum, t) => sum + (t.duration_sec ?? 0), 0) / 3600
@@ -329,117 +330,14 @@ export function DashboardView(): React.JSX.Element {
         borderRadius: '10px',
         overflow: 'hidden',
       }}>
-        {stats.recentTracks.map((track, i) => {
-          const artworkUrl = track.artwork_path
-            ? `artwork://${track.artwork_path}`
-            : null
-          return (
-            <div
-              key={track.id}
-              style={{
-                display: 'flex',
-                alignItems: 'center',
-                gap: '12px',
-                padding: '10px 14px',
-                borderBottom: i < stats.recentTracks.length - 1
-                  ? '0.5px solid #1e1e2a'
-                  : 'none',
-              }}
-            >
-              {/* Track number */}
-              <span style={{
-                fontSize: '11px',
-                color: '#333',
-                minWidth: '20px',
-                textAlign: 'right',
-              }}>
-                {i + 1}
-              </span>
-
-              {/* Artwork */}
-              <div style={{
-                width: '36px',
-                height: '36px',
-                borderRadius: '4px',
-                overflow: 'hidden',
-                background: '#1e1e2a',
-                flexShrink: 0,
-                display: 'flex',
-                alignItems: 'center',
-                justifyContent: 'center',
-              }}>
-                {artworkUrl ? (
-                  <img
-                    src={artworkUrl}
-                    alt=""
-                    style={{ width: '100%', height: '100%', objectFit: 'cover' }}
-                  />
-                ) : (
-                  <span style={{ fontSize: '14px', color: '#333' }}>♪</span>
-                )}
-              </div>
-
-              {/* Info */}
-              <div style={{ flex: 1, minWidth: 0 }}>
-                <div style={{
-                  fontSize: '13px',
-                  fontWeight: 500,
-                  color: '#e0e0f0',
-                  whiteSpace: 'nowrap',
-                  overflow: 'hidden',
-                  textOverflow: 'ellipsis',
-                }}>
-                  {track.title ?? track.filename ?? 'Untitled'}
-                </div>
-                <div style={{
-                  fontSize: '11px',
-                  color: '#555',
-                  whiteSpace: 'nowrap',
-                  overflow: 'hidden',
-                  textOverflow: 'ellipsis',
-                }}>
-                  {track.artist ?? 'Unknown'}
-                </div>
-              </div>
-
-              {/* Badges */}
-              <div style={{ display: 'flex', gap: '4px', flexShrink: 0 }}>
-                {track.bpm && (
-                  <Badge variant="outline" style={{
-                    fontSize: '10px',
-                    background: '#1a2535',
-                    color: '#5d9fd8',
-                    borderColor: '#1a2535',
-                  }}>
-                    {track.bpm}
-                  </Badge>
-                )}
-                {track.key_camelot && (
-                  <Badge variant="outline" style={{
-                    fontSize: '10px',
-                    background: '#1a2830',
-                    color: '#3db88a',
-                    borderColor: '#1a2830',
-                  }}>
-                    {track.key_camelot}
-                  </Badge>
-                )}
-              </div>
-
-              {/* Added date */}
-              <span style={{
-                fontSize: '11px',
-                color: '#333',
-                flexShrink: 0,
-              }}>
-                {new Date(track.added_at).toLocaleDateString('en-US', {
-                  month: 'short',
-                  day: 'numeric',
-                })}
-              </span>
-            </div>
-          )
-        })}
+        {stats.recentTracks.map((track, i) => (
+          <RecentTrackRow
+            key={track.id}
+            track={track}
+            index={i}
+            isLast={i === stats.recentTracks.length - 1}
+          />
+        ))}
       </div>
 
     </div>
@@ -459,6 +357,122 @@ function SectionTitle({ children }: { children: React.ReactNode }): React.JSX.El
       marginBottom: '10px',
     }}>
       {children}
+    </div>
+  )
+}
+
+function RecentTrackRow({
+  track,
+  index,
+  isLast,
+}: {
+  track: Track
+  index: number
+  isLast: boolean
+}): React.JSX.Element {
+  const artworkUrl = useArtworkUrl(track.artwork_hash, 'thumb')
+
+  return (
+    <div
+      style={{
+        display: 'flex',
+        alignItems: 'center',
+        gap: '12px',
+        padding: '10px 14px',
+        borderBottom: isLast ? 'none' : '0.5px solid #1e1e2a',
+      }}
+    >
+      {/* Track number */}
+      <span style={{
+        fontSize: '11px',
+        color: '#333',
+        minWidth: '20px',
+        textAlign: 'right',
+      }}>
+        {index + 1}
+      </span>
+
+      {/* Artwork */}
+      <div style={{
+        width: '36px',
+        height: '36px',
+        borderRadius: '4px',
+        overflow: 'hidden',
+        background: '#1e1e2a',
+        flexShrink: 0,
+        display: 'flex',
+        alignItems: 'center',
+        justifyContent: 'center',
+      }}>
+        {artworkUrl ? (
+          <img
+            src={artworkUrl}
+            alt=""
+            style={{ width: '100%', height: '100%', objectFit: 'cover' }}
+          />
+        ) : (
+          <span style={{ fontSize: '14px', color: '#333' }}>♪</span>
+        )}
+      </div>
+
+      {/* Info */}
+      <div style={{ flex: 1, minWidth: 0 }}>
+        <div style={{
+          fontSize: '13px',
+          fontWeight: 500,
+          color: '#e0e0f0',
+          whiteSpace: 'nowrap',
+          overflow: 'hidden',
+          textOverflow: 'ellipsis',
+        }}>
+          {track.title ?? track.filename ?? 'Untitled'}
+        </div>
+        <div style={{
+          fontSize: '11px',
+          color: '#555',
+          whiteSpace: 'nowrap',
+          overflow: 'hidden',
+          textOverflow: 'ellipsis',
+        }}>
+          {track.artist ?? 'Unknown'}
+        </div>
+      </div>
+
+      {/* Badges */}
+      <div style={{ display: 'flex', gap: '4px', flexShrink: 0 }}>
+        {track.bpm && (
+          <Badge variant="outline" style={{
+            fontSize: '10px',
+            background: '#1a2535',
+            color: '#5d9fd8',
+            borderColor: '#1a2535',
+          }}>
+            {track.bpm}
+          </Badge>
+        )}
+        {track.key_camelot && (
+          <Badge variant="outline" style={{
+            fontSize: '10px',
+            background: '#1a2830',
+            color: '#3db88a',
+            borderColor: '#1a2830',
+          }}>
+            {track.key_camelot}
+          </Badge>
+        )}
+      </div>
+
+      {/* Added date */}
+      <span style={{
+        fontSize: '11px',
+        color: '#333',
+        flexShrink: 0,
+      }}>
+        {new Date(track.added_at).toLocaleDateString('en-US', {
+          month: 'short',
+          day: 'numeric',
+        })}
+      </span>
     </div>
   )
 }

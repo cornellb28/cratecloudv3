@@ -1,7 +1,6 @@
 import React, { useState, useRef, useEffect } from 'react'
 import { useLibraryStore } from '../store/useLibraryStore'
 import { Badge } from './ui/badge'
-import { getYearOptions } from '../utils/years'
 
 interface TagInputProps {
   trackId: number

@@ -6,6 +6,7 @@ import { Separator } from '@renderer/components/ui/separator'
 import { TagInput } from './TagInput'
 import { useLibraryStore } from '../store/useLibraryStore'
 import { MoveFileButton } from './MoveFileButton'
+import { useArtworkUrl } from '../hooks/useArtworkUrl'
 
 interface BoardCardModalProps {
   track: Track
@@ -110,7 +111,7 @@ export function BoardCardModal({ track, open, onClose }: BoardCardModalProps): R
     }
   }
 
-  const artworkUrl = track.artwork_path ? `artwork://${track.artwork_path}` : null
+  const artworkUrl = useArtworkUrl(track.artwork_hash, 'full')
   return (
     <Dialog open={open} onOpenChange={handleOpenChange}>
       <DialogContent

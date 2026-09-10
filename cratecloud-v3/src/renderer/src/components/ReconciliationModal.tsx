@@ -2,6 +2,7 @@ import React, { useState, useEffect } from 'react'
 import { Dialog, DialogContent } from '@renderer/components/ui/dialog'
 import { Button } from '@renderer/components/ui/button'
 import { Badge } from '@renderer/components/ui/badge'
+import { useArtworkUrl } from '../hooks/useArtworkUrl'
 
 interface ReconciliationModalProps {
   open: boolean
@@ -319,6 +320,7 @@ function ChangeRow({
   accepting: boolean
 }): React.JSX.Element {
   const resolved = change.status !== 'pending'
+  const artworkUrl = useArtworkUrl(change.artwork_hash, 'thumb')
 
   return (
     <div style={{
@@ -343,9 +345,9 @@ function ChangeRow({
         alignItems: 'center',
         justifyContent: 'center',
       }}>
-        {change.artwork_path ? (
+        {artworkUrl ? (
           <img
-            src={`artwork://${change.artwork_path}`}
+            src={artworkUrl}
             alt=""
             style={{ width: '100%', height: '100%', objectFit: 'cover' }}
           />

@@ -2,6 +2,7 @@ import React from 'react'
 import { useLibraryStore } from '../store/useLibraryStore'
 import { Badge } from '@renderer/components/ui/badge'
 import { Checkbox } from '@renderer/components/ui/checkbox'
+import { useArtworkUrl } from '../hooks/useArtworkUrl'
 
 interface TrackRowProps {
   track: Track
@@ -13,7 +14,7 @@ export function TrackRow({ track, isSelected, onSelected }: TrackRowProps): Reac
   const { activeTrackId, setActiveTrack, trackTags } = useLibraryStore()
   const isActive = activeTrackId === track.id
   const appliedTags = trackTags.get(track.id) ?? []
-  const artworkUrl = track.artwork_path ? `artwork://${track.artwork_path}` : null
+  const artworkUrl = useArtworkUrl(track.artwork_hash, 'thumb')
 
   return (
     <div

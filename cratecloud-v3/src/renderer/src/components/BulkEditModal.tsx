@@ -7,6 +7,7 @@ import { Button } from '@renderer/components/ui/button'
 import { Badge } from '@renderer/components/ui/badge'
 import { TagInput } from './TagInput'
 import { useLibraryStore } from '../store/useLibraryStore'
+import { useArtworkUrl } from '../hooks/useArtworkUrl'
 
 // ─── Types ───────────────────────────────────────────────
 
@@ -67,6 +68,7 @@ export function BulkEditModal({ trackIds, open, onClose }: BulkEditModalProps): 
   // Current track being edited
   const currentTrackId = trackIds[currentIndex]
   const currentTrack = tracks.find(t => t.id === currentTrackId)
+  const artworkUrl = useArtworkUrl(currentTrack?.artwork_hash, 'full')
 
   const [lastTrackId, setLastTrackId] = useState(currentTrackId)
   if (currentTrackId !== lastTrackId) {
@@ -206,10 +208,6 @@ export function BulkEditModal({ trackIds, open, onClose }: BulkEditModalProps): 
   }
 
   if (!currentTrack) return null
-
-  const artworkUrl = currentTrack.artwork_path
-    ? `artwork://${currentTrack.artwork_path}`
-    : null
 
   return (
     <Dialog open={open} onOpenChange={onClose}>

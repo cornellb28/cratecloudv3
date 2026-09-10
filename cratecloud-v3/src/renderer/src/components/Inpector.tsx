@@ -6,6 +6,7 @@ import { TagInput } from './TagInput'
 import { MoveFileButton } from './MoveFileButton'
 import { Input } from '@renderer/components/ui/input'
 import { getYearOptions } from '../utils/years'
+import { useArtworkUrl } from '../hooks/useArtworkUrl'
 
 const CAMELOT_KEYS = [
   '1A', '2A', '3A', '4A', '5A', '6A', '7A', '8A', '9A', '10A', '11A', '12A',
@@ -19,6 +20,7 @@ export function Inspector(): React.JSX.Element {
   const isOpen = track !== null
   const titleRef = useRef<HTMLInputElement>(null)
   const [analyzing, setAnalyzing] = useState(false)
+  const artworkUrl = useArtworkUrl(track?.artwork_hash, 'full')
 
   // Preload all tags for this track into store on open
   useEffect(() => {
@@ -147,9 +149,9 @@ export function Inspector(): React.JSX.Element {
               display: 'flex', alignItems: 'center', justifyContent: 'center',
               position: 'relative',
             }}>
-              {track.artwork_path ? (
+              {artworkUrl ? (
                 <img
-                  src={`artwork://${track.artwork_path}`}
+                  src={artworkUrl}
                   alt=""
                   loading="lazy"
                   decoding="async"

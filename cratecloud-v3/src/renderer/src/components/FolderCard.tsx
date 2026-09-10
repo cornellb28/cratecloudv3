@@ -6,7 +6,7 @@ interface FolderCardProps {
   path: string
   trackCount: number
   audioCount?: number
-  artworkPaths: (string | null)[]
+  artworkHashes: (string | null)[]
   onClick: () => void
 }
 
@@ -15,7 +15,7 @@ export function FolderCard({
   path,
   trackCount,
   audioCount,
-  artworkPaths,
+  artworkHashes,
   onClick
 }: FolderCardProps): React.JSX.Element {
   // audioCount (disk) vs trackCount (imported into the DB) — show both only when they diverge
@@ -39,7 +39,7 @@ export function FolderCard({
       onMouseLeave={(e) => (e.currentTarget.style.transform = 'scale(1)')}
     >
       {/* Mosaic artwork */}
-      <MosaicArtwork artworkPaths={artworkPaths} folderName={name} size={160} borderRadius={8} />
+      <MosaicArtwork artworkHashes={artworkHashes} folderName={name} size={160} borderRadius={8} />
 
       {/* Folder info */}
       <div>

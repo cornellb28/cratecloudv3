@@ -3,6 +3,7 @@ import { useLibraryStore } from '../store/useLibraryStore'
 import { Badge } from '@renderer/components/ui/badge'
 // import { Checkbox } from '@renderer/components/ui/checkbox'
 import { BoardCardModal } from '../components/BoardCardModal'
+import { useArtworkUrl } from '../hooks/useArtworkUrl'
 
 interface BoardCardProps {
   track: Track
@@ -25,9 +26,7 @@ export function BoardCard({
   const [modalOpen, setModalOpen] = useState(false)
 
   const isActive = activeTrackId === track.id
-  const artworkUrl = track.artwork_path
-    ? `artwork://${track.artwork_path}`
-    : null
+  const artworkUrl = useArtworkUrl(track.artwork_hash, 'thumb')
 
   const appliedTags = trackTags.get(track.id) ?? []
   const commentTags = appliedTags.filter(t => t.field === 'comment')
