@@ -3,17 +3,13 @@ import { toast } from 'sonner'
 import { useLibraryStore } from '../store/useLibraryStore'
 import { BoardCard } from '../components/BoardCard'
 import { useFileDrop } from '../hooks/useFileDrop'
+import { useViewMode } from '../hooks/useViewMode'
+import { ViewModeToggle } from './ViewModeToggle'
 
 export function BoardView(): React.JSX.Element {
   const { tracks, updateTrack, boards, setTracks } = useLibraryStore()
   const [draggingId, setDraggingId] = useState<number | null>(null)
 
-  // Per-column display mode — default grid
-  const [colModes, setColModes] = useState<Record<number, 'grid' | 'list'>>({})
-
-  function getMode(boardId: number): 'grid' | 'list' {
-    return colModes[boardId] ?? 'grid'
-  }
   async function moveTrack(trackId: number, boardId: number): Promise<void> {
     updateTrack(trackId, { board_id: boardId })
     await window.api.db.updateBoardId(trackId, boardId)
@@ -78,8 +74,6 @@ export function BoardView(): React.JSX.Element {
           key={board.id}
           board={board}
           tracks={tracks.filter(t => t.board_id === board.id)}
-          mode={getMode(board.id)}
-          onSetMode={(mode) => setColModes(prev => ({ ...prev, [board.id]: mode }))}
           onDragOver={onDragOver}
           onDrop={onDrop}
           onCardDragStart={setDraggingId}
@@ -97,8 +91,6 @@ export function BoardView(): React.JSX.Element {
 function BoardColumn({
   board,
   tracks: colTracks,
-  mode,
-  onSetMode,
   onDragOver,
   onDrop,
   onCardDragStart,
@@ -107,8 +99,6 @@ function BoardColumn({
 }: {
   board: Board
   tracks: Track[]
-  mode: 'grid' | 'list'
-  onSetMode: (mode: 'grid' | 'list') => void
   onDragOver: (e: React.DragEvent) => void
   onDrop: (e: React.DragEvent, boardId: number) => void
   onCardDragStart: (id: number) => void
@@ -118,6 +108,10 @@ function BoardColumn({
   const { isDragging, dropHandlers } = useFileDrop({
     onDrop: (paths) => onDropPaths(paths, board.id)
   })
+  // Each column remembers its own mode independently — same as before this
+  // was extracted, just persisted now (view_mode:board:<id>) instead of
+  // resetting to grid on every restart.
+  const [mode, onSetMode] = useViewMode(`board:${board.id}`, 'grid')
 
   return (
     <div
@@ -176,47 +170,7 @@ function BoardColumn({
           {colTracks.length}
         </span>
 
-        {/* List / Grid toggle */}
-        <div style={{
-          display: 'flex',
-          gap: '1px',
-          background: '#1a1a26',
-          borderRadius: '4px',
-          padding: '1px',
-        }}>
-          <button
-            onClick={() => onSetMode('list')}
-            title="List view"
-            style={{
-              background: mode === 'list' ? '#252535' : 'none',
-              border: 'none',
-              borderRadius: '3px',
-              padding: '2px 5px',
-              cursor: 'pointer',
-              color: mode === 'list' ? '#a09be8' : '#444',
-              fontSize: '11px',
-              lineHeight: 1,
-            }}
-          >
-            ☰
-          </button>
-          <button
-            onClick={() => onSetMode('grid')}
-            title="Grid view"
-            style={{
-              background: mode === 'grid' ? '#252535' : 'none',
-              border: 'none',
-              borderRadius: '3px',
-              padding: '2px 5px',
-              cursor: 'pointer',
-              color: mode === 'grid' ? '#a09be8' : '#444',
-              fontSize: '11px',
-              lineHeight: 1,
-            }}
-          >
-            ⊞
-          </button>
-        </div>
+        <ViewModeToggle mode={mode} onChange={onSetMode} />
       </div>
 
       {/* Track cards */}

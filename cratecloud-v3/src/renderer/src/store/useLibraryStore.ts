@@ -28,6 +28,12 @@ interface LibraryState {
   searchQuery: string
   sidebarCollapsed: boolean
   displayMode: 'list' | 'grid'
+  // Per-view list/grid mode, keyed by an arbitrary viewKey (see
+  // useViewMode) — e.g. 'all_tracks', or 'board:<boardId>' for one of
+  // BoardView's columns. Separate from `displayMode` above: that field is
+  // FolderView's own single global mode (out of scope for this hook — see
+  // useViewMode's comment), left as-is rather than merged in.
+  viewModes: Record<string, 'list' | 'grid'>
   tags: Tag[]
   quickTags: Tag[]
   trackTags: Map<number, Tag[]>
@@ -58,6 +64,7 @@ interface LibraryState {
 
   setSidebarCollapsed: (collapsed: boolean) => void
   setDisplayMode: (mode: 'list' | 'grid') => void
+  setViewMode: (key: string, mode: 'list' | 'grid') => void
   setTracks: (tracks: Track[]) => void
   addTrack: (track: Track) => void
   setBoards: (boards: Board[]) => void
@@ -102,6 +109,7 @@ export const useLibraryStore = create<LibraryState>((set) => ({
   folderCounts: [],
   jobs: {},
   pendingFolderNav: null,
+  viewModes: {},
 
   sidebarCollapsed: localStorage.getItem('cratecloud_sidebar_collapsed') === 'true',
   displayMode: (localStorage.getItem('cratecloud_display_mode') as 'list' | 'grid') ?? 'list',
@@ -118,6 +126,8 @@ export const useLibraryStore = create<LibraryState>((set) => ({
     localStorage.setItem('cratecloud_display_mode', mode)
     set({ displayMode: mode })
   },
+
+  setViewMode: (key, mode) => set((state) => ({ viewModes: { ...state.viewModes, [key]: mode } })),
 
   // Replace the entire track list
   // Called on app startup when we load from SQLite

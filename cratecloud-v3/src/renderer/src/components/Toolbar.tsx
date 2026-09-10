@@ -2,6 +2,8 @@ import React from 'react'
 import { useLibraryStore } from '../store/useLibraryStore'
 import { Button } from '@renderer/components/ui/button'
 import { Input } from '@renderer/components/ui/input'
+import { ViewModeToggle } from './ViewModeToggle'
+import { useViewMode } from '../hooks/useViewMode'
 
 interface ToolbarProps {
   onImport: () => void
@@ -11,6 +13,7 @@ interface ToolbarProps {
 
 export function Toolbar({ onImport, activeView, onImportFiles }: ToolbarProps): React.JSX.Element {
   const { isAnalyzing, tracks, searchQuery, setSearchQuery } = useLibraryStore()
+  const [viewMode, setViewMode] = useViewMode('all_tracks', 'list')
 
   return (
     <div
@@ -60,6 +63,8 @@ export function Toolbar({ onImport, activeView, onImportFiles }: ToolbarProps): 
           )}
         </div>
       )}
+
+      {activeView === 'library' && <ViewModeToggle mode={viewMode} onChange={setViewMode} />}
 
       {/* Board view label instead of search */}
       {activeView === 'board' && (
