@@ -1,4 +1,5 @@
 import React, { useState, useMemo } from 'react'
+import { toast } from 'sonner'
 import { useLibraryStore } from '../store/useLibraryStore'
 import { FolderCard } from '../components/FolderCard'
 import { MosaicArtwork } from '../components/MosaicArtwork'
@@ -22,6 +23,11 @@ export function FolderView({ libraryRoots }: FolderViewProps): React.JSX.Element
   // = top-level root picker.
   const [navStack, setNavStack] = useState<number[]>([])
   const [selectedIds, setSelectedIds] = useState<Set<number>>(new Set())
+
+  // "New folder" inline input, scoped to the currently viewed folder
+  const [creatingFolder, setCreatingFolder] = useState(false)
+  const [newFolderName, setNewFolderName] = useState('')
+  const [creating, setCreating] = useState(false)
 
   const currentFolderId = navStack.length > 0 ? navStack[navStack.length - 1] : null
 
@@ -125,6 +131,39 @@ export function FolderView({ libraryRoots }: FolderViewProps): React.JSX.Element
       setTracks(all)
     }
     setAnalyzing(false)
+  }
+
+  // Create a subfolder of the folder currently being browsed. fs:create-folder
+  // already does mkdir + ensureFolderTree + folders:changed — App.tsx's
+  // debounced onFoldersChanged subscription refreshes the shared `folders`
+  // slice on its own, so the only thing this needs to do afterward is
+  // navigate; the new row shows up in the store a moment later on its own.
+  async function handleCreateFolder(parentPath: string): Promise<void> {
+    const name = newFolderName.trim()
+    if (!name) return
+    if (name.includes('/') || name.includes('\\')) {
+      toast.error('Could not create folder', { description: 'Name cannot contain slashes' })
+      return
+    }
+
+    setCreating(true)
+    try {
+      const result = await window.api.fs.createFolder(parentPath, name)
+      if (result.ok && result.path) {
+        setCreatingFolder(false)
+        setNewFolderName('')
+        if (result.folderId == null) {
+          toast.warning(`Created "${name}"`, { description: result.reason })
+        } else {
+          navigateInto(result.folderId)
+        }
+      } else {
+        toast.error('Could not create folder', { description: result.error ?? 'Unknown error' })
+      }
+    } catch (err) {
+      toast.error('Could not create folder', { description: (err as Error).message })
+    }
+    setCreating(false)
   }
 
   // Top level — no folder selected yet — show all registered library roots
@@ -361,14 +400,74 @@ export function FolderView({ libraryRoots }: FolderViewProps): React.JSX.Element
               )}
             </div>
             {currentFolder.path && (
-              <Button
-                onClick={() => handleImportThisFolder(currentFolder.path as string)}
-                disabled={isAnalyzing}
-                variant="outline"
-                size="sm"
-              >
-                {isAnalyzing ? 'Scanning...' : '↺ Re-scan this folder'}
-              </Button>
+              <div style={{ display: 'flex', gap: '8px', alignItems: 'center', flexWrap: 'wrap' }}>
+                <Button
+                  onClick={() => handleImportThisFolder(currentFolder.path as string)}
+                  disabled={isAnalyzing}
+                  variant="outline"
+                  size="sm"
+                >
+                  {isAnalyzing ? 'Scanning...' : '↺ Re-scan this folder'}
+                </Button>
+
+                {creatingFolder ? (
+                  <div style={{ display: 'flex', alignItems: 'center', gap: '4px' }}>
+                    <input
+                      autoFocus
+                      value={newFolderName}
+                      disabled={creating}
+                      onChange={(e) => setNewFolderName(e.target.value)}
+                      onKeyDown={(e) => {
+                        if (e.key === 'Enter') void handleCreateFolder(currentFolder.path as string)
+                        if (e.key === 'Escape') {
+                          setCreatingFolder(false)
+                          setNewFolderName('')
+                        }
+                      }}
+                      placeholder="Folder name"
+                      style={{
+                        background: '#0e0e12',
+                        border: '0.5px solid #333',
+                        borderRadius: '4px',
+                        color: '#e8e8f0',
+                        fontSize: '12px',
+                        padding: '5px 8px',
+                        fontFamily: 'inherit',
+                        width: '140px'
+                      }}
+                    />
+                    <span
+                      onClick={() => void handleCreateFolder(currentFolder.path as string)}
+                      style={{
+                        fontSize: '13px',
+                        color: '#1d9e75',
+                        cursor: 'pointer',
+                        padding: '0 2px'
+                      }}
+                    >
+                      ✓
+                    </span>
+                    <span
+                      onClick={() => {
+                        setCreatingFolder(false)
+                        setNewFolderName('')
+                      }}
+                      style={{
+                        fontSize: '13px',
+                        color: '#555',
+                        cursor: 'pointer',
+                        padding: '0 2px'
+                      }}
+                    >
+                      ×
+                    </span>
+                  </div>
+                ) : (
+                  <Button onClick={() => setCreatingFolder(true)} variant="outline" size="sm">
+                    + New folder
+                  </Button>
+                )}
+              </div>
             )}
           </div>
         </div>
