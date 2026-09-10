@@ -240,7 +240,7 @@ declare global {
     openkey: string | null
     duration_sec: number | null
     duration_str: string | null
-    file_size_mb: number | null
+    file_size_bytes: number | null
     format: string | null
     waveform: string | null
     artwork_path: string | null
@@ -258,6 +258,8 @@ declare global {
     pending_changes: string | null
     last_seen_at: string | null
     folder_id: number | null
+    client_uuid: string | null
+    partial_hash: string | null
   }
 
   interface FolderRow {
@@ -334,6 +336,10 @@ declare global {
     bpm_tag: string | null
     artwork_base64: string | null
     analyzed: boolean
+    // Only read_tags()'s fast Phase 1 path populates these — analyze()'s
+    // Phase 2 result (BPM/key only) leaves them undefined.
+    file_size_bytes?: number | null
+    client_uuid?: string | null
   }
 
   interface ImportProgressPayload {

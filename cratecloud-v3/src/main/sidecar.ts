@@ -139,4 +139,9 @@ export interface AnalysisResult {
   bpm_tag: string | null
   analyzed: boolean
   artwork_base64: string | null
+  // Both undefined from analyze()'s Phase 2 result (BPM/key only) — only
+  // read_tags()'s fast Phase 1 path populates them, which is the only path
+  // that ever needs them (import-time reconcile; see buildTrackData).
+  file_size_bytes?: number | null
+  client_uuid?: string | null
 }

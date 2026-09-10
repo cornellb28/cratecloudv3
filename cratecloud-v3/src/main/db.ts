@@ -4,6 +4,7 @@ import { join, basename, dirname, relative, isAbsolute } from 'path'
 import { mkdirSync } from 'fs'
 import { tmpdir } from 'os'
 import { EventEmitter } from 'events'
+import { randomUUID } from 'crypto'
 
 // Fires 'changed' whenever ensureFolderTree actually inserts a new folder
 // row — import, the watcher, fs:create-folder, and a track move all funnel
@@ -80,11 +81,13 @@ db.exec(`
     openkey       TEXT,
     duration_sec  REAL,
     duration_str  TEXT,
-    file_size_mb  REAL,
+    file_size_bytes INTEGER,
     format        TEXT,
     waveform      TEXT,
     artwork_path  TEXT,
     artwork_hash  TEXT,
+    client_uuid   TEXT,
+    partial_hash  TEXT,
 
     -- App-only columns (never written to ID3 tags)
     board_id      INTEGER NOT NULL DEFAULT 1 REFERENCES boards(id),
@@ -325,6 +328,41 @@ if (!hasFolderId) {
   )
 }
 
+// client_uuid: stable per-track identity, nullable — most rows never get
+// one (legacy files, formats write_tags doesn't cover). Read-only for now:
+// populated from a CRATECLOUD_ID tag if the file already has one, minted
+// fresh on insert otherwise (see insertTrack) — nothing writes it back to
+// the file yet. The partial index means many NULLs coexist fine; only a
+// real, non-null value has to be unique.
+const hasClientUuid = trackColumns.some((c) => c.name === 'client_uuid')
+if (!hasClientUuid) {
+  db.exec(`ALTER TABLE tracks ADD COLUMN client_uuid TEXT`)
+}
+
+// A cheap partial-file hash, stored at insert time so it's still available
+// once a track goes missing and can no longer be read — see
+// computePartialHash/findReconcileMatch in index.ts. Only ever consulted to
+// break a tie when client_uuid is absent and size+duration alone matched
+// more than one missing track.
+const hasPartialHash = trackColumns.some((c) => c.name === 'partial_hash')
+if (!hasPartialHash) {
+  db.exec(`ALTER TABLE tracks ADD COLUMN partial_hash TEXT`)
+}
+
+// file_size_bytes replaces file_size_mb, which every fast-tag-read call
+// computed and then silently dropped (buildTrackData never read it) —
+// dead since the column was added. Exact bytes instead of a rounded MB
+// figure: reconcile's fingerprint fallback (filename + size + duration)
+// needs an exact match, not a lossy one.
+const hasFileSizeBytes = trackColumns.some((c) => c.name === 'file_size_bytes')
+if (!hasFileSizeBytes) {
+  db.exec(`ALTER TABLE tracks ADD COLUMN file_size_bytes INTEGER`)
+}
+const hasFileSizeMb = trackColumns.some((c) => c.name === 'file_size_mb')
+if (hasFileSizeMb) {
+  db.exec(`ALTER TABLE tracks DROP COLUMN file_size_mb`)
+}
+
 // relative_path is the folder's path relative to its library_root (''
 // for the root folder itself, 'House/Techno' for a nested one). It's what
 // makes ensureFolderTree idempotent — UNIQUE(root_folder_id, relative_path)
@@ -406,6 +444,8 @@ db.exec(`
     ON tracks(missing);
   CREATE INDEX IF NOT EXISTS idx_tracks_artwork_hash
     ON tracks(artwork_hash);
+  CREATE UNIQUE INDEX IF NOT EXISTS idx_tracks_client_uuid
+    ON tracks(client_uuid) WHERE client_uuid IS NOT NULL;
   CREATE INDEX IF NOT EXISTS idx_tracks_needs_sync
     ON tracks(needs_sync);
   CREATE INDEX IF NOT EXISTS idx_tracks_bpm
@@ -461,28 +501,33 @@ const stmts = {
       filepath, filename, title, artist, album, genre,
       year, remixer, composer, comment, label, grouping,
       bpm, key_camelot, key_full, camelot, openkey,
-      duration_sec, duration_str, file_size_mb, format,
-      artwork_path, analyzed_at, board_id, folder_id
+      duration_sec, duration_str, file_size_bytes, format,
+      artwork_path, analyzed_at, board_id, folder_id, client_uuid, partial_hash
      )
       VALUES (
        @filepath, @filename, @title, @artist, @album, @genre,
        @year, @remixer, @composer, @comment, @label, @grouping,
        @bpm, @key_camelot, @key_full, @camelot, @openkey,
-       @duration_sec, @duration_str, @file_size_mb, @format,
-       @artwork_path, @analyzed_at, @board_id, @folder_id
+       @duration_sec, @duration_str, @file_size_bytes, @format,
+       @artwork_path, @analyzed_at, @board_id, @folder_id, @client_uuid, @partial_hash
       )
        ON CONFLICT(filepath) DO UPDATE SET
-         title        = excluded.title,
-         artist       = excluded.artist,
-         album        = excluded.album,
-         genre        = excluded.genre,
-         bpm          = excluded.bpm,
-         key_camelot  = excluded.key_camelot,
-         analyzed_at  = excluded.analyzed_at,
-         updated_at   = datetime('now'),
-         missing      = 0,
-         last_seen_at = datetime('now'),
-         folder_id    = COALESCE(excluded.folder_id, folder_id)
+         title           = excluded.title,
+         artist          = excluded.artist,
+         album           = excluded.album,
+         genre           = excluded.genre,
+         bpm             = excluded.bpm,
+         key_camelot     = excluded.key_camelot,
+         analyzed_at     = excluded.analyzed_at,
+         updated_at      = datetime('now'),
+         missing         = 0,
+         last_seen_at    = datetime('now'),
+         folder_id       = COALESCE(excluded.folder_id, folder_id),
+         file_size_bytes = excluded.file_size_bytes,
+         -- Never clobber a stable id with a fresh mint — same COALESCE
+         -- reasoning as folder_id just above.
+         client_uuid     = COALESCE(client_uuid, excluded.client_uuid),
+         partial_hash    = excluded.partial_hash
     `),
   // COALESCE, not a plain overwrite: importSingleFile always inserts with
   // folder_id null (it doesn't resolve a root), so a plain `= excluded.
@@ -808,12 +853,18 @@ export function insertTrack(track: Record<string, unknown>): { lastInsertRowid: 
     openkey: track.openkey ?? null,
     duration_sec: track.duration_sec ?? null,
     duration_str: track.duration_str ?? null,
-    file_size_mb: track.file_size_mb ?? null,
+    file_size_bytes: track.file_size_bytes ?? null,
     format: track.format ?? null,
     artwork_path: track.artwork_path ?? null,
     analyzed_at: track.analyzed_at ?? null,
     board_id: track.board_id ?? 1, // default to Untagged (id: 1)
-    folder_id: track.folder_id ?? null
+    folder_id: track.folder_id ?? null,
+    // Minted here, once, for every insert that didn't come with one already
+    // (no CRATECLOUD_ID tag on the file) — the ON CONFLICT path's COALESCE
+    // means this mint is thrown away harmlessly on a re-scan of a file that
+    // already has a row.
+    client_uuid: track.client_uuid ?? randomUUID(),
+    partial_hash: track.partial_hash ?? null
   }
   stmts.insertTrack.run(safe)
 

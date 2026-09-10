@@ -533,6 +533,8 @@ function buildTrackData(
   analyzed_at: string | null
   board_id: number
   folder_id: number | null
+  file_size_bytes: number | null
+  client_uuid: string | null
 } {
   return {
     filepath,
@@ -555,7 +557,13 @@ function buildTrackData(
     duration_str: result.duration_str,
     analyzed_at: result.analyzed ? new Date().toISOString() : null,
     board_id: 1,
-    folder_id: folderId
+    folder_id: folderId,
+    file_size_bytes: result.file_size_bytes ?? null,
+    // Read-only for now — a CRATECLOUD_ID tag from a previous session that
+    // wrote one, if present. insertTrack mints a fresh one when this is
+    // null; reconcile matches on it first when it isn't (see
+    // findReconcileMatch).
+    client_uuid: result.client_uuid ?? null
   }
 }
 
@@ -1704,8 +1712,9 @@ app.whenReady().then(() => {
   })
 
   // Pre-move check for the renderer's confirm dialog — one stat on the
-  // destination, one per source file (needed anyway for totalBytes, since
-  // file_size_mb is never populated on the track row).
+  // destination, one per source file. Re-stats rather than reading
+  // file_size_bytes off the track row: this needs live st_dev too (for
+  // crossDevice), which isn't something the DB tracks at all.
   ipcMain.handle('fs:is-cross-device', async (_e, filepaths: string[], destPath: string) => {
     try {
       const destStat = await stat(destPath)

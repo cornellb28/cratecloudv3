@@ -148,17 +148,18 @@ def _extract_tags(filepath):
     Returns a dict of whatever tags exist.
     """
     tags = {
-        'title':    None,
-        'artist':   None,
-        'album':    None,
-        'genre':    None,
-        'year':     None,
-        'comment':  None,
-        'label':    None,
-        'remixer':  None,
-        'composer': None,
-        'grouping': None,
-        'bpm_tag':  None,  # BPM already in the file's tags
+        'title':       None,
+        'artist':      None,
+        'album':       None,
+        'genre':       None,
+        'year':        None,
+        'comment':     None,
+        'label':       None,
+        'remixer':     None,
+        'composer':    None,
+        'grouping':    None,
+        'bpm_tag':     None,  # BPM already in the file's tags
+        'client_uuid': None,  # CRATECLOUD_ID, if a previous session wrote one — read-only for now
     }
 
     try:
@@ -172,23 +173,29 @@ def _extract_tags(filepath):
             for key in keys:
                 val = audio.tags.get(key)
                 if val:
-                    # ID3 tags are objects, FLAC tags are lists
-                    v = str(val[0]) if isinstance(val, list) else str(val)
+                    # ID3 tags are objects, FLAC tags are lists of str, M4A
+                    # freeform (----:) atoms are lists of raw bytes (MP4FreeForm
+                    # is a bytes subclass — str() on it gives "b'...'", not the
+                    # text, so bytes need an explicit decode instead).
+                    raw = val[0] if isinstance(val, list) else val
+                    v = raw.decode('utf-8', errors='ignore') if isinstance(raw, bytes) else str(raw)
                     if v.strip():
                         return v.strip()
             return None
 
-        tags['title']    = get(['TIT2', 'title',    '\xa9nam'])
-        tags['artist']   = get(['TPE1', 'artist',   '\xa9ART'])
-        tags['album']    = get(['TALB', 'album',     '\xa9alb'])
-        tags['genre']    = get(['TCON', 'genre',     '\xa9gen'])
-        tags['year']     = get(['TDRC', 'date',      '\xa9day'])
-        tags['comment']  = get(['COMM::', 'comment', '\xa9cmt'])
-        tags['label']    = get(['TPUB', 'organization'])
-        tags['remixer']  = get(['TPE4', 'remixer'])
-        tags['composer'] = get(['TCOM', 'composer',  '\xa9wrt'])
-        tags['grouping'] = get(['TIT1', 'grouping',  '\xa9grp'])
-        tags['bpm_tag']  = get(['TBPM', 'bpm'])
+        tags['title']       = get(['TIT2', 'title',    '\xa9nam'])
+        tags['artist']      = get(['TPE1', 'artist',   '\xa9ART'])
+        tags['album']       = get(['TALB', 'album',     '\xa9alb'])
+        tags['genre']       = get(['TCON', 'genre',     '\xa9gen'])
+        tags['year']        = get(['TDRC', 'date',      '\xa9day'])
+        tags['comment']     = get(['COMM::', 'comment', '\xa9cmt'])
+        tags['label']       = get(['TPUB', 'organization'])
+        tags['remixer']     = get(['TPE4', 'remixer'])
+        tags['composer']    = get(['TCOM', 'composer',  '\xa9wrt'])
+        tags['grouping']    = get(['TIT1', 'grouping',  '\xa9grp'])
+        tags['bpm_tag']     = get(['TBPM', 'bpm'])
+        tags['client_uuid'] = get(['TXXX:CRATECLOUD_ID', 'cratecloud_id',
+                                    '----:com.apple.iTunes:CRATECLOUD_ID'])
 
     except Exception:
         # Partial tag read is fine
@@ -346,35 +353,34 @@ def read_tags(filepath: str) -> dict:
   probe = probe_duration(filepath)
   artwork_base64 = extract_artwork(filepath)
 
-  file_size_mb = round(os.path.getsize(filepath) / (1024 * 1024), 2)
+  file_size_bytes = os.path.getsize(filepath)
   filename = os.path.basename(filepath)
 
   return {
-    'success':        True,
-    'filepath':       filepath,
-    'filename':       filename,
-    'duration_sec':   probe.get('duration_sec'),
-    'duration_str':   format_duration(probe.get('duration_sec')),
-    'file_size_mb':   file_size_mb,
-    'format':         ext.lstrip('.').upper(),
-    'title':          tags['title'] or os.path.splitext(filename)[0],
-    'artist':         tags['artist'],
-    'album':          tags['album'],
-    'genre':          tags['genre'],
-    'year':           tags['year'],
-    'comment':        tags['comment'],
-    'label':          tags['label'],
-    'remixer':        tags['remixer'],
-    'composer':       tags['composer'],
-    'grouping':       tags['grouping'],
-    'bpm':            float(tags['bpm_tag']) if tags['bpm_tag'] else None,
-    'key_camelot':    None,
-    'key_full':       None,
-    'camelot':        None,
-    'duration_sec':   None,
-    'duration_str':   None,
-    'artwork_base64': artwork_base64,
-    'analyzed':       False,   # ← tells main process this needs Phase 2
+    'success':         True,
+    'filepath':        filepath,
+    'filename':        filename,
+    'duration_sec':    probe.get('duration_sec'),
+    'duration_str':    format_duration(probe.get('duration_sec')),
+    'file_size_bytes': file_size_bytes,
+    'format':          ext.lstrip('.').upper(),
+    'title':           tags['title'] or os.path.splitext(filename)[0],
+    'artist':          tags['artist'],
+    'album':           tags['album'],
+    'genre':           tags['genre'],
+    'year':            tags['year'],
+    'comment':         tags['comment'],
+    'label':           tags['label'],
+    'remixer':         tags['remixer'],
+    'composer':        tags['composer'],
+    'grouping':        tags['grouping'],
+    'bpm':             float(tags['bpm_tag']) if tags['bpm_tag'] else None,
+    'key_camelot':     None,
+    'key_full':        None,
+    'camelot':         None,
+    'client_uuid':     tags['client_uuid'],
+    'artwork_base64':  artwork_base64,
+    'analyzed':        False,   # ← tells main process this needs Phase 2
   }
 
 def write_tags(filepath: str, bpm: float, camelot: str) -> bool:
@@ -408,13 +414,13 @@ def probe_duration(filepath: str) -> dict:
     if not os.path.exists(filepath):
         return {'success': False, 'error': f'File not found: {filepath}', 'filepath': filepath}
     try:
-        file_size_mb = round(os.path.getsize(filepath) / (1024 * 1024), 2)
+        file_size_bytes = os.path.getsize(filepath)
         audio = mutagen.File(filepath)
         duration_sec = round(float(audio.info.length), 2) if audio and audio.info else None
         return {
             'success': True,
             'filepath': filepath,
-            'file_size_mb': file_size_mb,
+            'file_size_bytes': file_size_bytes,
             'duration_sec': duration_sec,
         }
     except Exception as e:
