@@ -21,11 +21,12 @@ function importStatusLabel(p: ImportProgressPayload): string {
       ? `${base} · ${formatEstimate(p.estimateSeconds)} left`
       : base
   }
+  const relinkedSuffix = p.relinked > 0 ? ` · ${p.relinked} relinked` : ''
   if (p.phase === 'cancelled') {
-    return `Cancelled — ${p.found} of ${p.total} imported`
+    return `Cancelled — ${p.found} of ${p.total} imported${relinkedSuffix}`
   }
   if (p.phase === 'done') {
-    return `Done — ${p.found} of ${p.total} imported`
+    return `Done — ${p.found} of ${p.total} imported${relinkedSuffix}`
   }
   return 'Import error'
 }

@@ -4,7 +4,7 @@ import { electronApp, optimizer, is } from '@electron-toolkit/utils'
 import icon from '../../resources/icon.png?asset'
 import { execSync } from 'child_process'
 import { randomUUID, createHash } from 'crypto'
-import { rename, stat, unlink, mkdir, readdir, readFile, writeFile } from 'fs/promises'
+import { rename, stat, unlink, mkdir, readdir, readFile, writeFile, open } from 'fs/promises'
 import { createReadStream, createWriteStream } from 'fs'
 import { startWatcher, stopWatcher, stopAllWatchers, setWatcherCallbacks } from './libraryWatcher'
 import {
@@ -43,6 +43,9 @@ import {
   getArtworkHashesInUse,
   getTracksWithLegacyArtwork,
   updateTrackFilepath,
+  getMissingTracks,
+  relinkTrack,
+  type MissingTrackCandidate,
   markTrackAnalyzed,
   insertPendingChange,
   getPendingChanges,
@@ -96,6 +99,9 @@ interface ImportProgressPayload {
   // "Open folder" action needed a way to resolve which folder to navigate to
   // without a second IPC round trip.
   folderPath: string
+  // Of `found`, how many were relinked to an existing (missing) track row
+  // instead of inserted as new — see findReconcileMatch.
+  relinked: number
 }
 
 interface ImportJob {
@@ -109,6 +115,7 @@ interface ImportJob {
   scanned: number
   found: number
   skipped: number
+  relinked: number
   total: number
   cancelRequested: boolean
   status: ImportPhase
@@ -230,7 +237,8 @@ function buildProgressPayload(
     found: job.found,
     skipped: job.skipped,
     currentFolder,
-    folderPath: job.folderPath
+    folderPath: job.folderPath,
+    relinked: job.relinked
   }
 
   // Rolling-window throughput, not average-since-start — the first files are
@@ -295,7 +303,8 @@ async function scanFolderPaths(
         found: results.length,
         skipped: 0,
         currentFolder: dir,
-        folderPath: job.folderPath
+        folderPath: job.folderPath,
+        relinked: job.relinked
       })
     }
   }
@@ -565,6 +574,87 @@ function buildTrackData(
     // findReconcileMatch).
     client_uuid: result.client_uuid ?? null
   }
+}
+
+// Encoder/container rounding tolerance for the fingerprint fallback's
+// duration comparison — not an exact-match field like size or filename.
+const FINGERPRINT_DURATION_TOLERANCE_SEC = 0.5
+
+// A fixed-size read from the start of the file — cheap (one small read, not
+// a full-file hash) but, combined with an already-exact size+duration
+// match, more than enough to tell two genuinely different tracks apart.
+// Only ever called lazily, when size+duration alone left more than one
+// candidate — see findReconcileMatch. Stored on every track at insert time
+// regardless (see buildTrackData's callers): a track can't be hashed once
+// it's gone missing, so the value has to already be sitting on the row
+// before that happens, not computed on demand for the missing side.
+const PARTIAL_HASH_BYTES = 65536
+
+async function computePartialHash(filepath: string): Promise<string | null> {
+  try {
+    const handle = await open(filepath, 'r')
+    try {
+      const buffer = Buffer.alloc(PARTIAL_HASH_BYTES)
+      const { bytesRead } = await handle.read(buffer, 0, PARTIAL_HASH_BYTES, 0)
+      return createHash('sha1').update(buffer.subarray(0, bytesRead)).digest('hex')
+    } finally {
+      await handle.close()
+    }
+  } catch {
+    return null
+  }
+}
+
+// client_uuid first (strong signal, survives a filename/location change) —
+// then size + duration, which narrows the missing pool to "plausible"
+// candidates but can easily still leave more than one (two rips of the
+// same track, a full album where every track shares a runtime, etc). Ties
+// are broken by partial_hash, computed lazily right here (not for every
+// candidate — only once, for the file actually being matched, and only
+// because a tie actually happened). filename is the last resort, and only
+// a resort: if the hash still doesn't narrow it to exactly one — because
+// the tied rows predate this column and never got a hash stored, or
+// because they somehow also hash the same — a matching filename among
+// what's left is a reasonable tiebreak, but genuine, unresolved ambiguity
+// returns null (a new row) rather than guessing at which existing track to
+// overwrite the identity of.
+async function findReconcileMatch(
+  candidate: {
+    filepath: string
+    filename: string
+    client_uuid: string | null
+    file_size_bytes: number | null
+    duration_sec: number | null
+  },
+  pool: MissingTrackCandidate[]
+): Promise<MissingTrackCandidate | null> {
+  if (candidate.client_uuid) {
+    const byUuid = pool.find((m) => m.client_uuid === candidate.client_uuid)
+    if (byUuid) return byUuid
+  }
+
+  if (candidate.file_size_bytes == null || candidate.duration_sec == null) return null
+
+  const bySizeAndDuration = pool.filter(
+    (m) =>
+      m.file_size_bytes === candidate.file_size_bytes &&
+      m.duration_sec != null &&
+      Math.abs(m.duration_sec - (candidate.duration_sec as number)) <=
+        FINGERPRINT_DURATION_TOLERANCE_SEC
+  )
+  if (bySizeAndDuration.length === 0) return null
+  if (bySizeAndDuration.length === 1) return bySizeAndDuration[0]
+
+  // A real tie — worth the read.
+  const candidateHash = await computePartialHash(candidate.filepath)
+  const byHash = candidateHash
+    ? bySizeAndDuration.filter((m) => m.partial_hash === candidateHash)
+    : []
+  if (byHash.length === 1) return byHash[0]
+
+  const stillTied = byHash.length > 1 ? byHash : bySizeAndDuration
+  const byFilename = stillTied.filter((m) => m.filename === candidate.filename)
+  return byFilename.length === 1 ? byFilename[0] : null
 }
 
 // Copies fromPath to toPath in 1MB chunks, reporting cumulative bytes
@@ -938,6 +1028,7 @@ async function runFolderImport(
           scanned: 0,
           found: 0,
           skipped: 0,
+          relinked: 0,
           total: 0,
           cancelRequested: false,
           status: 'counting',
@@ -1002,6 +1093,13 @@ async function runFolderImport(
     const relDir = relative(matchingRoot.path, dirname(filepath))
     return job.folderIdByRelPath.get(relDir) ?? null
   }
+
+  // Fetched once per job, not per batch — batch-shaped reconcile. No
+  // matchingRoot means folder_id stays null for everything this job
+  // touches anyway (same as importSingleFile), so there's nothing a
+  // scoped missing-pool match could mean here; skip reconcile entirely
+  // rather than fall back to an unscoped, whole-library search.
+  const reconcilePool = matchingRoot ? getMissingTracks(matchingRoot.id) : []
 
   // Pass 2 (parse) — fast tag read + insert, batched into ~200-row transactions
   job.status = 'parsing'
@@ -1080,13 +1178,52 @@ async function runFolderImport(
       maybeEmitParsingProgress()
     }
 
-    // One transaction per batch instead of one fsync-backed write per file
-    if (parsedRows.length > 0) {
-      const inserted = insertTracksBatch(parsedRows.map((r) => r.data))
+    // Reconcile before inserting — a file that matches a missing track gets
+    // relinked (filepath/folder_id updated, everything else about the
+    // existing row left alone) instead of becoming a duplicate. Matched
+    // candidates are spliced out of reconcilePool as they're consumed so
+    // the same missing row can't match twice within one job.
+    const toInsert: typeof parsedRows = []
+    for (const row of parsedRows) {
+      const match = await findReconcileMatch(
+        {
+          filepath: row.data.filepath,
+          filename: row.data.filename,
+          client_uuid: row.data.client_uuid,
+          file_size_bytes: row.data.file_size_bytes,
+          duration_sec: row.data.duration_sec
+        },
+        reconcilePool
+      )
+      if (match === null) {
+        toInsert.push(row)
+        continue
+      }
+      relinkTrack(match.id, row.data.filepath)
+      reconcilePool.splice(reconcilePool.indexOf(match), 1)
+      job.found++
+      job.relinked++
+      // The existing row's artwork_hash survives untouched — a relink is
+      // "this file is the same track, just moved," not a re-import.
+    }
+
+    // One transaction per batch instead of one fsync-backed write per file.
+    // partial_hash is computed for every genuinely-new row (not just tied
+    // reconcile candidates) — it's cheap, and it's the only way a FUTURE
+    // reconcile pass can ever use it, since it can't be read back off a
+    // file once that file's own track has gone missing.
+    if (toInsert.length > 0) {
+      const withHashes = await Promise.all(
+        toInsert.map(async (r) => ({
+          ...r,
+          data: { ...r.data, partial_hash: await computePartialHash(r.data.filepath) }
+        }))
+      )
+      const inserted = insertTracksBatch(withHashes.map((r) => r.data))
       for (let idx = 0; idx < inserted.length; idx++) {
         const row = inserted[idx]
         job.found++
-        const artwork = parsedRows[idx].artwork
+        const artwork = withHashes[idx].artwork
         if (artwork && row.id > 0) {
           const hash = await storeArtwork(Buffer.from(artwork, 'base64'))
           if (hash) setTrackArtworkHash(row.id, hash)
@@ -1398,12 +1535,39 @@ app.whenReady().then(() => {
       const fastResult = await readTagsFast(filepath)
       // TODO: optionally resolve against a registered root if the file lives under one
       const trackData = buildTrackData(filepath, fastResult)
-      const insertResult = insertTrack(trackData) as { lastInsertRowid: number | bigint }
-      const trackId = Number(insertResult.lastInsertRowid)
 
-      if (fastResult.artwork_base64 && trackId > 0) {
-        const hash = await storeArtwork(Buffer.from(fastResult.artwork_base64, 'base64'))
-        if (hash) setTrackArtworkHash(trackId, hash)
+      // Same reconcile chance runFolderImport's Pass 2 and the live
+      // watcher's onFileAdded get. No root to scope the missing pool by
+      // here — this is the manual dialog-import path (also what the
+      // EmptyView/Board Finder-drop targets call per file) — so this
+      // checks every missing track in the library, not just one root's.
+      const match = await findReconcileMatch(
+        {
+          filepath,
+          filename: trackData.filename,
+          client_uuid: trackData.client_uuid,
+          file_size_bytes: trackData.file_size_bytes,
+          duration_sec: trackData.duration_sec
+        },
+        getMissingTracks()
+      )
+
+      let trackId: number
+      if (match) {
+        relinkTrack(match.id, filepath)
+        trackId = match.id
+        console.log(`[import] relinked via reconcile: ${match.filepath} → ${filepath}`)
+      } else {
+        const partialHash = await computePartialHash(filepath)
+        const insertResult = insertTrack({ ...trackData, partial_hash: partialHash }) as {
+          lastInsertRowid: number | bigint
+        }
+        trackId = Number(insertResult.lastInsertRowid)
+
+        if (fastResult.artwork_base64 && trackId > 0) {
+          const hash = await storeArtwork(Buffer.from(fastResult.artwork_base64, 'base64'))
+          if (hash) setTrackArtworkHash(trackId, hash)
+        }
       }
 
       // Tell renderer the track exists so it can refresh the list
@@ -2106,7 +2270,50 @@ app.whenReady().then(() => {
         }
 
         const trackData = buildTrackData(filepath, result, folderId)
-        const insertResult = insertTrack(trackData) as { lastInsertRowid: number | bigint }
+
+        // A single live add gets the same reconcile chance a batch import
+        // would — findMoveCandidate (libraryWatcher.ts) already caught the
+        // cheap "renamed within 2s, same filename" case before onFileAdded
+        // was even called; this is the broader net for everything that
+        // misses: filename changed, or the matching add arrived later than
+        // that 2s window (a directory tree's per-file events can spread
+        // out further than a single file's would).
+        const match = await findReconcileMatch(
+          {
+            filepath,
+            filename: trackData.filename,
+            client_uuid: trackData.client_uuid,
+            file_size_bytes: trackData.file_size_bytes,
+            duration_sec: trackData.duration_sec
+          },
+          getMissingTracks(rootId)
+        )
+
+        if (match) {
+          relinkTrack(match.id, filepath)
+
+          insertPendingChange({
+            root_id: rootId,
+            change_type: 'moved',
+            old_path: match.filepath,
+            new_path: filepath,
+            track_id: match.id
+          })
+
+          mainWindow?.webContents.send('watcher:track-moved', {
+            trackId: match.id,
+            oldPath: match.filepath,
+            newPath: filepath
+          })
+
+          console.log(`[watcher] relinked via reconcile: ${match.filepath} → ${filepath}`)
+          return
+        }
+
+        const partialHash = await computePartialHash(filepath)
+        const insertResult = insertTrack({ ...trackData, partial_hash: partialHash }) as {
+          lastInsertRowid: number | bigint
+        }
         const trackId = Number(insertResult.lastInsertRowid)
 
         if (result.artwork_base64 && trackId > 0) {

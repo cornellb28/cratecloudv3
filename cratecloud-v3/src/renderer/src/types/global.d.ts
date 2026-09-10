@@ -352,6 +352,7 @@ declare global {
     currentFolder: string
     estimateSeconds?: number
     folderPath: string
+    relinked: number
   }
 
   interface FolderItem {

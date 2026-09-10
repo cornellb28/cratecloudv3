@@ -780,10 +780,12 @@ const stmts = {
 
   updateFilepath: db.prepare(`
   UPDATE tracks SET
-    filepath   = @newPath,
-    filename   = @filename,
-    folder_id  = @folder_id,
-    updated_at = datetime('now')
+    filepath     = @newPath,
+    filename     = @filename,
+    folder_id    = @folder_id,
+    missing      = 0,
+    last_seen_at = datetime('now'),
+    updated_at   = datetime('now')
   WHERE filepath = @oldPath
 `),
 
@@ -1480,9 +1482,13 @@ function resolveFolderIdForPath(filepath: string): number | null {
 
 // folder_id mirrors disk location in v3, so a move/rename recomputes it
 // against the file's new path — same idempotent ensureFolderTree used by
-// import, just for one directory. This intentionally does NOT apply to
-// relink (a missing track reappearing at a new path, matched by identity/
-// fingerprint, not a live move) — that's the next task's decision to make.
+// import, just for one directory. Also clears `missing`: a track whose
+// filepath is being pointed at a location just confirmed to exist can't
+// simultaneously be missing — this matters now that a directory rename can
+// race the watcher's own missing-marking (markFolderMissing) against this
+// same track via the file-level move heuristic (findMoveCandidate in
+// libraryWatcher.ts); whichever lands second must not leave a track stuck
+// missing with an otherwise-correct, live filepath.
 export function updateTrackFilepath(oldPath: string, newPath: string): RunResult {
   return stmts.updateFilepath.run({
     oldPath,
@@ -1490,6 +1496,74 @@ export function updateTrackFilepath(oldPath: string, newPath: string): RunResult
     filename: basename(newPath),
     folder_id: resolveFolderIdForPath(newPath)
   })
+}
+
+// ─── Identity / relink reconciliation ─────────────────────
+// A track goes missing (unlinkDir sweeping its folder, or the per-file
+// unlink→no-matching-add-within-2s path) without necessarily being gone for
+// good — the file may reappear under a new name, a new parent directory, or
+// just later than the watcher's own move-detection window. Reconcile is
+// the batch-shaped answer: instead of blindly inserting every newly-seen
+// file as a new track, check it against the missing pool first.
+
+export interface MissingTrackCandidate {
+  id: number
+  filepath: string
+  filename: string | null
+  client_uuid: string | null
+  file_size_bytes: number | null
+  duration_sec: number | null
+  partial_hash: string | null
+}
+
+// Scoped to one root when the caller has one (import, live add — both
+// always do) — a missing track from a different, unrelated root is never a
+// plausible match, and scoping keeps this cheap on a large library. Falls
+// back to every missing track when rootId is omitted (importSingleFile has
+// no root to scope by — a manually picked or dropped single file).
+export function getMissingTracks(rootId?: number): MissingTrackCandidate[] {
+  if (rootId === undefined) {
+    return db
+      .prepare(
+        `SELECT id, filepath, filename, client_uuid, file_size_bytes, duration_sec, partial_hash
+         FROM tracks WHERE missing = 1`
+      )
+      .all() as MissingTrackCandidate[]
+  }
+  return db
+    .prepare(
+      `SELECT t.id, t.filepath, t.filename, t.client_uuid, t.file_size_bytes, t.duration_sec,
+              t.partial_hash
+       FROM tracks t
+       JOIN folders f ON f.id = t.folder_id
+       WHERE t.missing = 1 AND f.root_folder_id = ?`
+    )
+    .all(rootId) as MissingTrackCandidate[]
+}
+
+// A relink is never the ON CONFLICT(filepath) upsert path — the new
+// filepath was never seen before, so that constraint can't fire for it.
+// Deliberately narrow: only what identifies WHERE the file is now. Tags,
+// board_id, energy, analyzed_at, artwork_hash all survive untouched, which
+// is the entire point versus letting it insert as a duplicate row.
+export function relinkTrack(trackId: number, newPath: string): RunResult {
+  return db
+    .prepare(
+      `UPDATE tracks SET
+         filepath     = @newPath,
+         filename     = @filename,
+         folder_id    = @folder_id,
+         missing      = 0,
+         last_seen_at = datetime('now'),
+         updated_at   = datetime('now')
+       WHERE id = @id`
+    )
+    .run({
+      id: trackId,
+      newPath,
+      filename: basename(newPath),
+      folder_id: resolveFolderIdForPath(newPath)
+    })
 }
 
 export function insertPendingChange(data: {
