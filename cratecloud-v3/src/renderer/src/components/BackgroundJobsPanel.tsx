@@ -139,6 +139,7 @@ interface BackgroundJobsPanelProps {
   onResumeImport: (jobId: string) => void
   onCancelMove: (jobId: string) => void
   onCancelCopy: (jobId: string) => void
+  onOpenFolder: (folderPath: string) => void
 }
 
 // Renders every job in the shared `jobs` store slice — import, move, and
@@ -148,7 +149,8 @@ export function BackgroundJobsPanel({
   onCancelImport,
   onResumeImport,
   onCancelMove,
-  onCancelCopy
+  onCancelCopy,
+  onOpenFolder
 }: BackgroundJobsPanelProps): React.JSX.Element | null {
   const jobs = useLibraryStore((s) => s.jobs)
   const jobList = Object.values(jobs)
@@ -212,6 +214,10 @@ export function BackgroundJobsPanel({
               ) : job.phase === 'cancelled' ? (
                 <button onClick={() => onResumeImport(job.jobId)} style={resumeButtonStyle}>
                   Resume
+                </button>
+              ) : job.phase === 'done' ? (
+                <button onClick={() => onOpenFolder(job.folderPath)} style={resumeButtonStyle}>
+                  Open folder
                 </button>
               ) : undefined
             }

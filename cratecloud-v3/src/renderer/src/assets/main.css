@@ -87,3 +87,11 @@
   from { transform: rotate(0deg); }
   to   { transform: rotate(360deg); }
 }
+
+/* Brief one-shot flash for a newly created/imported/moved folder card —
+   plays once (no infinite loop like Tailwind's animate-pulse) and settles
+   back to transparent via `forwards`. */
+@keyframes folderHighlight {
+  0%   { background: rgba(127, 119, 221, 0.35); }
+  100% { background: transparent; }
+}

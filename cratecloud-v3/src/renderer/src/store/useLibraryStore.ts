@@ -44,6 +44,14 @@ interface LibraryState {
   // JobState above for the pending 'move' variant.
   jobs: Record<string, JobState>
 
+  // A cross-component "please navigate FolderView to this folder" signal —
+  // navStack itself stays local to FolderView (it's the only thing that
+  // ever writes it), this is just the message. Written by App.tsx (an
+  // import-completion toast action, or the BackgroundJobsPanel "Open
+  // folder" button) after switching activeView to 'folders'; consumed once
+  // by an effect in FolderView, which clears it back to null.
+  pendingFolderNav: number | null
+
   // ── Actions ──────────────────────────────────────────
   // Actions are functions that change the state
   // Components call these instead of setState directly
@@ -75,6 +83,7 @@ interface LibraryState {
   ) => void
   upsertJob: (job: JobState) => void
   removeJob: (jobId: string) => void
+  setPendingFolderNav: (folderId: number | null) => void
 }
 
 // ─── Store ───────────────────────────────────────────────
@@ -92,6 +101,7 @@ export const useLibraryStore = create<LibraryState>((set) => ({
   folders: [],
   folderCounts: [],
   jobs: {},
+  pendingFolderNav: null,
 
   sidebarCollapsed: localStorage.getItem('cratecloud_sidebar_collapsed') === 'true',
   displayMode: (localStorage.getItem('cratecloud_display_mode') as 'list' | 'grid') ?? 'list',
@@ -187,7 +197,10 @@ export const useLibraryStore = create<LibraryState>((set) => ({
       const next = { ...state.jobs }
       delete next[jobId]
       return { jobs: next }
-    })
+    }),
+
+  // ── Cross-component navigation signal ──────────────────
+  setPendingFolderNav: (folderId) => set({ pendingFolderNav: folderId })
 }))
 
 // ─── Derived state ────────────────────────────────────────

@@ -344,6 +344,7 @@ declare global {
     skipped: number
     currentFolder: string
     estimateSeconds?: number
+    folderPath: string
   }
 
   interface FolderItem {

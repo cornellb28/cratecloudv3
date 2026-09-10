@@ -37,7 +37,8 @@ function App(): React.JSX.Element {
     setFolderData,
     upsertJob,
     removeJob,
-    mergeTracks
+    mergeTracks,
+    setPendingFolderNav
   } = useLibraryStore()
   const [activeView, setActiveView] = useState<View>('dashboard')
   // Add library roots to app state
@@ -143,7 +144,10 @@ function App(): React.JSX.Element {
       upsertJob({ ...p, type: 'import' })
 
       if (p.phase === 'done') {
-        setTimeout(() => removeJob(p.jobId), 1500)
+        // Long enough for the new "Open folder" action to actually be
+        // clickable — 1.5s (the old delay) barely gave time to notice the
+        // row before it vanished.
+        setTimeout(() => removeJob(p.jobId), 6000)
       }
     })
 
@@ -282,6 +286,10 @@ function App(): React.JSX.Element {
       // Final reload to make sure everything is in sync
       const all = await window.api.db.allTracks()
       setTracks(all)
+
+      toast.success(`Imported ${result.imported ?? 0} track${result.imported !== 1 ? 's' : ''}`, {
+        action: { label: 'Open folder', onClick: () => void navigateToFolderPath(folderPath) }
+      })
     }
 
     setAnalyzing(false)
@@ -327,6 +335,22 @@ function App(): React.JSX.Element {
     setLibraryRoots(roots)
   }
 
+  // Shared by the import-completion toast action and BackgroundJobsPanel's
+  // "Open folder" button. Resolves fresh via IPC rather than the store's
+  // debounced `folders` snapshot — this only runs on a click, well after
+  // the folders:changed debounce would have settled, but a fresh lookup
+  // costs nothing and removes that race entirely. The actual navigation
+  // still only ever happens inside FolderView (via its own navStack) —
+  // this just switches tabs and leaves the folder id for FolderView's
+  // pendingFolderNav effect to pick up.
+  async function navigateToFolderPath(folderPath: string): Promise<void> {
+    const tree = await window.api.folders.tree()
+    const folder = tree.find((f) => f.path === folderPath)
+    if (!folder) return
+    setActiveView('folders')
+    setPendingFolderNav(folder.id)
+  }
+
   // ── View change ───────────────────────────────────────
   function handleViewChange(view: View): void {
     setActiveView(view)
@@ -361,6 +385,7 @@ function App(): React.JSX.Element {
         onResumeImport={handleResumeImport}
         onCancelMove={handleCancelMove}
         onCancelCopy={handleCancelCopy}
+        onOpenFolder={(folderPath) => void navigateToFolderPath(folderPath)}
       />
 
       {/* Phase 2 — analysis progress bar */}

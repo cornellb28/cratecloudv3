@@ -89,6 +89,11 @@ interface ImportProgressPayload {
   skipped: number
   currentFolder: string
   estimateSeconds?: number
+  // The folder passed to runFolderImport — job.folderPath was always tracked
+  // internally (needed for resume) but never put on the wire until the
+  // "Open folder" action needed a way to resolve which folder to navigate to
+  // without a second IPC round trip.
+  folderPath: string
 }
 
 interface ImportJob {
@@ -222,7 +227,8 @@ function buildProgressPayload(
     total: job.total,
     found: job.found,
     skipped: job.skipped,
-    currentFolder
+    currentFolder,
+    folderPath: job.folderPath
   }
 
   // Rolling-window throughput, not average-since-start — the first files are
@@ -286,7 +292,8 @@ async function scanFolderPaths(
         total: 0,
         found: results.length,
         skipped: 0,
-        currentFolder: dir
+        currentFolder: dir,
+        folderPath: job.folderPath
       })
     }
   }

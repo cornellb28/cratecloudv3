@@ -1,4 +1,4 @@
-import React, { useState, useMemo } from 'react'
+import React, { useState, useMemo, useEffect, useRef } from 'react'
 import { toast } from 'sonner'
 import { useLibraryStore } from '../store/useLibraryStore'
 import { FolderCard } from '../components/FolderCard'
@@ -13,6 +13,7 @@ import { MoveConfirmDialog } from '../components/MoveConfirmDialog'
 // Shared with MoveFileButton's single-track "Move to..." confirmation —
 // dismissing one dismisses both, they're the same underlying concern.
 const MOVE_CONFIRM_SETTING_KEY = 'skip_move_confirmation'
+const HIGHLIGHT_DURATION_MS = 1800
 
 interface FolderViewProps {
   libraryRoots: LibraryRoot[] // all registered library roots
@@ -30,7 +31,8 @@ export function FolderView({ libraryRoots }: FolderViewProps): React.JSX.Element
     setTracks,
     folders,
     folderCounts,
-    upsertJob
+    upsertJob,
+    setPendingFolderNav
   } = useLibraryStore()
 
   // Navigation stack — array of folder ids (from the `folders` table). Empty
@@ -43,6 +45,13 @@ export function FolderView({ libraryRoots }: FolderViewProps): React.JSX.Element
   const [newFolderName, setNewFolderName] = useState('')
   const [creating, setCreating] = useState(false)
 
+  // Folders currently flashing (see armHighlight) — a folder id lives here
+  // for HIGHLIGHT_DURATION_MS after being created, imported, or moved in.
+  const [highlightedFolderIds, setHighlightedFolderIds] = useState<Set<number>>(new Set())
+  // Destination paths waiting for their folder row to exist — a dropped
+  // directory's post-move re-scan creates it asynchronously, so there's no
+  // id to highlight yet at drop time, only the path it'll land at.
+  const [pendingHighlightPaths, setPendingHighlightPaths] = useState<string[]>([])
   // Armed when a Finder drop needs the "move, not copy" confirmation —
   // holds everything performMove needs once the DJ confirms.
   const [moveConfirm, setMoveConfirm] = useState<{
@@ -142,6 +151,40 @@ export function FolderView({ libraryRoots }: FolderViewProps): React.JSX.Element
     setSelectedIds(new Set())
   }
 
+  // Jump to an arbitrary folder id regardless of where the view currently
+  // is — walks parent_folder_id up to build the full ancestor chain, since
+  // navStack has to hold every id from the root down, not just the target.
+  // Used by the Home shortcut and by the pendingFolderNav effect below
+  // (App.tsx/BackgroundJobsPanel's "Open folder" action) — navigateInto
+  // above stays as the simple push for the common case of clicking a card
+  // that's already a child of wherever you are.
+  function navigateToFolder(folderId: number): void {
+    const chain: number[] = []
+    let current: number | undefined = folderId
+    while (current !== undefined) {
+      chain.unshift(current)
+      current = foldersById.get(current)?.parent_folder_id ?? undefined
+    }
+    setNavStack(chain)
+    setSelectedIds(new Set())
+  }
+
+  // Flashes one folder card for HIGHLIGHT_DURATION_MS, then clears itself.
+  function armHighlight(folderId: number): void {
+    setHighlightedFolderIds((prev) => new Set(prev).add(folderId))
+    setTimeout(() => {
+      setHighlightedFolderIds((prev) => {
+        const next = new Set(prev)
+        next.delete(folderId)
+        return next
+      })
+    }, HIGHLIGHT_DURATION_MS)
+  }
+
+  function joinPath(dir: string, name: string): string {
+    return `${dir.replace(/\/+$/, '')}/${name}`
+  }
+
   // Import everything under the folder currently being browsed — recurses into
   // every subfolder, same scanner the Toolbar's "+ Import folder" button uses
   async function handleImportThisFolder(folderPath: string): Promise<void> {
@@ -157,8 +200,10 @@ export function FolderView({ libraryRoots }: FolderViewProps): React.JSX.Element
   // Create a subfolder of the folder currently being browsed. fs:create-folder
   // already does mkdir + ensureFolderTree + folders:changed — App.tsx's
   // debounced onFoldersChanged subscription refreshes the shared `folders`
-  // slice on its own, so the only thing this needs to do afterward is
-  // navigate; the new row shows up in the store a moment later on its own.
+  // slice on its own. Stays on the current (parent) folder instead of
+  // navigating into the new one — it should appear right alongside the
+  // subfolders already here, not whisk the DJ away to an empty folder —
+  // and flashes it once it shows up in the grid.
   async function handleCreateFolder(parentPath: string): Promise<void> {
     const name = newFolderName.trim()
     if (!name) return
@@ -176,7 +221,8 @@ export function FolderView({ libraryRoots }: FolderViewProps): React.JSX.Element
         if (result.folderId == null) {
           toast.warning(`Created "${name}"`, { description: result.reason })
         } else {
-          navigateInto(result.folderId)
+          toast.success(`Created "${name}"`)
+          armHighlight(result.folderId)
         }
       } else {
         toast.error('Could not create folder', { description: result.error ?? 'Unknown error' })
@@ -198,6 +244,17 @@ export function FolderView({ libraryRoots }: FolderViewProps): React.JSX.Element
   ): Promise<void> {
     if (!folder.path) return
     const sourcePaths = accepted.map((c) => c.path)
+
+    // A dropped directory's folder row doesn't exist yet — it's created by
+    // the post-move re-scan below, asynchronously — so all we can arm right
+    // now is the path it'll land at; the effect watching `folders` resolves
+    // it to an id (and flashes it) once that row actually appears.
+    const newDirPaths = accepted
+      .filter((c) => c.kind === 'dir')
+      .map((c) => joinPath(folder.path as string, c.path.split('/').pop() ?? c.path))
+    if (newDirPaths.length > 0) {
+      setPendingHighlightPaths((prev) => [...prev, ...newDirPaths])
+    }
 
     const { jobId } = await window.api.fs.copyIntoFolder({
       sourcePaths,
@@ -269,6 +326,61 @@ export function FolderView({ libraryRoots }: FolderViewProps): React.JSX.Element
     accept: !!currentFolderForDrop?.path
   })
 
+  // Cross-component navigation signal (App.tsx's import-completion toast
+  // action, or BackgroundJobsPanel's "Open folder" button) — consumed once,
+  // then cleared. Subscribed rather than watched via a dependency effect so
+  // the state update happens in a subscription callback (an external-system
+  // event, same as onCopyProgress etc.) instead of synchronously in an
+  // effect body, which react-hooks/set-state-in-effect flags as a
+  // cascading-render risk. The subscription itself is set up once, but
+  // navigateToFolder closes over foldersById, which changes whenever
+  // `folders` does — including "a brand-new root just got imported and the
+  // DJ clicked Open folder," the exact case this exists for — so it's
+  // called through a ref kept fresh every render, not the closure a `[]`
+  // effect would otherwise freeze at mount.
+  const navigateToFolderRef = useRef(navigateToFolder)
+  useEffect(() => {
+    navigateToFolderRef.current = navigateToFolder
+  })
+
+  useEffect(() => {
+    return useLibraryStore.subscribe((state, prev) => {
+      if (state.pendingFolderNav != null && state.pendingFolderNav !== prev.pendingFolderNav) {
+        navigateToFolderRef.current(state.pendingFolderNav)
+        setPendingFolderNav(null)
+      }
+    })
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
+
+  // Resolves armed highlight paths (see performMove) to folder ids once
+  // their row actually exists in `folders` — a dropped directory's row is
+  // created asynchronously by the post-move re-scan, so there's nothing to
+  // highlight yet at drop time. Same subscribe-based shape as above, reading
+  // the latest pending list from a ref so the one-time subscription doesn't
+  // close over a stale array from mount.
+  const pendingHighlightPathsRef = useRef(pendingHighlightPaths)
+  useEffect(() => {
+    pendingHighlightPathsRef.current = pendingHighlightPaths
+  }, [pendingHighlightPaths])
+
+  useEffect(() => {
+    function resolvePending(currentFolders: FolderRow[]): void {
+      const pending = pendingHighlightPathsRef.current
+      if (pending.length === 0) return
+      const stillPending: string[] = []
+      for (const path of pending) {
+        const match = currentFolders.find((f) => f.path === path)
+        if (match) armHighlight(match.id)
+        else stillPending.push(path)
+      }
+      if (stillPending.length !== pending.length) setPendingHighlightPaths(stillPending)
+    }
+    return useLibraryStore.subscribe((state, prev) => {
+      if (state.folders !== prev.folders) resolvePending(state.folders)
+    })
+  }, [])
+
   // Top level — no folder selected yet — show all registered library roots
   if (currentFolderId === null) {
     return (
@@ -312,6 +424,7 @@ export function FolderView({ libraryRoots }: FolderViewProps): React.JSX.Element
                     path={root.path}
                     trackCount={pending ? 0 : getTrackCount(rootFolderId)}
                     artworkHashes={pending ? [] : getArtworkForFolder(rootFolderId)}
+                    highlighted={!pending && highlightedFolderIds.has(rootFolderId)}
                     onClick={() => {
                       if (!pending) navigateInto(rootFolderId)
                     }}
@@ -367,6 +480,15 @@ export function FolderView({ libraryRoots }: FolderViewProps): React.JSX.Element
     name: foldersById.get(id)?.name ?? '?'
   }))
 
+  // The current folder's own library root's top-level folder id — a fixed
+  // shortcut alongside breadcrumbs, not a replacement for them. With
+  // multiple roots this resolves to whichever root the current folder
+  // actually belongs to, not just "the first one."
+  const homeFolderId =
+    currentFolder.root_folder_id != null
+      ? rootFolderIdByLibraryRootId.get(currentFolder.root_folder_id)
+      : undefined
+
   // Hero artwork — 4 from current folder recursively
   const heroArtwork = getArtworkForFolder(currentFolderId)
   const folderName = currentFolder.name
@@ -394,6 +516,32 @@ export function FolderView({ libraryRoots }: FolderViewProps): React.JSX.Element
           flexShrink: 0
         }}
       >
+        {/* Home — fixed, always-visible shortcut to this root's top level,
+            regardless of depth. Breadcrumbs still do their own job; this
+            doesn't replace them, it's just faster than clicking the first
+            crumb from three levels down. Hidden once already there. */}
+        {homeFolderId !== undefined && homeFolderId !== currentFolderId && (
+          <button
+            onClick={() => navigateToFolder(homeFolderId)}
+            title="Jump to root"
+            style={{
+              background: 'none',
+              border: 'none',
+              color: '#888',
+              fontSize: '13px',
+              cursor: 'pointer',
+              padding: '2px 4px',
+              marginRight: '4px',
+              lineHeight: 1,
+              fontFamily: 'inherit'
+            }}
+            onMouseEnter={(e) => (e.currentTarget.style.color = '#e8e8f0')}
+            onMouseLeave={(e) => (e.currentTarget.style.color = '#888')}
+          >
+            ⌂
+          </button>
+        )}
+
         {/* Back button — one level up, hidden at the root of this library folder */}
         {navStack.length > 1 && (
           <button
@@ -619,6 +767,7 @@ export function FolderView({ libraryRoots }: FolderViewProps): React.JSX.Element
                   path={folder.path ?? folder.name}
                   trackCount={getTrackCount(folder.id)}
                   artworkHashes={getArtworkForFolder(folder.id)}
+                  highlighted={highlightedFolderIds.has(folder.id)}
                   onClick={() => navigateInto(folder.id)}
                 />
               ))}

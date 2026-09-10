@@ -10,6 +10,7 @@ interface ImportProgressPayload {
   skipped: number
   currentFolder: string
   estimateSeconds?: number
+  folderPath: string
 }
 
 // TODO: independently redefined here, in main/index.ts, and in global.d.ts
