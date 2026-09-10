@@ -751,7 +751,7 @@ export function FolderView({ libraryRoots }: FolderViewProps): React.JSX.Element
                 marginBottom: '14px'
               }}
             >
-              Folders
+              Subfolders
             </h2>
             <div
               style={{

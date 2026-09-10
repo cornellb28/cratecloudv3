@@ -70,6 +70,23 @@ function App(): React.JSX.Element {
     return () => window.removeEventListener('resize', handleResize)
   }, [setSidebarCollapsed])
 
+  // A drop that misses every drop target should do nothing — without this,
+  // Electron's default behavior navigates the whole window to the dropped
+  // file. A real target's own preventDefault doesn't stop this from also
+  // firing (drag events still bubble), but by then it's a harmless no-op —
+  // this listener never calls into any import logic itself.
+  useEffect(() => {
+    function preventDefault(e: DragEvent): void {
+      e.preventDefault()
+    }
+    window.addEventListener('dragover', preventDefault)
+    window.addEventListener('drop', preventDefault)
+    return () => {
+      window.removeEventListener('dragover', preventDefault)
+      window.removeEventListener('drop', preventDefault)
+    }
+  }, [])
+
   // ── Watchers ────────────────────
   useEffect(() => {
     // New file added by Finder - add to store
@@ -286,10 +303,18 @@ function App(): React.JSX.Element {
       // Final reload to make sure everything is in sync
       const all = await window.api.db.allTracks()
       setTracks(all)
+      // A brand-new root may have just been registered (library:import-folder
+      // does that server-side) — without this, libraryRoots stays stale for
+      // the rest of the session and the Folders view shows "No library
+      // folders registered" even though the DB row and watcher are both
+      // already correct, until the app is relaunched.
+      await reloadRoots()
 
       toast.success(`Imported ${result.imported ?? 0} track${result.imported !== 1 ? 's' : ''}`, {
         action: { label: 'Open folder', onClick: () => void navigateToFolderPath(folderPath) }
       })
+    } else if (result.error) {
+      toast.error(result.error)
     }
 
     setAnalyzing(false)
@@ -326,6 +351,47 @@ function App(): React.JSX.Element {
     for (const filepath of filepaths) {
       await window.api.importFile(filepath)
       window.api.db.allTracks().then(setTracks)
+    }
+  }
+
+  // Drag-and-drop from Finder onto EmptyView — same import handlers the
+  // dialogs call (importFolder/importFile), just routed by fs:classify-paths
+  // instead of a dialog selection. Folders each become their own sequential
+  // import (and get registered as a root, exactly like handleImport's
+  // dialog flow, since library:import-folder does both); audio files import
+  // individually, matching handleImportFiles.
+  async function handleImportPaths(paths: string[]): Promise<void> {
+    const classified = await window.api.fs.classifyPaths(paths)
+    const dirs = classified.filter((c) => c.kind === 'dir').map((c) => c.path)
+    const audioFiles = classified.filter((c) => c.kind === 'audio').map((c) => c.path)
+    const skipped = classified.filter((c) => c.kind === 'other').map((c) => c.path)
+
+    setAnalyzing(true)
+    for (const dir of dirs) {
+      const result = await window.api.importFolder(dir)
+      if (!result.ok && result.error) {
+        toast.error(result.error)
+      } else if (result.ok) {
+        toast.success(`Imported ${result.imported ?? 0} track${result.imported !== 1 ? 's' : ''}`, {
+          action: { label: 'Open folder', onClick: () => void navigateToFolderPath(dir) }
+        })
+      }
+    }
+    for (const filepath of audioFiles) {
+      await window.api.importFile(filepath)
+    }
+    const all = await window.api.db.allTracks()
+    setTracks(all)
+    // Same staleness gap as handleImport — a dropped folder can register a
+    // brand-new root, and libraryRoots only otherwise refreshes at launch.
+    if (dirs.length > 0) await reloadRoots()
+    setAnalyzing(false)
+
+    if (skipped.length > 0) {
+      toast.warning(
+        `Skipped ${skipped.length} unsupported file${skipped.length !== 1 ? 's' : ''}`,
+        { description: skipped.map((p) => p.split('/').pop()).join(', ') }
+      )
     }
   }
 
@@ -438,7 +504,11 @@ function App(): React.JSX.Element {
           <Breadcrumb activeView={activeView} onNavigate={setActiveView} />
           {/* Views */}
           {activeView === 'dashboard' &&
-            (tracks.length === 0 ? <EmptyState onImport={handleImport} /> : <DashboardView />)}
+            (tracks.length === 0 ? (
+              <EmptyState onImport={handleImport} onImportPaths={handleImportPaths} />
+            ) : (
+              <DashboardView />
+            ))}
           {activeView === 'library' && <LibraryView />}
           {activeView === 'board' && <BoardView />}
           {activeView === 'folders' &&

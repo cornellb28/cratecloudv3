@@ -15,6 +15,10 @@ interface FolderCardProps {
   highlighted?: boolean
 }
 
+// TODO: dropping Finder files directly onto a folder card (as opposed to
+// opening it and dropping into its content area, which FolderView already
+// supports) is out of scope for this pass — see useFileDrop in FolderView.tsx
+// for the pattern to reuse if this card grows its own drop target.
 export function FolderCard({
   name,
   path,

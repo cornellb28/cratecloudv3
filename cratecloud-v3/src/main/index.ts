@@ -1117,6 +1117,44 @@ async function runFolderImport(
   return { imported: job.found, failed: job.skipped, total: job.total, jobId: id }
 }
 
+type RegisterRootResult =
+  | { status: 'registered'; rootId: number }
+  | { status: 'already-covered'; rootId: number }
+  | { status: 'conflict'; conflictingRoots: LibraryRoot[] }
+
+// Single chokepoint for turning a folder path into a registered library
+// root: every "import a folder" entry point calls this before
+// runFolderImport, which stays pure import and never touches library_roots
+// itself. Checks both nesting directions — isPathUnder only ever checked
+// "is the new path inside an existing root" before this, so importing a
+// PARENT of an already-registered root (e.g. root "/Music/Techno" exists,
+// DJ then imports "/Music") silently created a second, overlapping root
+// with its own watcher and its own parallel folder tree over the same
+// physical subdirectories. That's a real bug, not a hypothetical — but
+// merging two roots (reassigning folder_id, deleting the redundant row,
+// redirecting the watcher) is a distinct, riskier operation than anything
+// else this function does, so it's surfaced as a 'conflict' for the caller
+// to refuse with a clear message rather than silently deciding either way.
+function registerLibraryRoot(path: string): RegisterRootResult {
+  const existingRoots = getAllRoots()
+
+  const coveringRoot = existingRoots.find((r) => isPathUnder(path, r.path))
+  if (coveringRoot) {
+    return { status: 'already-covered', rootId: coveringRoot.id }
+  }
+
+  const conflictingRoots = existingRoots.filter((r) => isPathUnder(r.path, path))
+  if (conflictingRoots.length > 0) {
+    return { status: 'conflict', conflictingRoots }
+  }
+
+  const rootResult = addRoot(basename(path), path)
+  const rootId = Number(rootResult.lastInsertRowid)
+  ensureFolderTree(rootId, [''])
+  startWatcher(rootId, path)
+  return { status: 'registered', rootId }
+}
+
 async function runPhase2Analysis(event: Electron.IpcMainInvokeEvent): Promise<void> {
   // Only analyze tracks that Phase 1 did not already resolve
   // (tracks that had BPM/key tags skip librosa entirely)
@@ -1294,13 +1332,18 @@ app.whenReady().then(() => {
     try {
       // Register as root if not already nested — done BEFORE the import
       // (not after) so runFolderImport has a library_root row to resolve
-      // folder_id against via ensureFolderTree.
-      const existingRoots = getAllRoots()
-      const alreadyNested = existingRoots.some((r) => isPathUnder(folderPath, r.path))
-      if (!alreadyNested) {
-        const rootResult = addRoot(basename(folderPath), folderPath)
-        const rootId = Number(rootResult.lastInsertRowid)
-        startWatcher(rootId, folderPath)
+      // folder_id against via ensureFolderTree. 'already-covered' (a re-scan
+      // of an already-registered root or one of its subfolders) falls
+      // through to import same as 'registered' — only 'conflict' (this
+      // folder is a PARENT of an already-registered root) refuses, since
+      // silently merging two roots isn't a decision to make here.
+      const registerResult = registerLibraryRoot(folderPath)
+      if (registerResult.status === 'conflict') {
+        const names = registerResult.conflictingRoots.map((r) => r.name).join(', ')
+        return {
+          ok: false,
+          error: `This folder already contains a registered library folder (${names}) — import that folder directly instead of its parent.`
+        }
       }
 
       const result = await runFolderImport(event, folderPath)
@@ -1957,27 +2000,27 @@ app.whenReady().then(() => {
     try {
       await stat(folderPath) // confirm it exists
 
-      // Check not already nested iinside existing root
-      const existingRoots = getAllRoots()
-      const alreadyNested = existingRoots.some((r) => isPathUnder(folderPath, r.path))
-
-      if (alreadyNested) {
+      // Unlike library:import-folder, this handler's whole purpose is
+      // registering a NEW root — nesting here is user error, not a re-scan,
+      // so both 'already-covered' and 'conflict' refuse instead of falling
+      // through to import.
+      const registerResult = registerLibraryRoot(folderPath)
+      if (registerResult.status === 'already-covered') {
         return { ok: false, error: 'This folder is already inside a registered library root' }
       }
-
-      // Extract name from path
-      const name = basename(folderPath)
-      const result = addRoot(name, folderPath)
-      const rootId = Number(result.lastInsertRowid)
-
-      // Start watching immediately
-      startWatcher(rootId, folderPath)
+      if (registerResult.status === 'conflict') {
+        const names = registerResult.conflictingRoots.map((r) => r.name).join(', ')
+        return {
+          ok: false,
+          error: `This folder already contains a registered library folder (${names}).`
+        }
+      }
 
       // Auto-import in background — same as clicking Import folder
       // Do not await — returns immediately so Settings modal stays responsive
       runFolderImport(event, folderPath)
 
-      return { ok: true, id: rootId }
+      return { ok: true, id: registerResult.rootId }
     } catch (err) {
       return { ok: false, error: (err as Error).message }
     }

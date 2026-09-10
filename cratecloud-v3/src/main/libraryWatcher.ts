@@ -68,9 +68,12 @@ export function setWatcherCallbacks(callbacks: {
 // ─── Start watching a root ────────────────────────────────
 
 export function startWatcher(rootId: number, rootPath: string): void {
-  // Do not start a duplicate watcher
+  // Do not start a duplicate watcher — falling through here used to create
+  // a second chokidar instance and overwrite the Map entry, leaking the
+  // first one (never closed, kept its own fs handles open).
   if (watchers.has(rootId)) {
-    console.log(`[wtacher] already watching root ${rootId}: ${rootPath}`)
+    console.log(`[watcher] already watching root ${rootId}: ${rootPath}`)
+    return
   }
 
   console.log(`[watcher] starting watcher for root ${rootId}: ${rootPath}`)
