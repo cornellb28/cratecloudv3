@@ -5,19 +5,14 @@ import { BoardCard } from '../components/BoardCard'
 export function BoardView(): React.JSX.Element {
   const { tracks, updateTrack, boards } = useLibraryStore()
   const [draggingId, setDraggingId] = useState<number | null>(null)
-  const [selectedIds, setSelectedIds] = useState<Set<number>>(new Set())
+  // setSelectedIds is unused — nothing calls it since toggleSelected was
+  // removed (BoardCard's onSelect was already unreachable, wired only to a
+  // commented-out checkbox), so this stays permanently empty like it
+  // already effectively did.
+  const [selectedIds] = useState<Set<number>>(new Set())
 
   // Per-column display mode — default grid
   const [colModes, setColModes] = useState<Record<number, 'grid' | 'list'>>({})
-
-  function toggleSelected(id: number): void {
-    setSelectedIds(prev => {
-      const next = new Set(prev)
-      if (next.has(id)) next.delete(id)
-      else next.add(id)
-      return next
-    })
-  }
 
   function getMode(boardId: number): 'grid' | 'list' {
     return colModes[boardId] ?? 'grid'
@@ -156,7 +151,6 @@ export function BoardView(): React.JSX.Element {
                   track={track}
                   mode={mode}
                   isSelected={selectedIds.has(track.id)}
-                  onSelect={toggleSelected}
                   onDragStart={id => setDraggingId(id)}
                   onDragEnd={() => setDraggingId(null)}
                 />

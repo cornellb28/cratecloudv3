@@ -22,18 +22,9 @@ const BOARD_COLUMNS = [
 ]
 
 export function BoardCardModal({ track, open, onClose }: BoardCardModalProps): React.JSX.Element {
-  const { updateTrack, quickTags: allQuickTags } = useLibraryStore()
-  const [metaOpen, setMetaOpen] = useState(false)
+  const { updateTrack } = useLibraryStore()
   const [isPlaying, setIsPlaying] = useState(false)
   const audioRef = useRef<HTMLAudioElement | null>(null)
-
-  // Quick tags — comment field only
-  const quickTags = allQuickTags.filter((t) => t.field === 'comment').slice(0, 6)
-
-  // Applied comment tags
-  const { trackTags, setTrackTags } = useLibraryStore()
-  const appliedTags = trackTags.get(track.id) ?? []
-  const commentTagIds = new Set(appliedTags.filter((t) => t.field === 'comment').map((t) => t.id))
 
   // Stop audio when the dialog is dismissed
   function handleOpenChange(next: boolean): void {
@@ -81,19 +72,6 @@ export function BoardCardModal({ track, open, onClose }: BoardCardModalProps): R
   async function moveToColumn(boardId: number): Promise<void> {
     updateTrack(track.id, { board_id: boardId })
     await window.api.db.updateBoardId(track.id, boardId)
-  }
-
-  async function toggleQuickTag(tag: Tag): Promise<void> {
-    const isApplied = commentTagIds.has(tag.id)
-    if (isApplied) {
-      const updated = appliedTags.filter((t) => t.id !== tag.id)
-      setTrackTags(track.id, updated)
-      await window.api.tags.remove(track.id, tag.id)
-    } else {
-      const updated = [...appliedTags, tag]
-      setTrackTags(track.id, updated)
-      await window.api.tags.apply(track.id, tag.id)
-    }
   }
 
   async function togglePlay(): Promise<void> {

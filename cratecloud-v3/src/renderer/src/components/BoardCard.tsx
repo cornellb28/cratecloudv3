@@ -1,14 +1,12 @@
 import React, { useState } from 'react'
 import { useLibraryStore } from '../store/useLibraryStore'
 import { Badge } from '@renderer/components/ui/badge'
-// import { Checkbox } from '@renderer/components/ui/checkbox'
 import { BoardCardModal } from '../components/BoardCardModal'
 import { useArtworkUrl } from '../hooks/useArtworkUrl'
 
 interface BoardCardProps {
   track: Track
   isSelected?: boolean
-  onSelect?: (id: number) => void
   onDragStart?: (id: number) => void
   onDragEnd?: () => void
   mode?: 'grid' | 'list'
@@ -17,7 +15,6 @@ interface BoardCardProps {
 export function BoardCard({
   track,
   isSelected = false,
-  onSelect,
   onDragStart,
   onDragEnd,
   mode = 'grid',
@@ -58,15 +55,6 @@ export function BoardCard({
             minHeight: '44px',
           }}
         >
-          {/* Checkbox */}
-          {/* <div onClick={(e) => e.stopPropagation()}>
-            <Checkbox
-              checked={isSelected}
-              onCheckedChange={() => onSelect?.(track.id)}
-              className="border-[rgba(255,255,255,0.3)] bg-[rgba(0,0,0,0.4)] data-[state=checked]:bg-[#7f77dd] data-[state=checked]:border-[#7f77dd]"
-            />
-          </div> */}
-
           {/* Artwork thumbnail */}
           <div style={{
             width: '32px',
@@ -170,18 +158,6 @@ export function BoardCard({
           minHeight: '140px',
         }}
       >
-        {/* Checkbox */}
-        {/* <div
-          style={{ position: 'absolute', top: '5px', left: '5px', zIndex: 2 }}
-          onClick={(e) => e.stopPropagation()}
-        >
-          <Checkbox
-            checked={isSelected}
-            onCheckedChange={() => onSelect?.(track.id)}
-            className="border-[rgba(255,255,255,0.3)] bg-[rgba(0,0,0,0.4)] data-[state=checked]:bg-[#7f77dd] data-[state=checked]:border-[#7f77dd]"
-          />
-        </div> */}
-
         {/* Artwork */}
         <div style={{
           width: '100%',
