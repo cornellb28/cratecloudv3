@@ -48,6 +48,27 @@ function moveStatusLabel(p: MoveProgressPayload): string {
   return `${label} · ${filename}`
 }
 
+function copyStatusLabel(p: CopyProgressPayload): string {
+  // Same job, two labels — deleteSource is a FolderView Finder-drop (move
+  // in place), unset is the EmptyView/Board copy-then-import path.
+  const verb = p.deleteSource ? 'Moving' : 'Copying'
+  const verbed = p.deleteSource ? 'moved' : 'copied'
+  const label = `${verb} ${p.total} file${p.total !== 1 ? 's' : ''} — ${p.done} of ${p.total}`
+
+  if (p.phase === 'cancelled') return `Cancelled — ${p.done} of ${p.total} ${verbed}`
+  if (p.phase === 'done') {
+    return p.failed.length > 0
+      ? `Done — ${p.done - p.failed.length} ${verbed}, ${p.failed.length} failed`
+      : `Done — ${p.done} ${verbed}`
+  }
+  if (!p.currentFile) return label
+
+  const filename = p.currentFile.split('/').pop() ?? p.currentFile
+  return p.totalBytes > 0
+    ? `${label} · ${filename} (${formatMB(p.bytesCopied)} / ${formatMB(p.totalBytes)} MB)`
+    : `${label} · ${filename}`
+}
+
 const cancelButtonStyle: React.CSSProperties = {
   flexShrink: 0,
   background: 'transparent',
@@ -117,15 +138,17 @@ interface BackgroundJobsPanelProps {
   onCancelImport: (jobId: string) => void
   onResumeImport: (jobId: string) => void
   onCancelMove: (jobId: string) => void
+  onCancelCopy: (jobId: string) => void
 }
 
-// Renders every job in the shared `jobs` store slice — import and move
-// today. One panel, one visual language for "something is running in the
-// background," instead of a bespoke bar per job type.
+// Renders every job in the shared `jobs` store slice — import, move, and
+// copy today. One panel, one visual language for "something is running in
+// the background," instead of a bespoke bar per job type.
 export function BackgroundJobsPanel({
   onCancelImport,
   onResumeImport,
-  onCancelMove
+  onCancelMove,
+  onCancelCopy
 }: BackgroundJobsPanelProps): React.JSX.Element | null {
   const jobs = useLibraryStore((s) => s.jobs)
   const jobList = Object.values(jobs)
@@ -146,6 +169,25 @@ export function BackgroundJobsPanel({
               action={
                 job.phase === 'running' ? (
                   <button onClick={() => onCancelMove(job.jobId)} style={cancelButtonStyle}>
+                    Cancel
+                  </button>
+                ) : undefined
+              }
+            />
+          )
+        }
+
+        if (job.type === 'copy') {
+          const pct = job.total > 0 ? Math.round((job.done / job.total) * 100) : 0
+          return (
+            <ProgressRow
+              key={job.jobId}
+              label={copyStatusLabel(job)}
+              pct={pct}
+              showBar
+              action={
+                job.phase === 'running' ? (
+                  <button onClick={() => onCancelCopy(job.jobId)} style={cancelButtonStyle}>
                     Cancel
                   </button>
                 ) : undefined

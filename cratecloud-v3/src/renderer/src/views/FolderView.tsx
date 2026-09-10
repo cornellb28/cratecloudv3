@@ -7,6 +7,12 @@ import { TrackRow } from '../components/TrackRow'
 import { TrackCard } from '../components/TrackCard'
 import { BulkBar } from '../components/BulkBar'
 import { Button } from '@renderer/components/ui/button'
+import { useFileDrop } from '../hooks/useFileDrop'
+import { MoveConfirmDialog } from '../components/MoveConfirmDialog'
+
+// Shared with MoveFileButton's single-track "Move to..." confirmation —
+// dismissing one dismisses both, they're the same underlying concern.
+const MOVE_CONFIRM_SETTING_KEY = 'skip_move_confirmation'
 
 interface FolderViewProps {
   libraryRoots: LibraryRoot[] // all registered library roots
@@ -16,8 +22,16 @@ export function FolderView({ libraryRoots }: FolderViewProps): React.JSX.Element
   // `folders`/`folderCounts` live in the shared store, populated once at
   // startup and kept fresh by App.tsx's single debounced onFoldersChanged
   // subscription — this view just reads them, it doesn't fetch its own copy.
-  const { tracks, displayMode, isAnalyzing, setAnalyzing, setTracks, folders, folderCounts } =
-    useLibraryStore()
+  const {
+    tracks,
+    displayMode,
+    isAnalyzing,
+    setAnalyzing,
+    setTracks,
+    folders,
+    folderCounts,
+    upsertJob
+  } = useLibraryStore()
 
   // Navigation stack — array of folder ids (from the `folders` table). Empty
   // = top-level root picker.
@@ -28,6 +42,13 @@ export function FolderView({ libraryRoots }: FolderViewProps): React.JSX.Element
   const [creatingFolder, setCreatingFolder] = useState(false)
   const [newFolderName, setNewFolderName] = useState('')
   const [creating, setCreating] = useState(false)
+
+  // Armed when a Finder drop needs the "move, not copy" confirmation —
+  // holds everything performMove needs once the DJ confirms.
+  const [moveConfirm, setMoveConfirm] = useState<{
+    accepted: { path: string; kind: 'dir' | 'audio' }[]
+    folder: FolderRow
+  } | null>(null)
 
   const currentFolderId = navStack.length > 0 ? navStack[navStack.length - 1] : null
 
@@ -166,6 +187,88 @@ export function FolderView({ libraryRoots }: FolderViewProps): React.JSX.Element
     setCreating(false)
   }
 
+  // Actually runs the move — either straight from handleDropIntoFolder (the
+  // "don't ask again" setting is on) or from the confirm dialog's onConfirm.
+  // deleteSource: true is the only difference from the old copy-in-place
+  // behavior — same job, same never-overwrite/skip-and-report semantics,
+  // just relocating instead of duplicating (see copyOneFileIntoFolder).
+  async function performMove(
+    accepted: { path: string; kind: 'dir' | 'audio' }[],
+    folder: FolderRow
+  ): Promise<void> {
+    if (!folder.path) return
+    const sourcePaths = accepted.map((c) => c.path)
+
+    const { jobId } = await window.api.fs.copyIntoFolder({
+      sourcePaths,
+      destAbsolutePath: folder.path,
+      currentFolderPath: folder.path,
+      deleteSource: true
+    })
+    upsertJob({
+      type: 'copy',
+      jobId,
+      phase: 'running',
+      done: 0,
+      total: sourcePaths.length,
+      currentFile: '',
+      bytesCopied: 0,
+      totalBytes: 0,
+      failed: [],
+      deleteSource: true
+    })
+  }
+
+  // Drag-and-drop from Finder into the folder currently being browsed
+  // relocates the dropped paths — see performMove. Looks up the folder by
+  // id rather than closing over `currentFolder` (defined further down,
+  // after this function — but this hook has to be called before either
+  // early return below, so it can't depend on anything defined after them).
+  async function handleDropIntoFolder(paths: string[]): Promise<void> {
+    const folder = currentFolderId !== null ? foldersById.get(currentFolderId) : undefined
+    if (!folder?.path) return
+
+    const classified = await window.api.fs.classifyPaths(paths)
+    const accepted = classified.filter(
+      (c): c is { path: string; kind: 'dir' | 'audio' } => c.kind === 'dir' || c.kind === 'audio'
+    )
+    const skipped = classified.filter((c) => c.kind === 'other').map((c) => c.path)
+
+    if (skipped.length > 0) {
+      toast.warning(
+        `Skipped ${skipped.length} unsupported file${skipped.length !== 1 ? 's' : ''}`,
+        { description: skipped.map((p) => p.split('/').pop()).join(', ') }
+      )
+    }
+    if (accepted.length === 0) return
+
+    const dismissed = await window.api.settings.get(MOVE_CONFIRM_SETTING_KEY)
+    if (dismissed === 'true') {
+      await performMove(accepted, folder)
+    } else {
+      setMoveConfirm({ accepted, folder })
+    }
+  }
+
+  // MoveConfirmDialog's onConfirm — persists the shared skip-confirmation
+  // setting first (if checked) so a page reload isn't needed for it to
+  // take effect on the very next drop, then runs the move that was pending.
+  async function confirmMove(dontAskAgain: boolean): Promise<void> {
+    const pending = moveConfirm
+    setMoveConfirm(null)
+    if (!pending) return
+    if (dontAskAgain) {
+      await window.api.settings.set(MOVE_CONFIRM_SETTING_KEY, 'true')
+    }
+    await performMove(pending.accepted, pending.folder)
+  }
+
+  const currentFolderForDrop = currentFolderId !== null ? foldersById.get(currentFolderId) : undefined
+  const { isDragging: isDraggingFiles, dropHandlers: folderDropHandlers } = useFileDrop({
+    onDrop: handleDropIntoFolder,
+    accept: !!currentFolderForDrop?.path
+  })
+
   // Top level — no folder selected yet — show all registered library roots
   if (currentFolderId === null) {
     return (
@@ -271,6 +374,7 @@ export function FolderView({ libraryRoots }: FolderViewProps): React.JSX.Element
 
   return (
     <div
+      {...folderDropHandlers}
       style={{
         flex: 1,
         display: 'flex',
@@ -351,8 +455,12 @@ export function FolderView({ libraryRoots }: FolderViewProps): React.JSX.Element
       <div
         style={{
           padding: '24px 24px 20px',
-          background: 'linear-gradient(180deg, #1a1a26 0%, #13131b 100%)',
-          flexShrink: 0
+          background: isDraggingFiles
+            ? 'linear-gradient(180deg, #241f3d 0%, #1a1626 100%)'
+            : 'linear-gradient(180deg, #1a1a26 0%, #13131b 100%)',
+          borderBottom: isDraggingFiles ? '2px dashed #7f77dd' : '2px dashed transparent',
+          flexShrink: 0,
+          transition: 'background 0.15s, border-color 0.15s'
         }}
       >
         {/* Hero content */}
@@ -373,11 +481,11 @@ export function FolderView({ libraryRoots }: FolderViewProps): React.JSX.Element
                 fontWeight: 500,
                 letterSpacing: '1px',
                 textTransform: 'uppercase',
-                color: '#555',
+                color: isDraggingFiles ? '#a09be8' : '#555',
                 marginBottom: '6px'
               }}
             >
-              Folder
+              {isDraggingFiles ? `Move to ${folderName}` : 'Folder'}
             </div>
             <h1
               style={{
@@ -474,7 +582,14 @@ export function FolderView({ libraryRoots }: FolderViewProps): React.JSX.Element
       </div>
 
       {/* ── Scrollable content ─────────────────────── */}
-      <div style={{ flex: 1, overflowY: 'auto' }}>
+      <div
+        style={{
+          flex: 1,
+          overflowY: 'auto',
+          outline: isDraggingFiles ? '2px dashed #7f77dd' : 'none',
+          outlineOffset: '-2px'
+        }}
+      >
         {/* Subfolders grid */}
         {subfolders.length > 0 && (
           <div style={{ padding: '20px 24px' }}>
@@ -591,6 +706,18 @@ export function FolderView({ libraryRoots }: FolderViewProps): React.JSX.Element
           </div>
         )}
       </div>
+
+      {moveConfirm && (
+        <MoveConfirmDialog
+          open
+          title={`Move ${moveConfirm.accepted.length} file${
+            moveConfirm.accepted.length !== 1 ? 's' : ''
+          } into ${moveConfirm.folder.name}?`}
+          description="The originals will be moved, not copied."
+          onConfirm={(dontAskAgain) => void confirmMove(dontAskAgain)}
+          onCancel={() => setMoveConfirm(null)}
+        />
+      )}
     </div>
   )
 }

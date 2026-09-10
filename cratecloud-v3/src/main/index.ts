@@ -145,8 +145,62 @@ interface MoveJob {
   lastEmitAt: number
 }
 
+// ── Copy-into-folder job state (drag-and-drop from Finder) ───────────────
+// Deliberately not a MoveJob: it copies arbitrary dropped paths that have no
+// track row yet (never a rename, the source must survive), and finishes by
+// calling into the same import path dialogs use — importSingleFile or
+// runFolderImport — rather than updateTrackFilepath. The two share the
+// streaming-copy primitive (streamCopyWithProgress) and the throttled-emit
+// pattern, not the job shape itself.
+type CopyPhase = 'running' | 'done' | 'cancelled' | 'error'
+
+interface CopyFailure {
+  sourcePath: string
+  error: string
+}
+
+interface CopyProgressPayload {
+  jobId: string
+  phase: CopyPhase
+  done: number
+  total: number
+  currentFile: string
+  bytesCopied: number
+  totalBytes: number
+  failed: CopyFailure[]
+  // True for a FolderView Finder-drop (move-in-place); false for the
+  // EmptyView/Board drop paths that never call this job. Purely a label
+  // switch for the renderer — the underlying job is identical either way.
+  deleteSource: boolean
+}
+
+interface CopyJob {
+  type: 'copy'
+  id: string
+  destAbsolutePath: string
+  // Built once at the start of the run (stat/walk is async, so it can't be
+  // known at job-creation time) — one entry per file to copy, expanded from
+  // the dropped paths (a dropped directory expands to every file in its tree).
+  plan: { source: string; dest: string }[]
+  hadDirectory: boolean
+  cancelRequested: boolean
+  status: CopyPhase
+  doneCount: number
+  currentFile: string
+  bytesCopied: number
+  totalBytes: number
+  failed: CopyFailure[]
+  copiedFilePaths: string[] // successfully copied, non-directory-drop case only
+  lastEmitAt: number
+  // When true, each file is moved (rename, falling back to stream-copy +
+  // verify + unlink on EXDEV) instead of copied — same control flow as
+  // moveOneTrackFile, just not keyed by trackId since a dropped file has no
+  // track row yet.
+  deleteSource: boolean
+}
+
 // One registry for every background job type, discriminated by `type`.
-type Job = ImportJob | MoveJob
+type Job = ImportJob | MoveJob | CopyJob
 const jobs = new Map<string, Job>()
 
 const COUNT_PROGRESS_INTERVAL_MS = 250
@@ -664,6 +718,150 @@ async function runMoveJob(event: Electron.IpcMainInvokeEvent, job: MoveJob): Pro
   job.status = 'done'
   maybeEmitMoveProgress(event, job, true)
   jobs.delete(job.id)
+}
+
+// Every file under dirPath, recursively — no audio-extension filter (unlike
+// scanFolderPaths): dropping a folder from Finder should copy the whole
+// tree as-is, the same way Finder itself would, and let the re-scan that
+// follows decide what's importable.
+async function collectFilesRecursive(dirPath: string): Promise<string[]> {
+  const results: string[] = []
+  const queue: string[] = [dirPath]
+  while (queue.length > 0) {
+    const dir = queue.shift()!
+    try {
+      const entries = await readdir(dir, { withFileTypes: true })
+      for (const entry of entries) {
+        if (entry.name.startsWith('.')) continue
+        const full = join(dir, entry.name)
+        if (entry.isDirectory()) queue.push(full)
+        else results.push(full)
+      }
+    } catch {
+      // skip unreadable directories
+    }
+  }
+  return results
+}
+
+// Copies (or moves, when job.deleteSource is set) one file to an explicit
+// destination (unlike moveOneTrackFile, the destination isn't derived from
+// basename(source) here — a directory-tree copy/move needs the source's
+// position relative to the dropped folder preserved). copy mode never
+// touches the source — the DJ dropped this from Finder, their original
+// stays put no matter what. move mode renames first, falling back to
+// stream-copy + verify + unlink on EXDEV, same as moveOneTrackFile. Every
+// failure mode is caught and recorded in job.failed; this never throws, so
+// one bad file can't abort the rest of the run.
+async function copyOneFileIntoFolder(
+  job: CopyJob,
+  sourcePath: string,
+  destPath: string
+): Promise<boolean> {
+  job.currentFile = sourcePath
+  job.bytesCopied = 0
+  job.totalBytes = 0
+
+  try {
+    // Never overwrite — a name collision fails this file, not the job, and
+    // (in move mode) leaves the source untouched.
+    try {
+      await stat(destPath)
+      job.failed.push({ sourcePath, error: 'Destination already exists' })
+      return false
+    } catch {
+      // Good — does not exist
+    }
+
+    if (!job.deleteSource) {
+      const sourceSize = (await stat(sourcePath)).size
+      job.totalBytes = sourceSize
+
+      await streamCopyWithProgress(sourcePath, destPath, (bytesCopied) => {
+        job.bytesCopied = bytesCopied
+      })
+
+      const copiedSize = (await stat(destPath)).size
+      if (copiedSize !== sourceSize) {
+        await unlink(destPath).catch(() => {})
+        throw new Error(
+          `Copy verification failed (${copiedSize} of ${sourceSize} bytes) — source left untouched`
+        )
+      }
+
+      return true
+    }
+
+    // Move mode — rename first (instant, same-volume); EXDEV means the
+    // destination is on a different volume, so fall back to stream-copy,
+    // verify, then remove the source.
+    try {
+      await rename(sourcePath, destPath)
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code !== 'EXDEV') throw err
+
+      const sourceSize = (await stat(sourcePath)).size
+      job.totalBytes = sourceSize
+
+      await streamCopyWithProgress(sourcePath, destPath, (bytesCopied) => {
+        job.bytesCopied = bytesCopied
+      })
+
+      const copiedSize = (await stat(destPath)).size
+      if (copiedSize !== sourceSize) {
+        await unlink(destPath).catch(() => {})
+        throw new Error(
+          `Copy verification failed (${copiedSize} of ${sourceSize} bytes) — source left untouched`
+        )
+      }
+
+      try {
+        await unlink(sourcePath)
+      } catch (err) {
+        // The copy landed fine — do not roll it back. Record it as a
+        // failure anyway so the DJ knows the original needs manual cleanup,
+        // even though the file is safely at the destination.
+        job.failed.push({
+          sourcePath,
+          error: `Moved, but couldn't remove the original file: ${(err as Error).message}`
+        })
+        return true
+      }
+    }
+
+    return true
+  } catch (err) {
+    job.failed.push({ sourcePath, error: (err as Error).message })
+    return false
+  }
+}
+
+function buildCopyProgressPayload(job: CopyJob, phaseOverride?: CopyPhase): CopyProgressPayload {
+  return {
+    jobId: job.id,
+    phase: phaseOverride ?? job.status,
+    done: job.doneCount,
+    total: job.plan.length,
+    currentFile: job.currentFile,
+    bytesCopied: job.bytesCopied,
+    totalBytes: job.totalBytes,
+    failed: job.failed,
+    deleteSource: job.deleteSource
+  }
+}
+
+const COPY_PROGRESS_INTERVAL_MS = 250
+
+function maybeEmitCopyProgress(
+  event: Electron.IpcMainInvokeEvent,
+  job: CopyJob,
+  force = false
+): void {
+  const now = Date.now()
+  if (force || now - job.lastEmitAt >= COPY_PROGRESS_INTERVAL_MS) {
+    job.lastEmitAt = now
+    event.sender.send('copy:progress', buildCopyProgressPayload(job))
+  }
 }
 
 // Update just the analysis fields after Phase 2 completes
@@ -1185,6 +1383,129 @@ app.whenReady().then(() => {
     return importSingleFile(event, filepath)
   })
 
+  // Drag-and-drop from Finder into a specific folder — copies every dropped
+  // path into destAbsolutePath (never a rename: the DJ's source must
+  // survive), then imports via the exact same handlers the dialogs use:
+  // importSingleFile per copied file, or a re-scan of the destination
+  // folder if any dropped item was a directory (so ensureFolderTree picks
+  // up the new subtree). The 'done' progress event isn't emitted until
+  // that import step finishes too, so the renderer's completion handler
+  // can safely refetch tracks right then.
+  async function runCopyIntoFolderJob(
+    event: Electron.IpcMainInvokeEvent,
+    job: CopyJob,
+    sourcePaths: string[],
+    currentFolderPath: string
+  ): Promise<void> {
+    job.status = 'running'
+
+    // Build the plan — a dropped directory expands to every file in its
+    // tree, preserving its structure under destAbsolutePath/<dirName>/...
+    for (const sourcePath of sourcePaths) {
+      let sourceStat
+      try {
+        sourceStat = await stat(sourcePath)
+      } catch {
+        job.failed.push({ sourcePath, error: 'Source no longer exists' })
+        continue
+      }
+      if (sourceStat.isDirectory()) {
+        job.hadDirectory = true
+        const dirName = basename(sourcePath)
+        const files = await collectFilesRecursive(sourcePath)
+        for (const file of files) {
+          job.plan.push({
+            source: file,
+            dest: join(job.destAbsolutePath, dirName, relative(sourcePath, file))
+          })
+        }
+      } else {
+        job.plan.push({
+          source: sourcePath,
+          dest: join(job.destAbsolutePath, basename(sourcePath))
+        })
+      }
+    }
+
+    maybeEmitCopyProgress(event, job, true) // total is known now
+
+    for (const { source, dest } of job.plan) {
+      if (job.cancelRequested) {
+        job.status = 'cancelled'
+        maybeEmitCopyProgress(event, job, true)
+        jobs.delete(job.id)
+        return
+      }
+
+      await mkdir(dirname(dest), { recursive: true })
+      const ok = await copyOneFileIntoFolder(job, source, dest)
+      if (ok) job.copiedFilePaths.push(dest)
+      job.doneCount++
+      job.currentFile = ''
+      job.bytesCopied = 0
+      job.totalBytes = 0
+      maybeEmitCopyProgress(event, job, true)
+    }
+
+    // Copying is done — now import, via the same handlers the dialogs use.
+    // Held until after this so the renderer's 'done' handler can safely
+    // refetch tracks knowing the import actually finished too.
+    if (job.hadDirectory) {
+      await runFolderImport(event, currentFolderPath)
+    } else {
+      for (const path of job.copiedFilePaths) {
+        await importSingleFile(event, path)
+      }
+    }
+
+    job.status = 'done'
+    maybeEmitCopyProgress(event, job, true)
+    jobs.delete(job.id)
+  }
+
+  ipcMain.handle(
+    'fs:copy-into-folder',
+    (
+      event,
+      payload: {
+        sourcePaths: string[]
+        destAbsolutePath: string
+        currentFolderPath: string
+        deleteSource?: boolean
+      }
+    ) => {
+      const job: CopyJob = {
+        type: 'copy',
+        id: randomUUID(),
+        destAbsolutePath: payload.destAbsolutePath,
+        plan: [],
+        hadDirectory: false,
+        cancelRequested: false,
+        status: 'running',
+        doneCount: 0,
+        currentFile: '',
+        bytesCopied: 0,
+        totalBytes: 0,
+        failed: [],
+        copiedFilePaths: [],
+        lastEmitAt: 0,
+        deleteSource: payload.deleteSource ?? false
+      }
+      jobs.set(job.id, job)
+      runCopyIntoFolderJob(event, job, payload.sourcePaths, payload.currentFolderPath) // fire-and-forget
+      return { jobId: job.id }
+    }
+  )
+
+  ipcMain.handle('fs:cancel-copy', (_e, jobId: string) => {
+    const job = jobs.get(jobId)
+    if (!job || job.type !== 'copy') {
+      return { ok: false, error: 'Unknown or already-finished job' }
+    }
+    job.cancelRequested = true
+    return { ok: true }
+  })
+
   // ── Multi file import ────────────────────────────────────
 
   ipcMain.handle('library:import-files', async (event, filepaths: string[]) => {
@@ -1443,6 +1764,28 @@ app.whenReady().then(() => {
     } catch (err) {
       return { ok: false, error: (err as Error).message }
     }
+  })
+
+  // ── Classify dropped paths (drag-and-drop from Finder) ────
+  // The renderer never guesses a drop's kind from the filename — it always
+  // asks main, which knows the real supported-extensions list.
+  ipcMain.handle('fs:classify-paths', async (_e, paths: string[]) => {
+    const results: { path: string; kind: 'dir' | 'audio' | 'other' }[] = []
+    for (const p of paths) {
+      try {
+        const s = await stat(p)
+        if (s.isDirectory()) {
+          results.push({ path: p, kind: 'dir' })
+        } else if (AUDIO_EXTENSIONS.has(extname(p).toLowerCase())) {
+          results.push({ path: p, kind: 'audio' })
+        } else {
+          results.push({ path: p, kind: 'other' })
+        }
+      } catch {
+        results.push({ path: p, kind: 'other' })
+      }
+    }
+    return results
   })
 
   // ── Read folder contents ─────────────────────────────────

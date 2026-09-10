@@ -8,6 +8,11 @@ interface FolderCardProps {
   audioCount?: number
   artworkHashes: (string | null)[]
   onClick: () => void
+  // Brief one-shot flash — used for a folder that was just created,
+  // imported, or moved into the grid currently being rendered. Plays once;
+  // the caller is responsible for clearing it back to false after the
+  // animation's duration (see folderHighlight in main.css).
+  highlighted?: boolean
 }
 
 export function FolderCard({
@@ -16,7 +21,8 @@ export function FolderCard({
   trackCount,
   audioCount,
   artworkHashes,
-  onClick
+  onClick,
+  highlighted
 }: FolderCardProps): React.JSX.Element {
   // audioCount (disk) vs trackCount (imported into the DB) — show both only when they diverge
   const countLabel =
@@ -33,7 +39,11 @@ export function FolderCard({
         display: 'flex',
         flexDirection: 'column',
         gap: '8px',
-        transition: 'transform 0.15s'
+        padding: '8px',
+        margin: '-8px',
+        borderRadius: '10px',
+        transition: 'transform 0.15s',
+        animation: highlighted ? 'folderHighlight 1.8s ease-out' : undefined
       }}
       onMouseEnter={(e) => (e.currentTarget.style.transform = 'scale(1.02)')}
       onMouseLeave={(e) => (e.currentTarget.style.transform = 'scale(1)')}

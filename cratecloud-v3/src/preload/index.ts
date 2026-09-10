@@ -1,4 +1,4 @@
-import { contextBridge, ipcRenderer } from 'electron'
+import { contextBridge, ipcRenderer, webUtils } from 'electron'
 import { electronAPI } from '@electron-toolkit/preload'
 
 interface ImportProgressPayload {
@@ -24,6 +24,20 @@ interface MoveProgressPayload {
   totalBytes: number
   crossDevice: boolean
   failed: { trackId: number; filepath: string; error: string }[]
+}
+
+// TODO: independently redefined here, in main/index.ts, and in global.d.ts
+// — see the same TODO on JobState in useLibraryStore.ts.
+interface CopyProgressPayload {
+  jobId: string
+  phase: 'running' | 'done' | 'cancelled' | 'error'
+  done: number
+  total: number
+  currentFile: string
+  bytesCopied: number
+  totalBytes: number
+  failed: { sourcePath: string; error: string }[]
+  deleteSource: boolean
 }
 
 // Custom APIs for renderer
@@ -174,11 +188,29 @@ const api = {
       ipcRenderer.invoke('fs:rename-file', filepath, newName),
     createFolder: (parent: string, name: string) =>
       ipcRenderer.invoke('fs:create-folder', parent, name),
-    readFolder: (folderPath: string) => ipcRenderer.invoke('fs:read-folder', folderPath)
+    readFolder: (folderPath: string) => ipcRenderer.invoke('fs:read-folder', folderPath),
+    // Drag-and-drop from Finder — classify what was dropped (never guess
+    // from the filename in the renderer), and copy-then-import a drop into
+    // a specific folder. Job-based like move: resolves with a jobId,
+    // progress comes over onCopyProgress.
+    classifyPaths: (paths: string[]) => ipcRenderer.invoke('fs:classify-paths', paths),
+    copyIntoFolder: (payload: {
+      sourcePaths: string[]
+      destAbsolutePath: string
+      currentFolderPath: string
+      deleteSource?: boolean
+    }) => ipcRenderer.invoke('fs:copy-into-folder', payload),
+    cancelCopy: (jobId: string) => ipcRenderer.invoke('fs:cancel-copy', jobId)
   },
   onMoveProgress: (cb: (p: MoveProgressPayload) => void) =>
     ipcRenderer.on('move:progress', (_e, p) => cb(p)),
   offMoveProgress: () => ipcRenderer.removeAllListeners('move:progress'),
+  onCopyProgress: (cb: (p: CopyProgressPayload) => void) =>
+    ipcRenderer.on('copy:progress', (_e, p) => cb(p)),
+  offCopyProgress: () => ipcRenderer.removeAllListeners('copy:progress'),
+  // Modern Electron removed File.path — the renderer must resolve a
+  // dropped File's real path through the preload/main process instead.
+  getPathForFile: (file: File): string => webUtils.getPathForFile(file),
   watcher: {
     pendingChanges: () => ipcRenderer.invoke('watcher:pending-changes'),
     acceptChange: (id: number) => ipcRenderer.invoke('watcher:accept-change', id),

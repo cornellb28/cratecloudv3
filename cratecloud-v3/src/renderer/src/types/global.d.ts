@@ -186,10 +186,29 @@ declare global {
         readFolder: (
           folderPath: string
         ) => Promise<{ ok: boolean; items?: FolderItem[]; error?: string }>
+        // Drag-and-drop from Finder — see fs:classify-paths/fs:copy-into-folder
+        // in main/index.ts. classifyPaths never guesses from a filename; the
+        // renderer just routes on the returned kind.
+        classifyPaths: (paths: string[]) => Promise<{ path: string; kind: 'dir' | 'audio' | 'other' }[]>
+        copyIntoFolder: (payload: {
+          sourcePaths: string[]
+          destAbsolutePath: string
+          currentFolderPath: string
+          deleteSource?: boolean
+        }) => Promise<{ jobId: string }>
+        cancelCopy: (jobId: string) => Promise<{ ok: boolean; error?: string }>
       }
 
       onFoldersChanged: (cb: () => void) => void
       offFoldersChanged: () => void
+
+      onCopyProgress: (cb: (p: CopyProgressPayload) => void) => void
+      offCopyProgress: () => void
+
+      // Modern Electron removed File.path — resolves a dropped File's real
+      // path via the preload's webUtils.getPathForFile bridge. Never read
+      // file.path in the renderer; it's undefined.
+      getPathForFile: (file: File) => string
 
       artwork: {
         pathFor: (hash: string | null, size: 'full' | 'thumb') => Promise<string | null>
@@ -348,6 +367,20 @@ declare global {
     totalBytes: number
     crossDevice: boolean
     failed: { trackId: number; filepath: string; error: string }[]
+  }
+
+  // TODO: independently redefined here, in main/index.ts, and in
+  // preload/index.ts — see the same TODO on JobState in useLibraryStore.ts.
+  interface CopyProgressPayload {
+    jobId: string
+    phase: 'running' | 'done' | 'cancelled' | 'error'
+    done: number
+    total: number
+    currentFile: string
+    bytesCopied: number
+    totalBytes: number
+    failed: { sourcePath: string; error: string }[]
+    deleteSource: boolean
   }
 
   interface LibraryRoot {

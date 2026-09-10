@@ -124,8 +124,14 @@ export function MoveFileButton({
       {destination && (
         <MoveConfirmDialog
           open={confirmOpen}
-          trackTitle={trackTitle}
-          destination={destination.name}
+          title="Move file?"
+          description={
+            <>
+              Move <span style={{ color: '#a09be8', fontWeight: 500 }}>{trackTitle}</span> to{' '}
+              <span style={{ color: '#e8e8f0' }}>{destination.name}</span>?
+            </>
+          }
+          confirmLabel="Move file"
           onConfirm={handleConfirm}
           onCancel={() => {
             setConfirmOpen(false)

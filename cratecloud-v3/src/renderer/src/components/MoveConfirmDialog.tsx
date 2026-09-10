@@ -4,16 +4,23 @@ import { Button } from '@renderer/components/ui/button'
 
 interface MoveConfirmDialogProps {
   open: boolean
-  trackTitle: string
-  destination: string
+  title: string
+  description: React.ReactNode
+  confirmLabel?: string
   onConfirm: (dontAskAgain: boolean) => void
   onCancel: () => void
 }
 
+// Shared shell for "this is about to move a file on disk, confirm first" —
+// used by MoveFileButton (single-track "Move to...") and FolderView's
+// Finder-drop-into-folder. Both persist the same skip_move_confirmation
+// setting, so dismissing one dismisses both — they're the same underlying
+// concern (moving files, not copying) from the DJ's point of view.
 export function MoveConfirmDialog({
   open,
-  trackTitle,
-  destination,
+  title,
+  description,
+  confirmLabel = 'Move',
   onConfirm,
   onCancel
 }: MoveConfirmDialogProps): React.JSX.Element {
@@ -48,7 +55,7 @@ export function MoveConfirmDialog({
           textAlign: 'center',
           marginBottom: '8px'
         }}>
-          Move file?
+          {title}
         </div>
 
         {/* Description */}
@@ -59,15 +66,7 @@ export function MoveConfirmDialog({
           marginBottom: '20px',
           lineHeight: 1.5
         }}>
-          Move{' '}
-          <span style={{ color: '#a09be8', fontWeight: 500 }}>
-            {trackTitle}
-          </span>
-          {' '}to{' '}
-          <span style={{ color: '#e8e8f0' }}>
-            {destination}
-          </span>
-          ?
+          {description}
         </div>
 
         {/* Don't ask again */}
@@ -126,7 +125,7 @@ export function MoveConfirmDialog({
               color: '#a09be8'
             }}
           >
-            Move file
+            {confirmLabel}
           </Button>
         </div>
       </DialogContent>

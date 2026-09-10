@@ -1,11 +1,11 @@
 import { create } from 'zustand'
 
-// TODO: ImportProgressPayload/MoveProgressPayload are each independently
-// redefined in main/index.ts, preload/index.ts, and global.d.ts (three
-// copies of every shape). JobState below adds a fourth de-facto copy via
-// the ambient types. Worth hoisting all job/progress payload shapes into
-// one shared types module imported by main, preload, and renderer instead
-// of keeping them in sync by hand.
+// TODO: ImportProgressPayload/MoveProgressPayload/CopyProgressPayload are
+// each independently redefined in main/index.ts, preload/index.ts, and
+// global.d.ts (three copies of every shape). JobState below adds a fourth
+// de-facto copy via the ambient types. Worth hoisting all job/progress
+// payload shapes into one shared types module imported by main, preload,
+// and renderer instead of keeping them in sync by hand.
 // trackIds isn't part of the wire payload (move:progress never repeats it —
 // it can't change mid-job) — the dispatcher (MoveFileButton/BulkBar) seeds
 // it in when the job is created; App.tsx's onMoveProgress carries it
@@ -13,6 +13,7 @@ import { create } from 'zustand'
 type JobState =
   | (ImportProgressPayload & { type: 'import' })
   | (MoveProgressPayload & { type: 'move'; trackIds: number[] })
+  | (CopyProgressPayload & { type: 'copy' })
 
 // ─── State shape ─────────────────────────────────────────
 

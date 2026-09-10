@@ -205,6 +205,37 @@ function App(): React.JSX.Element {
       }
     })
 
+    // Copy job progress (drag-and-drop into a specific folder) — the copy
+    // job holds its 'done'/'cancelled' event until the import step that
+    // follows (importSingleFile or a folder re-scan) also finishes, so
+    // it's safe to refetch tracks right here once either fires.
+    window.api.onCopyProgress((p) => {
+      upsertJob({ ...p, type: 'copy' })
+
+      if (p.phase === 'done' || p.phase === 'cancelled') {
+        if (p.phase === 'done') {
+          const failedCount = p.failed.length
+          const succeededCount = p.done - failedCount
+          const verbed = p.deleteSource ? 'moved' : 'copied'
+          if (failedCount > 0) {
+            toast.error(`${succeededCount} ${verbed}, ${failedCount} failed`, {
+              description: p.failed
+                .map((f) => `${f.sourcePath.split('/').pop()}: ${f.error}`)
+                .join('\n')
+            })
+          } else if (succeededCount > 0) {
+            toast.success(
+              p.deleteSource
+                ? `${succeededCount} file${succeededCount !== 1 ? 's' : ''} moved`
+                : `${succeededCount} file${succeededCount !== 1 ? 's' : ''} added`
+            )
+          }
+        }
+        window.api.db.allTracks().then(setTracks)
+        setTimeout(() => removeJob(p.jobId), 1500)
+      }
+    })
+
     // Phase 2 — update individual tracks as BPM/key comes in
     window.api.onTrackAnalyzed((data) => {
       updateTrack(data.trackId, {
@@ -229,6 +260,10 @@ function App(): React.JSX.Element {
       window.api.offAnalysisListeners()
       window.api.offImportProgress()
       window.api.offFoldersChanged()
+      // offMoveProgress was missing here before — a pre-existing gap this
+      // touches the same block for, not something new to this task.
+      window.api.offMoveProgress()
+      window.api.offCopyProgress()
       if (batchRefreshTimer.current) clearTimeout(batchRefreshTimer.current)
       if (foldersRefreshTimer.current) clearTimeout(foldersRefreshTimer.current)
     }
@@ -269,6 +304,10 @@ function App(): React.JSX.Element {
 
   async function handleCancelMove(jobId: string): Promise<void> {
     await window.api.fs.cancelMove(jobId)
+  }
+
+  async function handleCancelCopy(jobId: string): Promise<void> {
+    await window.api.fs.cancelCopy(jobId)
   }
 
   // Add import files handler
@@ -316,11 +355,12 @@ function App(): React.JSX.Element {
       {/* Toolbar at the top */}
       <Toolbar onImport={handleImport} activeView={activeView} onImportFiles={handleImportFiles} />
 
-      {/* Background jobs (import, move) — non-modal, stays visible across navigation */}
+      {/* Background jobs (import, move, copy) — non-modal, stays visible across navigation */}
       <BackgroundJobsPanel
         onCancelImport={handleCancelImport}
         onResumeImport={handleResumeImport}
         onCancelMove={handleCancelMove}
+        onCancelCopy={handleCancelCopy}
       />
 
       {/* Phase 2 — analysis progress bar */}
