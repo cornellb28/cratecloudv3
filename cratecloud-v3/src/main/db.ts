@@ -339,6 +339,18 @@ if (!hasRelativePath) {
   db.exec(`ALTER TABLE folders ADD COLUMN relative_path TEXT`)
 }
 
+// Mirrors tracks.missing — set when the watcher sees the directory disappear
+// (unlinkDir) rather than deleting the row outright, so a folder that comes
+// back (recreated, or the DJ was wrong about deleting it) doesn't lose its
+// identity/position in the tree. Cleared when ensureFolderTree reuses this
+// row for a live directory again (see ensureFolderTree below) — the folder
+// container "exists" again; whether its old tracks are the SAME tracks is a
+// separate, harder question left to the identity/relink work.
+const hasFolderMissing = folderColumns.some((c) => c.name === 'missing')
+if (!hasFolderMissing) {
+  db.exec(`ALTER TABLE folders ADD COLUMN missing INTEGER NOT NULL DEFAULT 0`)
+}
+
 db.exec(`
   -- ─────────────────────────────────────────────────────
   -- APP SETTINGS
@@ -426,6 +438,8 @@ db.exec(`
     ON folders(parent_folder_id);
   CREATE UNIQUE INDEX IF NOT EXISTS idx_folders_root_relpath
     ON folders(root_folder_id, relative_path);
+  CREATE INDEX IF NOT EXISTS idx_folders_missing
+    ON folders(missing);
   CREATE INDEX IF NOT EXISTS idx_tracks_folder_id
     ON tracks(folder_id);
   CREATE INDEX IF NOT EXISTS idx_pending_changes_status
@@ -1025,14 +1039,35 @@ export function ensureFolderTree(rootId: number, relativeDirs: string[]): Map<st
   if (!root) throw new Error(`ensureFolderTree: unknown library root ${rootId}`)
 
   const pathToId = new Map<string, number>()
+  // Only rows the caller is actually asking about (root's own '' plus every
+  // path in relativeDirs, built below) get revived if they were missing —
+  // NOT every missing row that happens to exist under this root. Populated
+  // once the existing-rows query below runs.
+  const missingByPath = new Map<string, number>()
   let created = 0
+  let revived = 0
 
   const run = db.transaction(() => {
     const existing = db
-      .prepare('SELECT id, relative_path FROM folders WHERE root_folder_id = ?')
-      .all(rootId) as { id: number; relative_path: string | null }[]
+      .prepare('SELECT id, relative_path, missing FROM folders WHERE root_folder_id = ?')
+      .all(rootId) as { id: number; relative_path: string | null; missing: number }[]
     for (const f of existing) {
-      if (f.relative_path !== null) pathToId.set(f.relative_path, f.id)
+      if (f.relative_path === null) continue
+      pathToId.set(f.relative_path, f.id)
+      if (f.missing) missingByPath.set(f.relative_path, f.id)
+    }
+
+    // The container exists again at this exact path — a watcher addDir (or
+    // a re-scan) found a live directory where we'd previously marked the
+    // row missing. Its tracks stay missing; whether they're the SAME files
+    // is what the identity/relink work resolves, not this.
+    const revive = db.prepare('UPDATE folders SET missing = 0 WHERE id = ?')
+    function reviveIfMissing(relPath: string): void {
+      const id = missingByPath.get(relPath)
+      if (id === undefined) return
+      revive.run(id)
+      missingByPath.delete(relPath)
+      revived++
     }
 
     if (!pathToId.has('')) {
@@ -1045,6 +1080,8 @@ export function ensureFolderTree(rootId: number, relativeDirs: string[]): Map<st
       )
       pathToId.set('', rootRowId)
       created++
+    } else {
+      reviveIfMissing('')
     }
 
     const allPaths = new Set<string>()
@@ -1060,7 +1097,10 @@ export function ensureFolderTree(rootId: number, relativeDirs: string[]): Map<st
     )
 
     for (const relPath of sorted) {
-      if (pathToId.has(relPath)) continue
+      if (pathToId.has(relPath)) {
+        reviveIfMissing(relPath)
+        continue
+      }
       const parts = relPath.split('/')
       const name = parts[parts.length - 1]
       const parentPath = parts.slice(0, -1).join('/')
@@ -1077,17 +1117,25 @@ export function ensureFolderTree(rootId: number, relativeDirs: string[]): Map<st
   })
 
   run()
-  if (created > 0) folderEvents.emit('changed')
+  if (created > 0 || revived > 0) folderEvents.emit('changed')
   return pathToId
 }
 
+// missing = 0 only — a folder the watcher saw disappear (unlinkDir) drops
+// out of the tree the renderer builds from this, same as a missing track
+// already drops out of folder counts. The row itself survives (see
+// markFolderMissing) so it revives in place if the directory comes back.
 export function getFolderTree(rootId?: number): FolderRow[] {
   if (rootId !== undefined) {
     return db
-      .prepare('SELECT * FROM folders WHERE root_folder_id = ? ORDER BY parent_folder_id, name')
+      .prepare(
+        'SELECT * FROM folders WHERE root_folder_id = ? AND missing = 0 ORDER BY parent_folder_id, name'
+      )
       .all(rootId) as FolderRow[]
   }
-  return db.prepare('SELECT * FROM folders ORDER BY parent_folder_id, name').all() as FolderRow[]
+  return db
+    .prepare('SELECT * FROM folders WHERE missing = 0 ORDER BY parent_folder_id, name')
+    .all() as FolderRow[]
 }
 
 // Direct (non-recursive) track counts per folder, tracks currently on disk
@@ -1102,6 +1150,42 @@ export function getFolderTrackCounts(): { folder_id: number; count: number }[] {
        GROUP BY folder_id`
     )
     .all() as { folder_id: number; count: number }[]
+}
+
+// Looks up a folder row by root + relative path without creating it —
+// unlike ensureFolderTree/ensureFolderForDirectory, which always create.
+// Used by the watcher's unlinkDir handler: a directory that's gone should
+// never cause a folder row to be created.
+export function getFolderIdByRelativePath(rootId: number, relativePath: string): number | null {
+  const row = db
+    .prepare('SELECT id FROM folders WHERE root_folder_id = ? AND relative_path = ?')
+    .get(rootId, relativePath) as { id: number } | undefined
+  return row?.id ?? null
+}
+
+// Marks one folder row missing (never deletes it — see the `missing` column
+// comment near its ALTER) and, recursively, every track currently filed
+// under it or any of its descendant folders. Safe to call once per
+// unlinkDir event even for a whole deleted tree: chokidar emits unlinkDir
+// for every directory it previously knew about, not just the top one, so
+// each call's recursive UPDATE is redundant-but-idempotent with its
+// siblings' rather than the only thing doing the work.
+export function markFolderMissing(folderId: number): void {
+  const run = db.transaction(() => {
+    db.prepare('UPDATE folders SET missing = 1 WHERE id = ?').run(folderId)
+    db.prepare(
+      `UPDATE tracks SET missing = 1 WHERE folder_id IN (
+         WITH RECURSIVE descendants(id) AS (
+           SELECT id FROM folders WHERE id = ?
+           UNION ALL
+           SELECT f.id FROM folders f JOIN descendants d ON f.parent_folder_id = d.id
+         )
+         SELECT id FROM descendants
+       )`
+    ).run(folderId)
+  })
+  run()
+  folderEvents.emit('changed')
 }
 
 export function getTracksByFolder(folderId: number, recursive: boolean): Track[] {

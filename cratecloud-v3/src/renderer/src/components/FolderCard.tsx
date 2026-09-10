@@ -28,9 +28,15 @@ export function FolderCard({
   onClick,
   highlighted
 }: FolderCardProps): React.JSX.Element {
+  // A folder with nothing in its subtree yet — just created, or a rename
+  // target waiting on the identity work to relink its tracks. Shown dimmed
+  // rather than hidden (see FolderView's subfolders comment).
+  const isEmpty = trackCount === 0
+
   // audioCount (disk) vs trackCount (imported into the DB) — show both only when they diverge
-  const countLabel =
-    audioCount !== undefined && audioCount !== trackCount
+  const countLabel = isEmpty
+    ? 'Empty'
+    : audioCount !== undefined && audioCount !== trackCount
       ? `${audioCount} track${audioCount !== 1 ? 's' : ''} · ${trackCount} analyzed`
       : `${trackCount} track${trackCount !== 1 ? 's' : ''}`
 
@@ -46,7 +52,8 @@ export function FolderCard({
         padding: '8px',
         margin: '-8px',
         borderRadius: '10px',
-        transition: 'transform 0.15s',
+        opacity: isEmpty ? 0.5 : 1,
+        transition: 'transform 0.15s, opacity 0.15s',
         animation: highlighted ? 'folderHighlight 1.8s ease-out' : undefined
       }}
       onMouseEnter={(e) => (e.currentTarget.style.transform = 'scale(1.02)')}

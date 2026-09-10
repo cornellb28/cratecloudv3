@@ -269,6 +269,7 @@ declare global {
     relative_path: string | null
     created_at: number
     updated_at: number | null
+    missing: number
   }
 
   interface Tag {

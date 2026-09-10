@@ -459,11 +459,14 @@ export function FolderView({ libraryRoots }: FolderViewProps): React.JSX.Element
   // Tracks directly in the current folder
   const folderTracks = tracks.filter((t) => t.folder_id === currentFolderId)
 
-  // Subfolders — hide ones with no audio anywhere in their subtree, same as
-  // the old live-disk listing did
-  const subfolders = (childrenByParent.get(currentFolderId) ?? []).filter(
-    (f) => getTrackCount(f.id) > 0
-  )
+  // Subfolders — every non-missing child of this folder, empty or not.
+  // `folders` already excludes missing = 1 rows (getFolderTree filters at
+  // the DB layer), so a folder the watcher saw disappear drops out here on
+  // its own; nothing extra to check for that. Empty ones still render,
+  // dimmed, rather than hiding — a folder that was just created (or a
+  // directory-only rename target that hasn't gotten tracks re-linked yet)
+  // should be visible, not silently absent.
+  const subfolders = childrenByParent.get(currentFolderId) ?? []
 
   function toggleSelect(id: number): void {
     setSelectedIds((prev) => {

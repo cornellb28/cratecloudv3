@@ -52,6 +52,8 @@ import {
   getAllRoots,
   ensureFolderTree,
   ensureFolderForDirectory,
+  getFolderIdByRelativePath,
+  markFolderMissing,
   folderEvents,
   getFolderTree,
   getFolderTrackCounts,
@@ -2176,6 +2178,44 @@ app.whenReady().then(() => {
         console.log(`[watcher] file deleted: ${filepath}`)
       } catch (err) {
         console.error('[watcher] onFileDeleted error:', err)
+      }
+    },
+
+    // Directory appeared — mirror it into `folders` (and any missing
+    // ancestors, via ensureFolderTree) the same way fs:create-folder and
+    // import already do. If this is the watcher catching up with a folder
+    // CrateCloud itself just created, ensureFolderTree's relative_path
+    // UNIQUE constraint makes the second call a no-op reuse, not a
+    // duplicate row.
+    onDirAdded: async (dirpath, rootId) => {
+      try {
+        const root = getAllRoots().find((r) => r.id === rootId)
+        if (!root) return
+        const relDir = relative(root.path, dirpath)
+        ensureFolderTree(rootId, [relDir])
+        console.log(`[watcher] folder added: ${dirpath}`)
+      } catch (err) {
+        console.error('[watcher] onDirAdded error:', err)
+      }
+    },
+
+    // Directory disappeared — mark it (and everything under it) missing
+    // rather than deleting the row. A rename arrives as this event followed
+    // by a separate onDirAdded for the new path (chokidar has no semantic
+    // rename — see the comment on scheduleDirEvent in libraryWatcher.ts) —
+    // so this always just means "the folder at this exact path is gone,"
+    // never "this folder became that one."
+    // TODO: reconcile renamed dirs via fingerprint once identity task lands.
+    onDirRemoved: async (dirpath, rootId) => {
+      try {
+        const root = getAllRoots().find((r) => r.id === rootId)
+        if (!root) return
+        const relDir = relative(root.path, dirpath)
+        const folderId = getFolderIdByRelativePath(rootId, relDir)
+        if (folderId !== null) markFolderMissing(folderId)
+        console.log(`[watcher] folder removed: ${dirpath}`)
+      } catch (err) {
+        console.error('[watcher] onDirRemoved error:', err)
       }
     },
 

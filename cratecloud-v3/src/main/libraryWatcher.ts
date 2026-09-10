@@ -35,6 +35,34 @@ function isAudio(filepath: string): boolean {
   return AUDIO_EXTENSIONS.has(extname(filepath).toLowerCase())
 }
 
+// Coalesces addDir/unlinkDir per path — a Finder "New Folder" followed by an
+// immediate rename fires multiple raw events within well under a second
+// (chokidar has no semantic rename: a rename is unlinkDir on the old path
+// then addDir on the new one, same as it is for files — see onFileMoved's
+// recentlyUnlinked comment above). Keyed by absolute path, not coalesced
+// across paths, so this does not by itself merge a rename's two paths into
+// one operation — see the TODO on the rename branch in index.ts for that.
+const DIR_EVENT_DEBOUNCE_MS = 500
+const pendingDirEvents = new Map<
+  string,
+  { type: 'add' | 'unlink'; rootId: number; timer: ReturnType<typeof setTimeout> }
+>()
+
+function scheduleDirEvent(
+  dirpath: string,
+  type: 'add' | 'unlink',
+  rootId: number,
+  apply: (dirpath: string, type: 'add' | 'unlink', rootId: number) => void
+): void {
+  const existing = pendingDirEvents.get(dirpath)
+  if (existing) clearTimeout(existing.timer)
+  const timer = setTimeout(() => {
+    pendingDirEvents.delete(dirpath)
+    apply(dirpath, type, rootId)
+  }, DIR_EVENT_DEBOUNCE_MS)
+  pendingDirEvents.set(dirpath, { type, rootId, timer })
+}
+
 // ─── Callbacks ───────────────────────────────────────────
 // Set by index.ts so the watcher can call back into the
 // main process without circular imports
@@ -42,12 +70,16 @@ function isAudio(filepath: string): boolean {
 type OnFileAdded = (filepath: string, rootId: number) => Promise<void>
 type OnFileMoved = (oldPath: string, newPath: string, rootId: number) => Promise<void>
 type OnFileDeleted = (filepath: string, rootId: number) => Promise<void>
+type OnDirAdded = (dirpath: string, rootId: number) => Promise<void>
+type OnDirRemoved = (dirpath: string, rootId: number) => Promise<void>
 type OnRootOffline = (rootId: number, rootPath: string) => void
 type OnRootOnline = (rootId: number, rootPath: string) => void
 
 let onFileAdded: OnFileAdded = async () => {}
 let onFileMoved: OnFileMoved = async () => {}
 let onFileDeleted: OnFileDeleted = async () => {}
+let onDirAdded: OnDirAdded = async () => {}
+let onDirRemoved: OnDirRemoved = async () => {}
 let onRootOffline: OnRootOffline = () => {}
 let onRootOnline: OnRootOnline  = () => {}
 
@@ -55,12 +87,16 @@ export function setWatcherCallbacks(callbacks: {
   onFileAdded: OnFileAdded
   onFileMoved: OnFileMoved
   onFileDeleted: OnFileDeleted
+  onDirAdded: OnDirAdded
+  onDirRemoved: OnDirRemoved
   onRootOffline: OnRootOffline
   onRootOnline: OnRootOnline
 }): void {
   onFileAdded = callbacks.onFileAdded
   onFileMoved = callbacks.onFileMoved
   onFileDeleted = callbacks.onFileDeleted
+  onDirAdded = callbacks.onDirAdded
+  onDirRemoved = callbacks.onDirRemoved
   onRootOffline = callbacks.onRootOffline
   onRootOnline = callbacks.onRootOnline
 }
@@ -135,6 +171,28 @@ export function startWatcher(rootId: number, rootPath: string): void {
     }, 2000)
   })
 
+  // ── Directory added ─────────────────────────────────────
+
+  watcher.on('addDir', (dirpath) => {
+    if (dirpath === rootPath) return // the watched root itself, not a new folder
+
+    console.log(`[watcher] dir added: ${dirpath}`)
+    scheduleDirEvent(dirpath, 'add', rootId, (path, _type, id) => {
+      onDirAdded(path, id).catch((err) => console.error('[watcher] onDirAdded error:', err))
+    })
+  })
+
+  // ── Directory removed ────────────────────────────────────
+
+  watcher.on('unlinkDir', (dirpath) => {
+    if (dirpath === rootPath) return
+
+    console.log(`[watcher] dir removed: ${dirpath}`)
+    scheduleDirEvent(dirpath, 'unlink', rootId, (path, _type, id) => {
+      onDirRemoved(path, id).catch((err) => console.error('[watcher] onDirRemoved error:', err))
+    })
+  })
+
   // ── Root folder goes offline ────────────────────────────
 
   watcher.on('error', (error) => {
@@ -164,6 +222,16 @@ export async function stopWatcher(rootId: number): Promise<void> {
   console.log(`[watcher] stopping watcher for root ${rootId}`)
   await watcher.close()
   watchers.delete(rootId)
+
+  // Drop any debounced dir events still pending for this root — the folder
+  // rows aren't going anywhere, but firing into a closed watcher's root
+  // after the fact (e.g. mid-import pause/resume) serves nothing.
+  for (const [path, entry] of pendingDirEvents.entries()) {
+    if (entry.rootId === rootId) {
+      clearTimeout(entry.timer)
+      pendingDirEvents.delete(path)
+    }
+  }
 }
 
 export async function stopAllWatchers(): Promise<void> {
