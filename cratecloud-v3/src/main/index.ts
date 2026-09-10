@@ -580,23 +580,33 @@ function buildTrackData(
 // duration comparison — not an exact-match field like size or filename.
 const FINGERPRINT_DURATION_TOLERANCE_SEC = 0.5
 
-// A fixed-size read from the start of the file — cheap (one small read, not
-// a full-file hash) but, combined with an already-exact size+duration
-// match, more than enough to tell two genuinely different tracks apart.
-// Only ever called lazily, when size+duration alone left more than one
-// candidate — see findReconcileMatch. Stored on every track at insert time
-// regardless (see buildTrackData's callers): a track can't be hashed once
-// it's gone missing, so the value has to already be sitting on the row
-// before that happens, not computed on demand for the missing side.
+// A 64KB slice ~40% into the file — cheap (one small read, not a full-file
+// hash) but, combined with an already-exact size+duration match, more than
+// enough to tell two genuinely different tracks apart. Deliberately NOT the
+// head or tail of the file: write_tags (sidecar/analyze.py) rewrites the
+// ID3v2/APEv2/MP4 metadata containers that live there, so a hash taken from
+// either end would go stale the moment a track gets its BPM/key written
+// back — exactly the case reconcile most needs to survive. Only ever called
+// lazily, when size+duration alone left more than one candidate — see
+// findReconcileMatch. Stored on every track at insert time regardless (see
+// buildTrackData's callers): a track can't be hashed once it's gone
+// missing, so the value has to already be sitting on the row before that
+// happens, not computed on demand for the missing side.
 const PARTIAL_HASH_BYTES = 65536
 
 async function computePartialHash(filepath: string): Promise<string | null> {
   try {
+    const { size } = await stat(filepath)
+    if (size <= PARTIAL_HASH_BYTES) {
+      const buffer = await readFile(filepath)
+      return createHash('sha256').update(buffer).digest('hex')
+    }
+    const offset = Math.floor(size * 0.4)
     const handle = await open(filepath, 'r')
     try {
       const buffer = Buffer.alloc(PARTIAL_HASH_BYTES)
-      const { bytesRead } = await handle.read(buffer, 0, PARTIAL_HASH_BYTES, 0)
-      return createHash('sha1').update(buffer.subarray(0, bytesRead)).digest('hex')
+      const { bytesRead } = await handle.read(buffer, 0, PARTIAL_HASH_BYTES, offset)
+      return createHash('sha256').update(buffer.subarray(0, bytesRead)).digest('hex')
     } finally {
       await handle.close()
     }
