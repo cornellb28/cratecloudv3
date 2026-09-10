@@ -1,4 +1,5 @@
 import React, { useEffect, useRef, useState } from 'react'
+import { toast } from 'sonner'
 import { useLibraryStore } from './store/useLibraryStore'
 import { Sidebar } from './components/Sidebar'
 import { Toolbar } from './components/Toolbar'
@@ -35,7 +36,8 @@ function App(): React.JSX.Element {
     setAllTrackTags,
     setFolderData,
     upsertJob,
-    removeJob
+    removeJob,
+    mergeTracks
   } = useLibraryStore()
   const [activeView, setActiveView] = useState<View>('dashboard')
   // Add library roots to app state
@@ -170,6 +172,39 @@ function App(): React.JSX.Element {
       }, FOLDERS_REFETCH_DEBOUNCE_MS)
     })
 
+    // Move job progress — trackIds isn't part of the wire payload (it never
+    // changes mid-job, so there's no point re-sending it every tick); the
+    // dispatcher (MoveFileButton/BulkBar) seeds it into the store when the
+    // job is created, and this just carries it forward on every update.
+    window.api.onMoveProgress((p) => {
+      const existing = useLibraryStore.getState().jobs[p.jobId]
+      const trackIds = existing && existing.type === 'move' ? existing.trackIds : []
+      upsertJob({ ...p, type: 'move', trackIds })
+
+      if (p.phase === 'done' || p.phase === 'cancelled') {
+        if (p.phase === 'done') {
+          const failedCount = p.failed.length
+          const succeededCount = p.done - failedCount
+          if (failedCount > 0) {
+            toast.error(`${succeededCount} moved, ${failedCount} failed`, {
+              description: p.failed
+                .map((f) => `${f.filepath.split('/').pop()}: ${f.error}`)
+                .join('\n')
+              // TODO: retry failed — surface a "Retry" action here once that
+              // flow exists; out of scope for this task.
+            })
+          } else {
+            toast.success(`${succeededCount} moved`)
+          }
+        }
+
+        if (trackIds.length > 0) {
+          window.api.db.tracksByIds(trackIds).then(mergeTracks)
+        }
+        setTimeout(() => removeJob(p.jobId), 1500)
+      }
+    })
+
     // Phase 2 — update individual tracks as BPM/key comes in
     window.api.onTrackAnalyzed((data) => {
       updateTrack(data.trackId, {
@@ -197,7 +232,7 @@ function App(): React.JSX.Element {
       if (batchRefreshTimer.current) clearTimeout(batchRefreshTimer.current)
       if (foldersRefreshTimer.current) clearTimeout(foldersRefreshTimer.current)
     }
-  }, [setTracks, updateTrack, upsertJob, removeJob, setFolderData])
+  }, [setTracks, updateTrack, upsertJob, removeJob, setFolderData, mergeTracks])
 
   // ── Import handlers ───────────────────────────────────
   async function handleImport(): Promise<void> {
@@ -230,6 +265,10 @@ function App(): React.JSX.Element {
       setTracks(all)
     }
     setAnalyzing(false)
+  }
+
+  async function handleCancelMove(jobId: string): Promise<void> {
+    await window.api.fs.cancelMove(jobId)
   }
 
   // Add import files handler
@@ -277,10 +316,11 @@ function App(): React.JSX.Element {
       {/* Toolbar at the top */}
       <Toolbar onImport={handleImport} activeView={activeView} onImportFiles={handleImportFiles} />
 
-      {/* Background jobs (import today; move once added) — non-modal, stays visible across navigation */}
+      {/* Background jobs (import, move) — non-modal, stays visible across navigation */}
       <BackgroundJobsPanel
         onCancelImport={handleCancelImport}
         onResumeImport={handleResumeImport}
+        onCancelMove={handleCancelMove}
       />
 
       {/* Phase 2 — analysis progress bar */}

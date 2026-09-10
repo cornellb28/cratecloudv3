@@ -86,11 +86,15 @@ declare global {
         markAnalyzed: (id: number) => Promise<{ ok: boolean; error?: string }>
         tracksByFolder: (folderId: number, recursive: boolean) => Promise<Track[]>
         folderTrackCounts: () => Promise<{ folder_id: number; count: number }[]>
+        tracksByIds: (ids: number[]) => Promise<Track[]>
       }
 
       folders: {
         tree: (rootId?: number) => Promise<FolderRow[]>
       }
+
+      onMoveProgress: (cb: (p: MoveProgressPayload) => void) => void
+      offMoveProgress: () => void
 
       watcher: {
         pendingChanges: () => Promise<PendingChange[]>
@@ -150,21 +154,21 @@ declare global {
       }
 
       fs: {
+        // Job-based — see MoveJob/runMoveJob in main/index.ts. Both resolve
+        // immediately with a jobId; progress comes over onMoveProgress.
         moveFile: (
           from: string,
           to: string
-        ) => Promise<{
-          ok: boolean
-          newPath?: string
-          underRoot?: boolean
-          error?: string
-          // Temporary diagnostic — see moveFileToFolder's comment in main/index.ts.
-          diagnostics?: { crossDevice: boolean; fileSizeMB: number; durationMs: number }
-        }>
-        moveFiles: (
-          from: string[],
-          to: string
-        ) => Promise<{ ok: boolean; succeeded: number; failed: number; results: FileMoveResult[] }>
+        ) => Promise<{ ok: boolean; jobId?: string; error?: string }>
+        moveFiles: (payload: {
+          trackIds: number[]
+          destAbsolutePath: string
+        }) => Promise<{ jobId: string }>
+        cancelMove: (jobId: string) => Promise<{ ok: boolean; error?: string }>
+        isCrossDevice: (
+          filepaths: string[],
+          destPath: string
+        ) => Promise<{ ok: boolean; crossDevice?: boolean; totalBytes?: number; error?: string }>
         renameFile: (
           filepath: string,
           newName: string
@@ -332,11 +336,18 @@ declare global {
     audioCount: number
   }
 
-  interface FileMoveResult {
-    path: string
-    ok: boolean
-    newPath?: string
-    error?: string
+  // TODO: independently redefined here, in main/index.ts, and in
+  // preload/index.ts — see the same TODO on JobState in useLibraryStore.ts.
+  interface MoveProgressPayload {
+    jobId: string
+    phase: 'running' | 'done' | 'cancelled' | 'error'
+    done: number
+    total: number
+    currentFile: string
+    bytesCopied: number
+    totalBytes: number
+    crossDevice: boolean
+    failed: { trackId: number; filepath: string; error: string }[]
   }
 
   interface LibraryRoot {

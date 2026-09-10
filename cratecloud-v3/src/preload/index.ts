@@ -12,6 +12,20 @@ interface ImportProgressPayload {
   estimateSeconds?: number
 }
 
+// TODO: independently redefined here, in main/index.ts, and in global.d.ts
+// — see the same TODO on JobState in useLibraryStore.ts.
+interface MoveProgressPayload {
+  jobId: string
+  phase: 'running' | 'done' | 'cancelled' | 'error'
+  done: number
+  total: number
+  currentFile: string
+  bytesCopied: number
+  totalBytes: number
+  crossDevice: boolean
+  failed: { trackId: number; filepath: string; error: string }[]
+}
+
 // Custom APIs for renderer
 const api = {
   // ── Audio analysis ─────────────────────────────────────────────────────
@@ -82,7 +96,8 @@ const api = {
     markAnalyzed: (id: number) => ipcRenderer.invoke('db:mark-analyzed', id),
     tracksByFolder: (folderId: number, recursive: boolean) =>
       ipcRenderer.invoke('tracks:by-folder', folderId, recursive),
-    folderTrackCounts: () => ipcRenderer.invoke('tracks:folder-counts')
+    folderTrackCounts: () => ipcRenderer.invoke('tracks:folder-counts'),
+    tracksByIds: (ids: number[]) => ipcRenderer.invoke('db:tracks-by-ids', ids)
   },
 
   // Folders
@@ -147,14 +162,23 @@ const api = {
     sweepOrphaned: () => ipcRenderer.invoke('artwork:sweep-orphaned')
   },
   fs: {
+    // Job-based — see MoveJob/runMoveJob in main/index.ts. Both resolve
+    // immediately with a jobId; progress comes over onMoveProgress.
     moveFile: (from: string, to: string) => ipcRenderer.invoke('fs:move-file', from, to),
-    moveFiles: (from: string[], to: string) => ipcRenderer.invoke('fs:move-files', from, to),
+    moveFiles: (payload: { trackIds: number[]; destAbsolutePath: string }) =>
+      ipcRenderer.invoke('fs:move-files', payload),
+    cancelMove: (jobId: string) => ipcRenderer.invoke('fs:cancel-move', jobId),
+    isCrossDevice: (filepaths: string[], destPath: string) =>
+      ipcRenderer.invoke('fs:is-cross-device', filepaths, destPath),
     renameFile: (filepath: string, newName: string) =>
       ipcRenderer.invoke('fs:rename-file', filepath, newName),
     createFolder: (parent: string, name: string) =>
       ipcRenderer.invoke('fs:create-folder', parent, name),
     readFolder: (folderPath: string) => ipcRenderer.invoke('fs:read-folder', folderPath)
   },
+  onMoveProgress: (cb: (p: MoveProgressPayload) => void) =>
+    ipcRenderer.on('move:progress', (_e, p) => cb(p)),
+  offMoveProgress: () => ipcRenderer.removeAllListeners('move:progress'),
   watcher: {
     pendingChanges: () => ipcRenderer.invoke('watcher:pending-changes'),
     acceptChange: (id: number) => ipcRenderer.invoke('watcher:accept-change', id),

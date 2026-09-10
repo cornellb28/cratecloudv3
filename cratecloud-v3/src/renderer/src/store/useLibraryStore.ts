@@ -1,15 +1,18 @@
 import { create } from 'zustand'
 
-// TODO: ImportProgressPayload is independently redefined in main/index.ts,
-// preload/index.ts, and global.d.ts (three copies of the same shape,
-// pre-existing before this file). JobState below adds a fourth de-facto
-// copy via the ambient type, and a future MoveProgressPayload variant will
-// repeat the pattern. Worth hoisting all job/progress payload shapes into
+// TODO: ImportProgressPayload/MoveProgressPayload are each independently
+// redefined in main/index.ts, preload/index.ts, and global.d.ts (three
+// copies of every shape). JobState below adds a fourth de-facto copy via
+// the ambient types. Worth hoisting all job/progress payload shapes into
 // one shared types module imported by main, preload, and renderer instead
 // of keeping them in sync by hand.
-// Only 'import' exists today — a 'move' variant widens this union once move
-// jobs are added, at which point BackgroundJobsPanel/App.tsx switch on `type`.
-type JobState = ImportProgressPayload & { type: 'import' }
+// trackIds isn't part of the wire payload (move:progress never repeats it —
+// it can't change mid-job) — the dispatcher (MoveFileButton/BulkBar) seeds
+// it in when the job is created; App.tsx's onMoveProgress carries it
+// forward on every update after that.
+type JobState =
+  | (ImportProgressPayload & { type: 'import' })
+  | (MoveProgressPayload & { type: 'move'; trackIds: number[] })
 
 // ─── State shape ─────────────────────────────────────────
 
@@ -50,6 +53,9 @@ interface LibraryState {
   addTrack: (track: Track) => void
   setBoards: (boards: Board[]) => void
   updateTrack: (id: number, changes: Partial<Track>) => void
+  // Replaces a set of tracks by id in one pass — used after a move job so
+  // only the tracks it actually touched get refetched, instead of allTracks().
+  mergeTracks: (updated: Track[]) => void
   removeTrack: (id: number) => void
   setActiveTrack: (id: number | null) => void
   setAnalyzing: (value: boolean) => void
@@ -117,6 +123,12 @@ export const useLibraryStore = create<LibraryState>((set) => ({
   // Called after editing metadata in the Inspector
   updateTrack: (id, changes) =>
     set((state) => ({ tracks: state.tracks.map((t) => (t.id === id ? { ...t, ...changes } : t)) })),
+
+  mergeTracks: (updated) =>
+    set((state) => {
+      const byId = new Map(updated.map((t) => [t.id, t]))
+      return { tracks: state.tracks.map((t) => byId.get(t.id) ?? t) }
+    }),
 
   // Remove one track by id
   removeTrack: (id) =>

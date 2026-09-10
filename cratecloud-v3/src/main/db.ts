@@ -837,6 +837,24 @@ export function getTrackById(id: number): Track | undefined {
   return stmts.getTrackById.get(id) as Track | undefined
 }
 
+// Bulk lookup by id — used to refetch just the tracks a move job touched
+// instead of the whole library (getAllTracks). Chunked the same way
+// getTrackTagsForTracks is, under SQLite's ~999 bound parameter limit.
+const TRACK_LOOKUP_CHUNK_SIZE = 900
+
+export function getTracksByIds(ids: number[]): Track[] {
+  if (ids.length === 0) return []
+  const result: Track[] = []
+  for (let i = 0; i < ids.length; i += TRACK_LOOKUP_CHUNK_SIZE) {
+    const chunk = ids.slice(i, i + TRACK_LOOKUP_CHUNK_SIZE)
+    const placeholders = chunk.map(() => '?').join(',')
+    result.push(
+      ...(db.prepare(`SELECT * FROM tracks WHERE id IN (${placeholders})`).all(...chunk) as Track[])
+    )
+  }
+  return result
+}
+
 export function getTrackByFilepath(filepath: string): Track | undefined {
   return stmts.getTrackByFilepath.get(filepath) as Track | undefined
 }

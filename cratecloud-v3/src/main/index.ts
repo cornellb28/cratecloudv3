@@ -4,13 +4,15 @@ import { electronApp, optimizer, is } from '@electron-toolkit/utils'
 import icon from '../../resources/icon.png?asset'
 import { execSync } from 'child_process'
 import { randomUUID, createHash } from 'crypto'
-import { rename, stat, copyFile, unlink, mkdir, readdir, readFile, writeFile } from 'fs/promises'
+import { rename, stat, unlink, mkdir, readdir, readFile, writeFile } from 'fs/promises'
+import { createReadStream, createWriteStream } from 'fs'
 import { startWatcher, stopWatcher, stopAllWatchers, setWatcherCallbacks } from './libraryWatcher'
 import {
   insertTrack,
   insertTracksBatch,
   getAllTracks,
   getTrackById,
+  getTracksByIds,
   updateTrackMeta,
   markTrackMissing,
   getAllTags,
@@ -106,10 +108,45 @@ interface ImportJob {
   batchThroughputs: number[] // files/sec, rolling window — used for the ETA
 }
 
-// One registry for every background job type, discriminated by `type` —
-// only 'import' exists today; a 'move' job (TODO, next task) widens this to
-// `Map<string, ImportJob | MoveJob>` instead of a second parallel Map.
-type Job = ImportJob
+// ── Move job state (in-memory only) ──────────────────────────────────────
+type MovePhase = 'running' | 'done' | 'cancelled' | 'error'
+
+interface MoveFailure {
+  trackId: number
+  filepath: string
+  error: string
+}
+
+interface MoveProgressPayload {
+  jobId: string
+  phase: MovePhase
+  done: number
+  total: number
+  currentFile: string
+  bytesCopied: number // current file only, cross-device copies only
+  totalBytes: number // current file only, cross-device copies only; 0 for a rename
+  crossDevice: boolean // true once any EXDEV fallback has occurred in this job
+  failed: MoveFailure[]
+}
+
+interface MoveJob {
+  type: 'move'
+  id: string
+  trackIds: number[]
+  destAbsolutePath: string
+  cancelRequested: boolean
+  status: MovePhase
+  doneCount: number
+  currentFile: string
+  bytesCopied: number
+  totalBytes: number
+  crossDevice: boolean
+  failed: MoveFailure[]
+  lastEmitAt: number
+}
+
+// One registry for every background job type, discriminated by `type`.
+type Job = ImportJob | MoveJob
 const jobs = new Map<string, Job>()
 
 const COUNT_PROGRESS_INTERVAL_MS = 250
@@ -459,71 +496,174 @@ function buildTrackData(
   }
 }
 
-// move files to folders
-//
-// DIAGNOSTIC (temporary): returns crossDevice/fileSizeMB/durationMs and
-// logs them, to confirm whether "the move is slow" is the EXDEV fallback
-// below (rename() fails across filesystems/volumes, forcing a real
-// copy+verify+delete of the whole file) versus something else. rename() on
-// the same device is a metadata-only op — near-instant regardless of file
-// size — so a slow move should show crossDevice: true here.
-async function moveFileToFolder(
+// Copies fromPath to toPath in 1MB chunks, reporting cumulative bytes
+// copied as it goes — the EXDEV fallback's replacement for the old
+// all-or-nothing copyFile(), which had no way to report progress on a
+// large file mid-copy.
+function streamCopyWithProgress(
   fromPath: string,
-  toFolder: string
-): Promise<{ path: string; crossDevice: boolean; fileSizeMB: number; durationMs: number }> {
-  const ext = extname(fromPath)
-  const base = basename(fromPath, ext)
-  let toPath = join(toFolder, basename(fromPath))
-  let counter = 1
+  toPath: string,
+  onProgress: (bytesCopied: number) => void
+): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const readStream = createReadStream(fromPath, { highWaterMark: 1024 * 1024 })
+    const writeStream = createWriteStream(toPath)
+    let bytesCopied = 0
 
-  // Collision detection - find a free filename at the destination
-  while (true) {
-    try {
-      await stat(toPath)
-      // stat succeeded -> file exists -> try next name
-      toPath = join(toFolder, `${base} (${counter++}${ext})`)
-    } catch {
-      // stat threw -> path does not exist -> safe to use
-    }
-    if (counter > 99) {
-      throw new Error('Too many filename collisions at destination')
-    }
+    readStream.on('data', (chunk: string | Buffer) => {
+      bytesCopied += chunk.length
+      onProgress(bytesCopied)
+    })
+    readStream.on('error', (err) => {
+      writeStream.destroy()
+      reject(err)
+    })
+    writeStream.on('error', reject)
+    writeStream.on('finish', resolve)
+    readStream.pipe(writeStream)
+  })
+}
+
+// Moves one track's file to job.destAbsolutePath and updates its DB row.
+// Every failure mode is caught and recorded in job.failed — this function
+// never throws, so one bad file can never abort the rest of the job.
+async function moveOneTrackFile(job: MoveJob, trackId: number): Promise<void> {
+  const track = getTrackById(trackId)
+  if (!track) {
+    job.failed.push({ trackId, filepath: '', error: 'Track not found in the library' })
+    return
   }
 
-  const sourceSize = (await stat(fromPath)).size
-  const fileSizeMB = Math.round((sourceSize / (1024 * 1024)) * 100) / 100
-  const start = Date.now()
-  let crossDevice = false
+  const fromPath = track.filepath
+  job.currentFile = fromPath
+  job.bytesCopied = 0
+  job.totalBytes = 0
+
+  const toPath = join(job.destAbsolutePath, basename(fromPath))
 
   try {
-    await rename(fromPath, toPath)
-  } catch (err) {
-    if ((err as NodeJS.ErrnoException).code === 'EXDEV') {
-      // Cross-device move - copy then verify than delete
-      crossDevice = true
-      await copyFile(fromPath, toPath)
-      const copiedSize = (await stat(toPath)).size
+    // Never overwrite — a name collision fails this file, not the job.
+    try {
+      await stat(toPath)
+      job.failed.push({ trackId, filepath: fromPath, error: 'Destination already exists' })
+      return
+    } catch {
+      // Good — does not exist
+    }
 
+    // Set once a size mismatch or a stale-source unlink happens below, but
+    // the DB row still gets updated — the file itself landed correctly.
+    let unlinkError: string | null = null
+
+    try {
+      await rename(fromPath, toPath)
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code !== 'EXDEV') throw err
+
+      // Cross-device move — stream-copy, verify by size, then remove the source.
+      job.crossDevice = true
+      const sourceSize = (await stat(fromPath)).size
+      job.totalBytes = sourceSize
+
+      // TODO: sweep orphaned partial copies on startup. If the app is
+      // killed mid-copy, toPath is left behind (writes go straight to it,
+      // no temp-file+rename), but the DB row is untouched — updateTrackFilepath
+      // only runs after this succeeds — so the source is never lost, just a
+      // stray partial file to clean up.
+      await streamCopyWithProgress(fromPath, toPath, (bytesCopied) => {
+        job.bytesCopied = bytesCopied
+      })
+
+      const copiedSize = (await stat(toPath)).size
       if (copiedSize !== sourceSize) {
         await unlink(toPath).catch(() => {})
         throw new Error(
-          `Copy verification failed (${copiedSize} bytes copied, ` +
-            `expected ${sourceSize}) — source left untouched`
+          `Copy verification failed (${copiedSize} of ${sourceSize} bytes) — source left untouched`
         )
       }
 
-      await unlink(fromPath)
-    } else {
-      throw err
+      try {
+        await unlink(fromPath)
+      } catch (err) {
+        // The copy is good — do not roll it back. The DB still gets pointed
+        // at the new path below; the stale source just needs manual cleanup.
+        unlinkError = (err as Error).message
+      }
     }
+
+    // The only point the DB changes — a crash before this leaves the row
+    // pointing at the still-intact source.
+    updateTrackFilepath(fromPath, toPath)
+
+    if (unlinkError) {
+      job.failed.push({
+        trackId,
+        filepath: fromPath,
+        error: `Moved, but couldn't remove the original file: ${unlinkError}`
+      })
+    }
+  } catch (err) {
+    job.failed.push({ trackId, filepath: fromPath, error: (err as Error).message })
+  }
+}
+
+function buildMoveProgressPayload(job: MoveJob, phaseOverride?: MovePhase): MoveProgressPayload {
+  return {
+    jobId: job.id,
+    phase: phaseOverride ?? job.status,
+    done: job.doneCount,
+    total: job.trackIds.length,
+    currentFile: job.currentFile,
+    bytesCopied: job.bytesCopied,
+    totalBytes: job.totalBytes,
+    crossDevice: job.crossDevice,
+    failed: job.failed
+  }
+}
+
+const MOVE_PROGRESS_INTERVAL_MS = 250
+
+// Throttled the same way import progress is: every 250ms or every file
+// completion (force), never per-chunk — a big cross-device copy would
+// otherwise emit on every 1MB stream chunk.
+function maybeEmitMoveProgress(
+  event: Electron.IpcMainInvokeEvent,
+  job: MoveJob,
+  force = false
+): void {
+  const now = Date.now()
+  if (force || now - job.lastEmitAt >= MOVE_PROGRESS_INTERVAL_MS) {
+    job.lastEmitAt = now
+    event.sender.send('move:progress', buildMoveProgressPayload(job))
+  }
+}
+
+// Sequential, one file at a time — the cancel flag is only checked between
+// files (never mid-copy), and moveOneTrackFile never throws, so a bad file
+// can't abort the ones after it. No resume for move jobs (unlike import):
+// cancelling ends the job for good, matching Part B/C's scope.
+async function runMoveJob(event: Electron.IpcMainInvokeEvent, job: MoveJob): Promise<void> {
+  job.status = 'running'
+
+  for (const trackId of job.trackIds) {
+    if (job.cancelRequested) {
+      job.status = 'cancelled'
+      maybeEmitMoveProgress(event, job, true)
+      jobs.delete(job.id)
+      return
+    }
+
+    await moveOneTrackFile(job, trackId)
+    job.doneCount++
+    job.currentFile = ''
+    job.bytesCopied = 0
+    job.totalBytes = 0
+    maybeEmitMoveProgress(event, job, true)
   }
 
-  const durationMs = Date.now() - start
-  console.log(
-    `[move] ${crossDevice ? 'cross-device copy' : 'same-device rename'} — ` +
-      `${fileSizeMB}MB in ${durationMs}ms (${fromPath} -> ${toPath})`
-  )
-  return { path: toPath, crossDevice, fileSizeMB, durationMs }
+  job.status = 'done'
+  maybeEmitMoveProgress(event, job, true)
+  jobs.delete(job.id)
 }
 
 // Update just the analysis fields after Phase 2 completes
@@ -1074,6 +1214,8 @@ app.whenReady().then(() => {
 
   ipcMain.handle('db:track-by-id', (_e, id: number) => getTrackById(id))
 
+  ipcMain.handle('db:tracks-by-ids', (_e, ids: number[]) => getTracksByIds(ids))
+
   // ── Artwork ────────────────────────────────────────────
   ipcMain.handle('artwork:path-for', (_e, hash: string | null, size: 'full' | 'thumb') =>
     artworkPathFor(hash, size)
@@ -1132,68 +1274,79 @@ app.whenReady().then(() => {
     }
   })
 
-  // ── Move a single file to a folder ──────────────────────
+  // ── Move files to a folder (job-based — see MoveJob/runMoveJob above) ──
 
-  ipcMain.handle('fs:move-file', async (_e, fromPath: string, toFolder: string) => {
+  function createMoveJob(trackIds: number[], destAbsolutePath: string): MoveJob {
+    return {
+      type: 'move',
+      id: randomUUID(),
+      trackIds,
+      destAbsolutePath,
+      cancelRequested: false,
+      status: 'running',
+      doneCount: 0,
+      currentFile: '',
+      bytesCopied: 0,
+      totalBytes: 0,
+      crossDevice: false,
+      failed: [],
+      lastEmitAt: 0
+    }
+  }
+
+  function startMoveJob(
+    event: Electron.IpcMainInvokeEvent,
+    trackIds: number[],
+    destAbsolutePath: string
+  ): string {
+    const job = createMoveJob(trackIds, destAbsolutePath)
+    jobs.set(job.id, job)
+    runMoveJob(event, job) // fire-and-forget — progress goes out over move:progress
+    return job.id
+  }
+
+  ipcMain.handle(
+    'fs:move-files',
+    (event, payload: { trackIds: number[]; destAbsolutePath: string }) => {
+      return { jobId: startMoveJob(event, payload.trackIds, payload.destAbsolutePath) }
+    }
+  )
+
+  // Thin wrapper around fs:move-files for a single file — same input
+  // signature as before, but now returns a jobId instead of a final result
+  // (moves are async jobs now; MoveFileButton listens for move:progress).
+  ipcMain.handle('fs:move-file', (event, fromPath: string, toFolder: string) => {
+    const track = getTrackByFilepath(fromPath)
+    if (!track) return { ok: false, error: 'Track not found for this file' }
+    return { ok: true, jobId: startMoveJob(event, [track.id], toFolder) }
+  })
+
+  ipcMain.handle('fs:cancel-move', (_e, jobId: string) => {
+    const job = jobs.get(jobId)
+    if (!job || job.type !== 'move') {
+      return { ok: false, error: 'Unknown or already-finished job' }
+    }
+    job.cancelRequested = true
+    return { ok: true }
+  })
+
+  // Pre-move check for the renderer's confirm dialog — one stat on the
+  // destination, one per source file (needed anyway for totalBytes, since
+  // file_size_mb is never populated on the track row).
+  ipcMain.handle('fs:is-cross-device', async (_e, filepaths: string[], destPath: string) => {
     try {
-      // Validate — source must exist
-      await stat(fromPath)
-
-      // Validate — destination must be a directory
-      const destStat = await stat(toFolder)
-      if (!destStat.isDirectory()) {
-        return { ok: false, error: 'Destination is not a folder' }
+      const destStat = await stat(destPath)
+      let totalBytes = 0
+      let crossDevice = false
+      for (const filepath of filepaths) {
+        const s = await stat(filepath)
+        totalBytes += s.size
+        if (s.dev !== destStat.dev) crossDevice = true
       }
-
-      // Move the file
-      const moveResult = await moveFileToFolder(fromPath, toFolder)
-
-      // Update DB — filepath (and folder_id, via updateTrackFilepath) changed
-      updateTrackFilepath(fromPath, moveResult.path)
-
-      // Not an error — a move to an untracked location is valid, just worth
-      // telling the DJ about since the track's folder_id will be null.
-      const underRoot = getAllRoots().some((r) => isPathUnder(toFolder, r.path))
-
-      return {
-        ok: true,
-        newPath: moveResult.path,
-        underRoot,
-        // Temporary diagnostic — see moveFileToFolder's comment.
-        diagnostics: {
-          crossDevice: moveResult.crossDevice,
-          fileSizeMB: moveResult.fileSizeMB,
-          durationMs: moveResult.durationMs
-        }
-      }
+      return { ok: true, crossDevice, totalBytes }
     } catch (err) {
       return { ok: false, error: (err as Error).message }
     }
-  })
-
-  // ── Move multiple files to a folder ─────────────────────
-
-  ipcMain.handle('fs:move-files', async (_e, fromPaths: string[], toFolder: string) => {
-    const results: { path: string; ok: boolean; newPath?: string; error?: string }[] = []
-
-    for (const fromPath of fromPaths) {
-      try {
-        const moveResult = await moveFileToFolder(fromPath, toFolder)
-        updateTrackFilepath(fromPath, moveResult.path)
-        results.push({ path: fromPath, ok: true, newPath: moveResult.path })
-      } catch (err) {
-        results.push({
-          path: fromPath,
-          ok: false,
-          error: (err as Error).message
-        })
-      }
-    }
-
-    const succeeded = results.filter((r) => r.ok).length
-    const failed = results.filter((r) => !r.ok).length
-
-    return { ok: true, succeeded, failed, results }
   })
 
   // ── Rename a file on disk ────────────────────────────────

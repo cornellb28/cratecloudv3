@@ -7,6 +7,10 @@ function formatEstimate(seconds: number): string {
   return `about ${Math.round(seconds / 60)} min`
 }
 
+function formatMB(bytes: number): string {
+  return (bytes / (1024 * 1024)).toFixed(1)
+}
+
 function importStatusLabel(p: ImportProgressPayload): string {
   if (p.phase === 'counting') {
     return `Scanning… ${p.found} tracks found — ${p.currentFolder}`
@@ -26,18 +30,102 @@ function importStatusLabel(p: ImportProgressPayload): string {
   return 'Import error'
 }
 
+function moveStatusLabel(p: MoveProgressPayload): string {
+  const label = `Moving ${p.total} file${p.total !== 1 ? 's' : ''} — ${p.done} of ${p.total}`
+
+  if (p.phase === 'cancelled') return `Cancelled — ${p.done} of ${p.total} moved`
+  if (p.phase === 'done') {
+    return p.failed.length > 0
+      ? `Done — ${p.done - p.failed.length} moved, ${p.failed.length} failed`
+      : `Done — ${p.done} moved`
+  }
+  if (!p.currentFile) return label
+
+  const filename = p.currentFile.split('/').pop() ?? p.currentFile
+  if (p.crossDevice && p.totalBytes > 0) {
+    return `${label} · ${filename} (${formatMB(p.bytesCopied)} / ${formatMB(p.totalBytes)} MB)`
+  }
+  return `${label} · ${filename}`
+}
+
+const cancelButtonStyle: React.CSSProperties = {
+  flexShrink: 0,
+  background: 'transparent',
+  border: '1px solid #33334a',
+  color: '#e8e8f0',
+  borderRadius: '4px',
+  padding: '2px 8px',
+  fontSize: '11px',
+  cursor: 'pointer'
+}
+
+const resumeButtonStyle: React.CSSProperties = {
+  ...cancelButtonStyle,
+  border: '1px solid #7f77dd',
+  color: '#7f77dd'
+}
+
+function ProgressRow({
+  label,
+  pct,
+  showBar,
+  action
+}: {
+  label: string
+  pct: number
+  showBar: boolean
+  action?: React.ReactNode
+}): React.JSX.Element {
+  return (
+    <div style={{ marginBottom: '1rem' }}>
+      <div
+        style={{
+          color: '#7f77dd',
+          marginBottom: '4px',
+          fontSize: '12px',
+          display: 'flex',
+          justifyContent: 'space-between',
+          alignItems: 'center',
+          gap: '12px'
+        }}
+      >
+        <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+          {label}
+        </span>
+        {action}
+      </div>
+      {showBar && (
+        <div
+          style={{ background: '#1e1e2a', borderRadius: '4px', height: '6px', overflow: 'hidden' }}
+        >
+          <div
+            style={{
+              background: '#7f77dd',
+              height: '100%',
+              width: `${pct}%`,
+              transition: 'width 0.2s ease',
+              borderRadius: '4px'
+            }}
+          />
+        </div>
+      )}
+    </div>
+  )
+}
+
 interface BackgroundJobsPanelProps {
   onCancelImport: (jobId: string) => void
   onResumeImport: (jobId: string) => void
+  onCancelMove: (jobId: string) => void
 }
 
-// Renders every job in the shared `jobs` store slice — import today, a
-// 'move' variant (TODO, see useLibraryStore's JobState comment) once move
-// jobs land. One panel, one visual language for "something is running in
-// the background," instead of a bespoke bar per job type.
+// Renders every job in the shared `jobs` store slice — import and move
+// today. One panel, one visual language for "something is running in the
+// background," instead of a bespoke bar per job type.
 export function BackgroundJobsPanel({
   onCancelImport,
-  onResumeImport
+  onResumeImport,
+  onCancelMove
 }: BackgroundJobsPanelProps): React.JSX.Element | null {
   const jobs = useLibraryStore((s) => s.jobs)
   const jobList = Object.values(jobs)
@@ -47,82 +135,45 @@ export function BackgroundJobsPanel({
   return (
     <>
       {jobList.map((job) => {
-        // Only 'import' exists today — see JobState in useLibraryStore.ts.
-        const pct = job.total > 0 ? Math.round((job.scanned / job.total) * 100) : 0
+        if (job.type === 'move') {
+          const pct = job.total > 0 ? Math.round((job.done / job.total) * 100) : 0
+          return (
+            <ProgressRow
+              key={job.jobId}
+              label={moveStatusLabel(job)}
+              pct={pct}
+              showBar
+              action={
+                job.phase === 'running' ? (
+                  <button onClick={() => onCancelMove(job.jobId)} style={cancelButtonStyle}>
+                    Cancel
+                  </button>
+                ) : undefined
+              }
+            />
+          )
+        }
 
+        // 'import'
+        const pct = job.total > 0 ? Math.round((job.scanned / job.total) * 100) : 0
         return (
-          <div key={job.jobId} style={{ marginBottom: '1rem' }}>
-            <div
-              style={{
-                color: '#7f77dd',
-                marginBottom: '4px',
-                fontSize: '12px',
-                display: 'flex',
-                justifyContent: 'space-between',
-                alignItems: 'center',
-                gap: '12px'
-              }}
-            >
-              <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                {importStatusLabel(job)}
-              </span>
-              {job.phase === 'parsing' && (
-                <button
-                  onClick={() => onCancelImport(job.jobId)}
-                  style={{
-                    flexShrink: 0,
-                    background: 'transparent',
-                    border: '1px solid #33334a',
-                    color: '#e8e8f0',
-                    borderRadius: '4px',
-                    padding: '2px 8px',
-                    fontSize: '11px',
-                    cursor: 'pointer'
-                  }}
-                >
+          <ProgressRow
+            key={job.jobId}
+            label={importStatusLabel(job)}
+            pct={pct}
+            showBar={job.phase !== 'counting'}
+            action={
+              job.phase === 'parsing' ? (
+                <button onClick={() => onCancelImport(job.jobId)} style={cancelButtonStyle}>
                   Cancel
                 </button>
-              )}
-              {job.phase === 'cancelled' && (
-                <button
-                  onClick={() => onResumeImport(job.jobId)}
-                  style={{
-                    flexShrink: 0,
-                    background: 'transparent',
-                    border: '1px solid #7f77dd',
-                    color: '#7f77dd',
-                    borderRadius: '4px',
-                    padding: '2px 8px',
-                    fontSize: '11px',
-                    cursor: 'pointer'
-                  }}
-                >
+              ) : job.phase === 'cancelled' ? (
+                <button onClick={() => onResumeImport(job.jobId)} style={resumeButtonStyle}>
                   Resume
                 </button>
-              )}
-            </div>
-            {/* Indeterminate during the counting pass — total isn't known yet */}
-            {job.phase !== 'counting' && (
-              <div
-                style={{
-                  background: '#1e1e2a',
-                  borderRadius: '4px',
-                  height: '6px',
-                  overflow: 'hidden'
-                }}
-              >
-                <div
-                  style={{
-                    background: '#7f77dd',
-                    height: '100%',
-                    width: `${pct}%`,
-                    transition: 'width 0.2s ease',
-                    borderRadius: '4px'
-                  }}
-                />
-              </div>
-            )}
-          </div>
+              ) : undefined
+            }
+          />
         )
       })}
     </>
