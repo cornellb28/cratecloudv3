@@ -1,5 +1,16 @@
 import { create } from 'zustand'
 
+// TODO: ImportProgressPayload is independently redefined in main/index.ts,
+// preload/index.ts, and global.d.ts (three copies of the same shape,
+// pre-existing before this file). JobState below adds a fourth de-facto
+// copy via the ambient type, and a future MoveProgressPayload variant will
+// repeat the pattern. Worth hoisting all job/progress payload shapes into
+// one shared types module imported by main, preload, and renderer instead
+// of keeping them in sync by hand.
+// Only 'import' exists today — a 'move' variant widens this union once move
+// jobs are added, at which point BackgroundJobsPanel/App.tsx switch on `type`.
+type JobState = ImportProgressPayload & { type: 'import' }
+
 // ─── State shape ─────────────────────────────────────────
 
 interface LibraryState {
@@ -16,6 +27,18 @@ interface LibraryState {
   tags: Tag[]
   quickTags: Tag[]
   trackTags: Map<number, Tag[]>
+
+  // `folders` mirrors the real directory tree (populated at import time);
+  // `folderCounts` is one GROUP BY query. Owned here (not per-view local
+  // state) so App.tsx's single onFoldersChanged subscription can refresh
+  // it once and every consumer (FolderView, FolderTreeDropdown callers,
+  // etc.) sees the same data without each mounting its own fetch.
+  folders: FolderRow[]
+  folderCounts: { folder_id: number; count: number }[]
+
+  // Background jobs (import today, move once added) keyed by jobId — see
+  // JobState above for the pending 'move' variant.
+  jobs: Record<string, JobState>
 
   // ── Actions ──────────────────────────────────────────
   // Actions are functions that change the state
@@ -39,6 +62,12 @@ interface LibraryState {
   // Bulk version of setTrackTags — one Map build for many tracks instead of
   // one set() per track (each set() rebuilds the whole Map, O(n) per call).
   setAllTrackTags: (tagsByTrack: Record<number, Tag[]>) => void
+  setFolderData: (
+    folders: FolderRow[],
+    folderCounts: { folder_id: number; count: number }[]
+  ) => void
+  upsertJob: (job: JobState) => void
+  removeJob: (jobId: string) => void
 }
 
 // ─── Store ───────────────────────────────────────────────
@@ -53,6 +82,9 @@ export const useLibraryStore = create<LibraryState>((set) => ({
   tags: [],
   quickTags: [],
   trackTags: new Map(),
+  folders: [],
+  folderCounts: [],
+  jobs: {},
 
   sidebarCollapsed: localStorage.getItem('cratecloud_sidebar_collapsed') === 'true',
   displayMode: (localStorage.getItem('cratecloud_display_mode') as 'list' | 'grid') ?? 'list',
@@ -130,6 +162,18 @@ export const useLibraryStore = create<LibraryState>((set) => ({
         next.set(Number(trackId), tags)
       }
       return { trackTags: next }
+    }),
+
+  // ── Folders ────────────────────────────────────────────
+  setFolderData: (folders, folderCounts) => set({ folders, folderCounts }),
+
+  // ── Background jobs ────────────────────────────────────
+  upsertJob: (job) => set((state) => ({ jobs: { ...state.jobs, [job.jobId]: job } })),
+  removeJob: (jobId) =>
+    set((state) => {
+      const next = { ...state.jobs }
+      delete next[jobId]
+      return { jobs: next }
     })
 }))
 

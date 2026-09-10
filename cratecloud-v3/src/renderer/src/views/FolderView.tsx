@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react'
+import React, { useState, useMemo } from 'react'
 import { useLibraryStore } from '../store/useLibraryStore'
 import { FolderCard } from '../components/FolderCard'
 import { MosaicArtwork } from '../components/MosaicArtwork'
@@ -12,62 +12,106 @@ interface FolderViewProps {
 }
 
 export function FolderView({ libraryRoots }: FolderViewProps): React.JSX.Element {
-  const { tracks, displayMode, isAnalyzing, setAnalyzing, setTracks } = useLibraryStore()
+  // `folders`/`folderCounts` live in the shared store, populated once at
+  // startup and kept fresh by App.tsx's single debounced onFoldersChanged
+  // subscription — this view just reads them, it doesn't fetch its own copy.
+  const { tracks, displayMode, isAnalyzing, setAnalyzing, setTracks, folders, folderCounts } =
+    useLibraryStore()
 
-  // Navigation stack — array of folder paths. Empty = top-level root picker.
-  const [navStack, setNavStack] = useState<string[]>([])
-  const [items, setItems] = useState<FolderItem[]>([])
-  const [loading, setLoading] = useState(false)
+  // Navigation stack — array of folder ids (from the `folders` table). Empty
+  // = top-level root picker.
+  const [navStack, setNavStack] = useState<number[]>([])
   const [selectedIds, setSelectedIds] = useState<Set<number>>(new Set())
 
-  const currentPath = navStack.length > 0 ? navStack[navStack.length - 1] : null
+  const currentFolderId = navStack.length > 0 ? navStack[navStack.length - 1] : null
 
-  // TEMP DEBUG — remove after diagnosing folder/track path mismatch
-  useEffect(() => {
-    if (currentPath === null) return
-    console.log('[FolderView debug] currentPath:', currentPath)
-    console.log(
-      '[FolderView debug] first 5 track filepaths:',
-      tracks.slice(0, 5).map((t) => t.filepath)
-    )
-    console.log(
-      '[FolderView debug] tracks starting with currentPath:',
-      tracks.filter((t) => t.filepath.startsWith(currentPath)).length
-    )
-  }, [currentPath, tracks])
+  // `folders` mirrors the real directory tree (populated at import time) and
+  // `folderCounts` is one GROUP BY query — everything else (recursive counts,
+  // "hide empty folders", artwork sampling) is rolled up from these plus the
+  // already-loaded `tracks` array, in memory, instead of a query per folder
+  // card.
+  const foldersById = useMemo(() => new Map(folders.map((f) => [f.id, f])), [folders])
 
-  // Load folder contents when path changes
-  useEffect(() => {
-    if (currentPath === null) return
-    const path = currentPath
-    async function load(): Promise<void> {
-      setLoading(true)
-      const result = await window.api.fs.readFolder(path)
-      if (result.ok && result.items) {
-        setItems(result.items)
-      }
-      setLoading(false)
+  const childrenByParent = useMemo(() => {
+    const map = new Map<number | null, FolderRow[]>()
+    for (const f of folders) {
+      const key = f.parent_folder_id
+      if (!map.has(key)) map.set(key, [])
+      map.get(key)!.push(f)
     }
-    load()
-  }, [currentPath])
+    return map
+  }, [folders])
 
-  // Get up to 4 artwork paths from tracks in a folder
-  function getArtworkForFolder(folderPath: string): (string | null)[] {
-    return tracks
-      .filter((t) => t.filepath.startsWith(folderPath))
-      .filter((t) => t.artwork_path)
-      .slice(0, 4)
-      .map((t) => t.artwork_path)
+  const directCountByFolder = useMemo(
+    () => new Map(folderCounts.map((c) => [c.folder_id, c.count])),
+    [folderCounts]
+  )
+
+  // Recursive track count per folder — own direct count plus every
+  // descendant's, memoized per folders/counts change so a grid of N folder
+  // cards costs one pass over `folders`, not N queries.
+  const recursiveCountByFolder = useMemo(() => {
+    const cache = new Map<number, number>()
+    function compute(id: number): number {
+      const cached = cache.get(id)
+      if (cached !== undefined) return cached
+      let total = directCountByFolder.get(id) ?? 0
+      for (const child of childrenByParent.get(id) ?? []) {
+        total += compute(child.id)
+      }
+      cache.set(id, total)
+      return total
+    }
+    for (const f of folders) compute(f.id)
+    return cache
+  }, [folders, directCountByFolder, childrenByParent])
+
+  // Every folder id in a folder's own subtree (including itself) — used to
+  // sample artwork recursively without a per-card query.
+  const descendantIdsByFolder = useMemo(() => {
+    const cache = new Map<number, Set<number>>()
+    function compute(id: number): Set<number> {
+      const cached = cache.get(id)
+      if (cached) return cached
+      const set = new Set<number>([id])
+      for (const child of childrenByParent.get(id) ?? []) {
+        for (const d of compute(child.id)) set.add(d)
+      }
+      cache.set(id, set)
+      return set
+    }
+    for (const f of folders) compute(f.id)
+    return cache
+  }, [folders, childrenByParent])
+
+  // A library root's own folder row (parent_folder_id NULL, relative_path
+  // "") — created by ensureFolderTree the first time that root is imported.
+  const rootFolderIdByLibraryRootId = useMemo(() => {
+    const map = new Map<number, number>()
+    for (const f of folders) {
+      if (f.parent_folder_id === null && f.root_folder_id !== null) {
+        map.set(f.root_folder_id, f.id)
+      }
+    }
+    return map
+  }, [folders])
+
+  function getTrackCount(folderId: number): number {
+    return recursiveCountByFolder.get(folderId) ?? 0
   }
 
-  // Track count for a subfolder
-  function getTrackCount(folderPath: string): number {
-    return tracks.filter((t) => t.filepath.startsWith(folderPath)).length
+  function getArtworkForFolder(folderId: number): (string | null)[] {
+    const ids = descendantIdsByFolder.get(folderId) ?? new Set([folderId])
+    return tracks
+      .filter((t) => t.folder_id !== null && ids.has(t.folder_id))
+      .filter((t) => t.artwork_hash)
+      .slice(0, 4)
+      .map((t) => t.artwork_hash)
   }
 
   // Navigate into a subfolder
-  function navigateInto(path: string): void {
-    setNavStack((prev) => [...prev, path])
+  function navigateInto(folderId: number): void {
+    setNavStack((prev) => [...prev, folderId])
     setSelectedIds(new Set())
   }
 
@@ -84,7 +128,7 @@ export function FolderView({ libraryRoots }: FolderViewProps): React.JSX.Element
   }
 
   // Top level — no folder selected yet — show all registered library roots
-  if (currentPath === null) {
+  if (currentFolderId === null) {
     return (
       <div style={{ flex: 1, display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
         <div style={{ flex: 1, overflowY: 'auto', padding: '20px 24px' }}>
@@ -107,55 +151,41 @@ export function FolderView({ libraryRoots }: FolderViewProps): React.JSX.Element
               gap: '16px'
             }}
           >
-            {libraryRoots.map((root) => (
-              <FolderCard
-                key={root.id}
-                name={root.name}
-                path={root.path}
-                trackCount={getTrackCount(root.path)}
-                artworkPaths={getArtworkForFolder(root.path)}
-                onClick={() => navigateInto(root.path)}
-              />
-            ))}
+            {libraryRoots.map((root) => {
+              const rootFolderId = rootFolderIdByLibraryRootId.get(root.id)
+              // Briefly undefined right after a root is registered — its
+              // own folder row is created as soon as the scan starts, but
+              // there's a moment before that where the renderer already
+              // has the root but folders:tree doesn't yet. Dim + non-click
+              // instead of a silent no-op.
+              const pending = rootFolderId === undefined
+              return (
+                <div
+                  key={root.id}
+                  style={pending ? { opacity: 0.5, cursor: 'default' } : undefined}
+                  title={pending ? 'Scanning…' : undefined}
+                >
+                  <FolderCard
+                    name={root.name}
+                    path={root.path}
+                    trackCount={pending ? 0 : getTrackCount(rootFolderId)}
+                    artworkHashes={pending ? [] : getArtworkForFolder(rootFolderId)}
+                    onClick={() => {
+                      if (!pending) navigateInto(rootFolderId)
+                    }}
+                  />
+                </div>
+              )
+            })}
           </div>
         </div>
       </div>
     )
   }
 
-  // Tracks directly in the current folder
-  const folderTracks = tracks.filter(
-    (t) =>
-      t.filepath.startsWith(currentPath) && !t.filepath.slice(currentPath.length + 1).includes('/')
-  )
+  const currentFolder = foldersById.get(currentFolderId)
 
-  // Subfolders
-  const subfolders = items.filter((i) => i.isDirectory)
-
-  function toggleSelect(id: number): void {
-    setSelectedIds((prev) => {
-      const next = new Set(prev)
-      if (next.has(id)) next.delete(id)
-      else next.add(id)
-      return next
-    })
-  }
-
-  // Breadcrumb segments
-  const breadcrumbs = navStack.map((path, i) => ({
-    path,
-    name:
-      i === 0
-        ? (path.split('/').filter(Boolean).pop() ?? 'Library')
-        : (path.split('/').filter(Boolean).pop() ?? path)
-  }))
-
-  // Hero artwork — 4 from current folder recursively
-  const heroArtwork = getArtworkForFolder(currentPath)
-  const folderName = currentPath.split('/').filter(Boolean).pop() ?? 'Library'
-  const totalTracks = getTrackCount(currentPath)
-
-  if (loading) {
+  if (!currentFolder) {
     return (
       <div
         style={{
@@ -170,6 +200,35 @@ export function FolderView({ libraryRoots }: FolderViewProps): React.JSX.Element
       </div>
     )
   }
+
+  // Tracks directly in the current folder
+  const folderTracks = tracks.filter((t) => t.folder_id === currentFolderId)
+
+  // Subfolders — hide ones with no audio anywhere in their subtree, same as
+  // the old live-disk listing did
+  const subfolders = (childrenByParent.get(currentFolderId) ?? []).filter(
+    (f) => getTrackCount(f.id) > 0
+  )
+
+  function toggleSelect(id: number): void {
+    setSelectedIds((prev) => {
+      const next = new Set(prev)
+      if (next.has(id)) next.delete(id)
+      else next.add(id)
+      return next
+    })
+  }
+
+  // Breadcrumb segments
+  const breadcrumbs = navStack.map((id) => ({
+    id,
+    name: foldersById.get(id)?.name ?? '?'
+  }))
+
+  // Hero artwork — 4 from current folder recursively
+  const heroArtwork = getArtworkForFolder(currentFolderId)
+  const folderName = currentFolder.name
+  const totalTracks = getTrackCount(currentFolderId)
 
   return (
     <div
@@ -218,7 +277,7 @@ export function FolderView({ libraryRoots }: FolderViewProps): React.JSX.Element
         {breadcrumbs.map((crumb, i) => {
           const isLast = i === breadcrumbs.length - 1
           return (
-            <React.Fragment key={crumb.path}>
+            <React.Fragment key={crumb.id}>
               {isLast ? (
                 <span style={{ color: '#e8e8f0', fontSize: '12px', fontWeight: 500 }}>
                   {crumb.name}
@@ -261,7 +320,7 @@ export function FolderView({ libraryRoots }: FolderViewProps): React.JSX.Element
         <div style={{ display: 'flex', gap: '20px', alignItems: 'flex-end' }}>
           {/* Mosaic artwork — large */}
           <MosaicArtwork
-            artworkPaths={heroArtwork}
+            artworkHashes={heroArtwork}
             folderName={folderName}
             size={140}
             borderRadius={8}
@@ -301,14 +360,16 @@ export function FolderView({ libraryRoots }: FolderViewProps): React.JSX.Element
                 </span>
               )}
             </div>
-            <Button
-              onClick={() => handleImportThisFolder(currentPath)}
-              disabled={isAnalyzing}
-              variant="outline"
-              size="sm"
-            >
-              {isAnalyzing ? 'Scanning...' : '↺ Re-scan this folder'}
-            </Button>
+            {currentFolder.path && (
+              <Button
+                onClick={() => handleImportThisFolder(currentFolder.path as string)}
+                disabled={isAnalyzing}
+                variant="outline"
+                size="sm"
+              >
+                {isAnalyzing ? 'Scanning...' : '↺ Re-scan this folder'}
+              </Button>
+            )}
           </div>
         </div>
       </div>
@@ -339,13 +400,12 @@ export function FolderView({ libraryRoots }: FolderViewProps): React.JSX.Element
             >
               {subfolders.map((folder) => (
                 <FolderCard
-                  key={folder.path}
+                  key={folder.id}
                   name={folder.name}
-                  path={folder.path}
-                  trackCount={getTrackCount(folder.path)}
-                  audioCount={folder.audioCount}
-                  artworkPaths={getArtworkForFolder(folder.path)}
-                  onClick={() => navigateInto(folder.path)}
+                  path={folder.path ?? folder.name}
+                  trackCount={getTrackCount(folder.id)}
+                  artworkHashes={getArtworkForFolder(folder.id)}
+                  onClick={() => navigateInto(folder.id)}
                 />
               ))}
             </div>

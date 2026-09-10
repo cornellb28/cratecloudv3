@@ -69,7 +69,6 @@ const api = {
     ipcRenderer.removeAllListeners('library:track-analyzed')
     ipcRenderer.removeAllListeners('library:analysis-complete')
   },
-  getArtworkUrl: (filepath: string) => `artwork://${filepath}`,
   // Tracks
   db: {
     allTracks: () => ipcRenderer.invoke('db:all-tracks'),
@@ -80,8 +79,19 @@ const api = {
       ipcRenderer.invoke('db:update-board-id', id, boardId),
     tracksByBoardId: (boardId: number) => ipcRenderer.invoke('db:tracks-by-board-id', boardId),
     markMissing: (filepath: string) => ipcRenderer.invoke('db:mark-missing', filepath),
-    markAnalyzed: (id: number) => ipcRenderer.invoke('db:mark-analyzed', id)
+    markAnalyzed: (id: number) => ipcRenderer.invoke('db:mark-analyzed', id),
+    tracksByFolder: (folderId: number, recursive: boolean) =>
+      ipcRenderer.invoke('tracks:by-folder', folderId, recursive),
+    folderTrackCounts: () => ipcRenderer.invoke('tracks:folder-counts')
   },
+
+  // Folders
+  folders: {
+    tree: (rootId?: number) => ipcRenderer.invoke('folders:tree', rootId)
+  },
+
+  onFoldersChanged: (cb: () => void) => ipcRenderer.on('folders:changed', () => cb()),
+  offFoldersChanged: () => ipcRenderer.removeAllListeners('folders:changed'),
 
   // Tags
   tags: {
@@ -127,6 +137,14 @@ const api = {
   settings: {
     get: (key: string) => ipcRenderer.invoke('settings:get', key),
     set: (key: string, value: string) => ipcRenderer.invoke('settings:set', key, value)
+  },
+
+  // Artwork — the renderer never builds artwork paths itself, only asks for
+  // a hash + size and gets back a ready-to-use path (or null if missing).
+  artwork: {
+    pathFor: (hash: string | null, size: 'full' | 'thumb') =>
+      ipcRenderer.invoke('artwork:path-for', hash, size),
+    sweepOrphaned: () => ipcRenderer.invoke('artwork:sweep-orphaned')
   },
   fs: {
     moveFile: (from: string, to: string) => ipcRenderer.invoke('fs:move-file', from, to),

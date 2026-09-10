@@ -3,7 +3,6 @@ export {}
 declare global {
   interface Window {
     api: {
-      getArtworkUrl: (filepath: string) => string
       openFolder: () => Promise<string | null>
       openFiles: () => Promise<string[]>
       importFile: (filepath: string) => Promise<{ ok: boolean; trackId?: number; error?: string }>
@@ -85,6 +84,12 @@ declare global {
         tracksByBoardId: (id: number, boardId: number) => Promise<Track[]>
         markMissing: (filepath: string) => Promise<{ ok: boolean; error?: string }>
         markAnalyzed: (id: number) => Promise<{ ok: boolean; error?: string }>
+        tracksByFolder: (folderId: number, recursive: boolean) => Promise<Track[]>
+        folderTrackCounts: () => Promise<{ folder_id: number; count: number }[]>
+      }
+
+      folders: {
+        tree: (rootId?: number) => Promise<FolderRow[]>
       }
 
       watcher: {
@@ -148,7 +153,14 @@ declare global {
         moveFile: (
           from: string,
           to: string
-        ) => Promise<{ ok: boolean; newPath?: string; error?: string }>
+        ) => Promise<{
+          ok: boolean
+          newPath?: string
+          underRoot?: boolean
+          error?: string
+          // Temporary diagnostic — see moveFileToFolder's comment in main/index.ts.
+          diagnostics?: { crossDevice: boolean; fileSizeMB: number; durationMs: number }
+        }>
         moveFiles: (
           from: string[],
           to: string
@@ -160,10 +172,24 @@ declare global {
         createFolder: (
           parent: string,
           name: string
-        ) => Promise<{ ok: boolean; path?: string; error?: string }>
+        ) => Promise<{
+          ok: boolean
+          path?: string
+          folderId?: number | null
+          reason?: string
+          error?: string
+        }>
         readFolder: (
           folderPath: string
         ) => Promise<{ ok: boolean; items?: FolderItem[]; error?: string }>
+      }
+
+      onFoldersChanged: (cb: () => void) => void
+      offFoldersChanged: () => void
+
+      artwork: {
+        pathFor: (hash: string | null, size: 'full' | 'thumb') => Promise<string | null>
+        sweepOrphaned: () => Promise<{ removed: number; bytesReclaimed: number }>
       }
     }
   }
@@ -195,6 +221,7 @@ declare global {
     format: string | null
     waveform: string | null
     artwork_path: string | null
+    artwork_hash: string | null
     board_id: number
     board_name?: string // joined from boards table
     board_color?: string // joined from boards table
@@ -207,6 +234,18 @@ declare global {
     needs_sync: number
     pending_changes: string | null
     last_seen_at: string | null
+    folder_id: number | null
+  }
+
+  interface FolderRow {
+    id: number
+    name: string
+    path: string | null
+    parent_folder_id: number | null
+    root_folder_id: number | null
+    relative_path: string | null
+    created_at: number
+    updated_at: number | null
   }
 
   interface Tag {
@@ -318,7 +357,7 @@ declare global {
     track_id: number | null
     title: string | null
     artist: string | null
-    artwork_path: string | null
+    artwork_hash: string | null
     detected_at: number
     status: 'pending' | 'accepted' | 'ignored'
   }

@@ -12,35 +12,13 @@ import { DashboardView } from '@renderer/views/DashboardView'
 import type { View } from './components/Sidebar'
 import { Breadcrumb } from './components/Breadcrumb'
 import { ReconciliationModal } from './components/ReconciliationModal'
+import { Toaster } from './components/ui/sonner'
+import { BackgroundJobsPanel } from './components/BackgroundJobsPanel'
 
 // type View = 'dashboard' | 'library' | 'board' | 'genre' | 'artist' | 'folders' | 'crates' | 'settings'
 
 const COLLAPSE_THRESHOLD = 900 // px
-
-// Round to whole minutes — never show seconds ticking
-function formatEstimate(seconds: number): string {
-  if (seconds < 60) return 'under a minute'
-  return `about ${Math.round(seconds / 60)} min`
-}
-
-function importStatusLabel(p: ImportProgressPayload): string {
-  if (p.phase === 'counting') {
-    return `Scanning… ${p.found} tracks found — ${p.currentFolder}`
-  }
-  if (p.phase === 'parsing') {
-    const base = `${p.scanned} of ${p.total} · ${p.found} tracks found · Scanning ${p.currentFolder}`
-    return p.estimateSeconds !== undefined
-      ? `${base} · ${formatEstimate(p.estimateSeconds)} left`
-      : base
-  }
-  if (p.phase === 'cancelled') {
-    return `Cancelled — ${p.found} of ${p.total} imported`
-  }
-  if (p.phase === 'done') {
-    return `Done — ${p.found} of ${p.total} imported`
-  }
-  return 'Import error'
-}
+const FOLDERS_REFETCH_DEBOUNCE_MS = 300
 
 function App(): React.JSX.Element {
   const {
@@ -54,14 +32,16 @@ function App(): React.JSX.Element {
     setSidebarCollapsed,
     setTags,
     setQuickTags,
-    setAllTrackTags
+    setAllTrackTags,
+    setFolderData,
+    upsertJob,
+    removeJob
   } = useLibraryStore()
   const [activeView, setActiveView] = useState<View>('dashboard')
   // Add library roots to app state
   const [libraryRoots, setLibraryRoots] = useState<LibraryRoot[]>([])
   const [settingsOpen, setSettingsOpen] = useState(false)
   const [reconcileOpen, setReconcileOpen] = useState(false)
-  const [importProgress, setImportProgress] = useState<ImportProgressPayload | null>(null)
   const [analysisProgress, setAnalysisProgress] = useState<{
     done: number
     total: number
@@ -69,6 +49,10 @@ function App(): React.JSX.Element {
   // Batch-committed events fire once per ~200-row transaction — debounce the
   // resulting track-list refetch so a burst of fast batches collapses into one.
   const batchRefreshTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
+  // folders:changed can fire many times during one import (once per
+  // ensureFolderTree call) — debounce so a large import doesn't hammer
+  // folders:tree/tracks:folder-counts with a refetch per directory.
+  const foldersRefreshTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
 
   // ── Auto-collapse on narrow window ────────────────────
   useEffect(() => {
@@ -91,9 +75,11 @@ function App(): React.JSX.Element {
       setTracks(all)
     })
 
-    // File moved — update filepath in store
-    window.api.onTrackMoved(({ trackId, newPath }) => {
-      updateTrack(trackId, { filepath: newPath })
+    // File moved — folder_id changes with the path (it mirrors disk
+    // location), so refetch rather than patch just filepath in place.
+    window.api.onTrackMoved(async () => {
+      const all = await window.api.db.allTracks()
+      setTracks(all)
     })
 
     // File deleted — reload store
@@ -119,18 +105,25 @@ function App(): React.JSX.Element {
   // ── Load data on startup ──────────────────────────────
   useEffect(() => {
     async function load(): Promise<void> {
-      const [tracks, boards, tags, quickTags, roots] = await Promise.all([
+      const [tracks, boards, tags, quickTags, roots, folderTree, folderCounts] = await Promise.all([
         window.api.db.allTracks(),
         window.api.boards.all(),
         window.api.tags.all(),
         window.api.tags.mostUsed(),
-        window.api.roots.all()
+        window.api.roots.all(),
+        window.api.folders.tree(),
+        window.api.db.folderTrackCounts()
       ])
       setTracks(tracks)
       setBoards(boards)
       setTags(tags)
       setQuickTags(quickTags)
       setLibraryRoots(roots)
+      // Initial snapshot — folders:changed (subscribed below) keeps it fresh
+      // from here on, but that event only fires on a subsequent change, so
+      // a library that's already fully imported needs this or the slice
+      // would stay empty until the next folder gets created.
+      setFolderData(folderTree, folderCounts)
 
       // Hydrate trackTags for every track up front — one bulk query instead
       // of one tags.forTrack round trip per track — so badges show without
@@ -145,10 +138,10 @@ function App(): React.JSX.Element {
   // ── Import progress listeners ─────────────────────────
   useEffect(() => {
     window.api.onImportProgress((p) => {
-      setImportProgress(p)
+      upsertJob({ ...p, type: 'import' })
 
       if (p.phase === 'done') {
-        setTimeout(() => setImportProgress(null), 1500)
+        setTimeout(() => removeJob(p.jobId), 1500)
       }
     })
 
@@ -160,6 +153,21 @@ function App(): React.JSX.Element {
       batchRefreshTimer.current = setTimeout(() => {
         window.api.db.allTracks().then(setTracks)
       }, 500)
+    })
+
+    // A folders row was inserted somewhere (import, watcher, create-folder,
+    // move) — debounced since one import can trigger this many times over
+    // (once per ensureFolderTree call), and FolderView reads this slice
+    // instead of fetching its own copy.
+    window.api.onFoldersChanged(() => {
+      if (foldersRefreshTimer.current) clearTimeout(foldersRefreshTimer.current)
+      foldersRefreshTimer.current = setTimeout(async () => {
+        const [tree, counts] = await Promise.all([
+          window.api.folders.tree(),
+          window.api.db.folderTrackCounts()
+        ])
+        setFolderData(tree, counts)
+      }, FOLDERS_REFETCH_DEBOUNCE_MS)
     })
 
     // Phase 2 — update individual tracks as BPM/key comes in
@@ -185,9 +193,11 @@ function App(): React.JSX.Element {
     return () => {
       window.api.offAnalysisListeners()
       window.api.offImportProgress()
+      window.api.offFoldersChanged()
       if (batchRefreshTimer.current) clearTimeout(batchRefreshTimer.current)
+      if (foldersRefreshTimer.current) clearTimeout(foldersRefreshTimer.current)
     }
-  }, [setTracks, updateTrack])
+  }, [setTracks, updateTrack, upsertJob, removeJob, setFolderData])
 
   // ── Import handlers ───────────────────────────────────
   async function handleImport(): Promise<void> {
@@ -195,7 +205,6 @@ function App(): React.JSX.Element {
     if (!folderPath) return
 
     setAnalyzing(true)
-    setImportProgress(null)
 
     const result = await window.api.importFolder(folderPath)
 
@@ -209,15 +218,13 @@ function App(): React.JSX.Element {
     // Progress bar is cleared by the 'done' phase of onImportProgress
   }
 
-  async function handleCancelImport(): Promise<void> {
-    if (!importProgress) return
-    await window.api.cancelImport(importProgress.jobId)
+  async function handleCancelImport(jobId: string): Promise<void> {
+    await window.api.cancelImport(jobId)
   }
 
-  async function handleResumeImport(): Promise<void> {
-    if (!importProgress) return
+  async function handleResumeImport(jobId: string): Promise<void> {
     setAnalyzing(true)
-    const result = await window.api.resumeImport(importProgress.jobId)
+    const result = await window.api.resumeImport(jobId)
     if (result.ok) {
       const all = await window.api.db.allTracks()
       setTracks(all)
@@ -247,12 +254,6 @@ function App(): React.JSX.Element {
     setActiveView(view)
   }
 
-  // ── Progress percentage ───────────────────────────────
-  const importPct =
-    importProgress && importProgress.total > 0
-      ? Math.round((importProgress.scanned / importProgress.total) * 100)
-      : 0
-
   return (
     <div
       style={{
@@ -276,81 +277,11 @@ function App(): React.JSX.Element {
       {/* Toolbar at the top */}
       <Toolbar onImport={handleImport} activeView={activeView} onImportFiles={handleImportFiles} />
 
-      {/* Import scan — non-modal, stays visible across navigation */}
-      {importProgress !== null && (
-        <div style={{ marginBottom: '1rem' }}>
-          <div
-            style={{
-              color: '#7f77dd',
-              marginBottom: '4px',
-              fontSize: '12px',
-              display: 'flex',
-              justifyContent: 'space-between',
-              alignItems: 'center',
-              gap: '12px'
-            }}
-          >
-            <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-              {importStatusLabel(importProgress)}
-            </span>
-            {importProgress.phase === 'parsing' && (
-              <button
-                onClick={handleCancelImport}
-                style={{
-                  flexShrink: 0,
-                  background: 'transparent',
-                  border: '1px solid #33334a',
-                  color: '#e8e8f0',
-                  borderRadius: '4px',
-                  padding: '2px 8px',
-                  fontSize: '11px',
-                  cursor: 'pointer'
-                }}
-              >
-                Cancel
-              </button>
-            )}
-            {importProgress.phase === 'cancelled' && (
-              <button
-                onClick={handleResumeImport}
-                style={{
-                  flexShrink: 0,
-                  background: 'transparent',
-                  border: '1px solid #7f77dd',
-                  color: '#7f77dd',
-                  borderRadius: '4px',
-                  padding: '2px 8px',
-                  fontSize: '11px',
-                  cursor: 'pointer'
-                }}
-              >
-                Resume
-              </button>
-            )}
-          </div>
-          {/* Indeterminate during the counting pass — total isn't known yet */}
-          {importProgress.phase !== 'counting' && (
-            <div
-              style={{
-                background: '#1e1e2a',
-                borderRadius: '4px',
-                height: '6px',
-                overflow: 'hidden'
-              }}
-            >
-              <div
-                style={{
-                  background: '#7f77dd',
-                  height: '100%',
-                  width: `${importPct}%`,
-                  transition: 'width 0.2s ease',
-                  borderRadius: '4px'
-                }}
-              />
-            </div>
-          )}
-        </div>
-      )}
+      {/* Background jobs (import today; move once added) — non-modal, stays visible across navigation */}
+      <BackgroundJobsPanel
+        onCancelImport={handleCancelImport}
+        onResumeImport={handleResumeImport}
+      />
 
       {/* Phase 2 — analysis progress bar */}
       {analysisProgress !== null && analysisProgress.total > 0 && (
@@ -495,6 +426,7 @@ function App(): React.JSX.Element {
         onRootsChanged={reloadRoots}
       />
       <ReconciliationModal open={reconcileOpen} onClose={() => setReconcileOpen(false)} />
+      <Toaster />
     </div>
   )
 }

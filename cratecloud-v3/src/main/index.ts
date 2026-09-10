@@ -1,11 +1,10 @@
-import { app, shell, BrowserWindow, ipcMain, dialog, protocol } from 'electron'
-import { join, extname, basename, dirname } from 'path'
-import { writeFileSync, mkdirSync } from 'fs'
+import { app, shell, BrowserWindow, ipcMain, dialog, protocol, nativeImage } from 'electron'
+import { join, extname, basename, dirname, relative } from 'path'
 import { electronApp, optimizer, is } from '@electron-toolkit/utils'
 import icon from '../../resources/icon.png?asset'
 import { execSync } from 'child_process'
-import { randomUUID } from 'crypto'
-import { rename, stat, copyFile, unlink, mkdir, readdir, readFile } from 'fs/promises'
+import { randomUUID, createHash } from 'crypto'
+import { rename, stat, copyFile, unlink, mkdir, readdir, readFile, writeFile } from 'fs/promises'
 import { startWatcher, stopWatcher, stopAllWatchers, setWatcherCallbacks } from './libraryWatcher'
 import {
   insertTrack,
@@ -38,7 +37,9 @@ import {
   getTracksByBoardId,
   findOrCreateTag,
   getUnanalyzedTracks,
-  updateArtworkPath,
+  setTrackArtworkHash,
+  getArtworkHashesInUse,
+  getTracksWithLegacyArtwork,
   updateTrackFilepath,
   markTrackAnalyzed,
   insertPendingChange,
@@ -46,7 +47,15 @@ import {
   acceptPendingChange,
   ignorePendingChange,
   getTrackByFilepath,
-  getAllRoots
+  getAllRoots,
+  ensureFolderTree,
+  ensureFolderForDirectory,
+  folderEvents,
+  getFolderTree,
+  getFolderTrackCounts,
+  getTracksByFolder,
+  backfillTrackFolderIds,
+  isPathUnder
 } from './db'
 import { analyzeFile, readTagsFast } from './sidecar'
 
@@ -66,7 +75,7 @@ const AUDIO_EXTENSIONS = new Set(['.mp3', '.flac', '.wav', '.aiff', '.aif', '.m4
 // TODO: persist import jobs (id, folderPath, filepaths, nextIndex) to a DB table so a
 // cancelled/interrupted job can be resumed after an app restart. This was proposed and
 // explicitly deferred — needs a schema change and separate approval. As-is, resume only
-// works within the same running app session (job state lives in `importJobs` below).
+// works within the same running app session (job state lives in `jobs` below).
 type ImportPhase = 'counting' | 'parsing' | 'done' | 'cancelled' | 'error'
 
 interface ImportProgressPayload {
@@ -81,9 +90,12 @@ interface ImportProgressPayload {
 }
 
 interface ImportJob {
+  type: 'import'
   id: string
   folderPath: string
   filepaths: string[]
+  relativeDirs: string[] // every directory the Pass 1 walk visited, relative to folderPath
+  folderIdByRelPath?: Map<string, number> // set once via ensureFolderTree, reused across resumes
   nextIndex: number
   scanned: number
   found: number
@@ -94,7 +106,11 @@ interface ImportJob {
   batchThroughputs: number[] // files/sec, rolling window — used for the ETA
 }
 
-const importJobs = new Map<string, ImportJob>()
+// One registry for every background job type, discriminated by `type` —
+// only 'import' exists today; a 'move' job (TODO, next task) widens this to
+// `Map<string, ImportJob | MoveJob>` instead of a second parallel Map.
+type Job = ImportJob
+const jobs = new Map<string, Job>()
 
 const COUNT_PROGRESS_INTERVAL_MS = 250
 const PARSE_PROGRESS_FILES = 50
@@ -140,14 +156,20 @@ async function scanFolderPaths(
   folderPath: string,
   job: ImportJob,
   emit: (p: ImportProgressPayload) => void
-): Promise<string[]> {
+): Promise<{ files: string[]; dirs: string[] }> {
   const results: string[] = []
+  // Every directory the walk visits, relative to folderPath ("" for the
+  // root) — collected here for free since the walk already touches every
+  // directory once; ensureFolderTree needs the full set, not just the ones
+  // that turned out to contain audio.
+  const dirs = new Set<string>()
   const queue: string[] = [folderPath]
   let lastEmit = Date.now()
 
   while (queue.length > 0) {
     if (job.cancelRequested) break
     const dir = queue.shift()!
+    dirs.add(relative(folderPath, dir))
     try {
       const entries = await readdir(dir, { withFileTypes: true })
       for (const entry of entries) {
@@ -178,7 +200,7 @@ async function scanFolderPaths(
     }
   }
 
-  return results
+  return { files: results, dirs: [...dirs] }
 }
 
 // Recursively count all audio files in a folder's subtree
@@ -201,24 +223,194 @@ async function countAudioFiles(folderPath: string): Promise<number> {
   }
 }
 
-function saveArtwork(trackId: number, base64Data: string): string | null {
-  try {
-    const artworkDir = join(app.getPath('userData'), 'cratecloud', 'artwork')
-    mkdirSync(artworkDir, { recursive: true })
+// ── Content-addressed artwork storage ───────────────────────────────────────
+// Artwork is deduped by content hash and shared across every track that
+// embeds the same cover (the common case — every track on an album) instead
+// of one file per track. See migrateArtworkToContentAddressed for the
+// one-time move of legacy per-track <trackId>.jpg files onto this scheme.
+const artworkDir = join(app.getPath('userData'), 'cratecloud', 'artwork')
+const ARTWORK_MIGRATION_SETTING_KEY = 'artwork_migration_v1'
 
-    const filepath = join(artworkDir, `${trackId}.jpg`)
-    const buffer = Buffer.from(base64Data, 'base64')
-    writeFileSync(filepath, buffer)
-    return filepath
+function artworkFullPath(hash: string): string {
+  return join(artworkDir, `${hash}.jpg`)
+}
+
+function artworkThumbPath(hash: string): string {
+  return join(artworkDir, `${hash}_200.jpg`)
+}
+
+async function fileExists(path: string): Promise<boolean> {
+  try {
+    await stat(path)
+    return true
   } catch {
+    return false
+  }
+}
+
+// nativeImage.resize() stretches to fit when both width and height are given,
+// so a true 200x200 cover crop needs the smaller side resized to 200 first
+// (preserving aspect ratio) and the result center-cropped.
+function makeThumbnailJpeg(image: Electron.NativeImage): Buffer {
+  const { width, height } = image.getSize()
+  const scale = 200 / Math.min(width, height)
+  const resized = image.resize({
+    width: Math.round(width * scale),
+    height: Math.round(height * scale),
+    quality: 'good'
+  })
+  const { width: rw, height: rh } = resized.getSize()
+  const cropped = resized.crop({
+    x: Math.max(0, Math.floor((rw - 200) / 2)),
+    y: Math.max(0, Math.floor((rh - 200) / 2)),
+    width: Math.min(200, rw),
+    height: Math.min(200, rh)
+  })
+  return cropped.toJPEG(80)
+}
+
+// Hashes the image bytes and writes <hash>.jpg + a <hash>_200.jpg thumbnail
+// once; every subsequent track that embeds the same cover just reuses the
+// existing files. Returns the hash to store on the track row, or null on
+// failure — a bad/corrupt embedded image must never fail the track import.
+async function storeArtwork(imageBytes: Buffer): Promise<string | null> {
+  try {
+    await mkdir(artworkDir, { recursive: true })
+    const hash = createHash('sha1').update(imageBytes).digest('hex')
+    const fullPath = artworkFullPath(hash)
+
+    if (await fileExists(fullPath)) return hash // another track already stored this cover
+
+    await writeFile(fullPath, imageBytes)
+
+    try {
+      const image = nativeImage.createFromBuffer(imageBytes)
+      if (!image.isEmpty()) {
+        await writeFile(artworkThumbPath(hash), makeThumbnailJpeg(image))
+      }
+    } catch (err) {
+      // Full-size art is saved and usable — a missing thumbnail just means
+      // the renderer's 'thumb' request resolves to null and falls back to
+      // its placeholder.
+      console.error('[artwork] thumbnail generation failed:', err)
+    }
+
+    return hash
+  } catch (err) {
+    console.error('[artwork] storeArtwork failed:', err)
     return null
   }
+}
+
+// Single main-side resolver — the renderer never constructs a <hash>.jpg /
+// <hash>_200.jpg path itself, it only ever asks for a hash + size.
+async function artworkPathFor(hash: string | null, size: 'full' | 'thumb'): Promise<string | null> {
+  if (!hash) return null
+  const path = size === 'thumb' ? artworkThumbPath(hash) : artworkFullPath(hash)
+  return (await fileExists(path)) ? path : null
+}
+
+// One-time migration of legacy per-track artwork onto content-addressed
+// storage. Runs once, after the schema migration, off the import/analysis
+// paths — throttled with a short pause every 25 files so it never starves
+// IPC handlers while walking a large library. Completion is recorded in
+// app_settings so it never re-runs; a row whose legacy file is already gone
+// by the time this runs is simply left with artwork_hash NULL for good.
+async function migrateArtworkToContentAddressed(): Promise<void> {
+  if (getSetting(ARTWORK_MIGRATION_SETTING_KEY) === 'done') return
+
+  const rows = getTracksWithLegacyArtwork()
+  let migrated = 0
+  let duplicatesRemoved = 0
+  let bytesReclaimed = 0
+  let failed = 0
+
+  for (const row of rows) {
+    try {
+      const legacyStat = await stat(row.artwork_path) // throws if the file is gone
+      const bytes = await readFile(row.artwork_path)
+      const hash = createHash('sha1').update(bytes).digest('hex')
+      const fullPath = artworkFullPath(hash)
+
+      if (await fileExists(fullPath)) {
+        // Another track already claimed this hash — this legacy file is a duplicate.
+        await unlink(row.artwork_path)
+        duplicatesRemoved++
+        bytesReclaimed += legacyStat.size
+      } else {
+        await mkdir(artworkDir, { recursive: true })
+        await rename(row.artwork_path, fullPath)
+      }
+
+      if (!(await fileExists(artworkThumbPath(hash)))) {
+        try {
+          const image = nativeImage.createFromBuffer(bytes)
+          if (!image.isEmpty()) {
+            await writeFile(artworkThumbPath(hash), makeThumbnailJpeg(image))
+          }
+        } catch (err) {
+          console.error('[artwork migration] thumbnail generation failed:', err)
+        }
+      }
+
+      setTrackArtworkHash(row.id, hash)
+      migrated++
+    } catch (err) {
+      failed++
+      console.error(`[artwork migration] track ${row.id} failed:`, err)
+    }
+
+    if (migrated % 25 === 0) {
+      await new Promise((r) => setTimeout(r, 15))
+    }
+  }
+
+  setSetting(ARTWORK_MIGRATION_SETTING_KEY, 'done')
+  console.log(
+    `[artwork migration] done — ${migrated} migrated, ${duplicatesRemoved} duplicates removed, ` +
+      `${(bytesReclaimed / 1024 / 1024).toFixed(2)} MB reclaimed, ${failed} failed`
+  )
+}
+
+// Deletes any <hash>.jpg / <hash>_200.jpg under the artwork dir whose hash
+// isn't referenced by any track. Never runs automatically — only exposed via
+// IPC for a manual cleanup action.
+// TODO: surface in Settings
+async function sweepOrphanedArtwork(): Promise<{ removed: number; bytesReclaimed: number }> {
+  const inUse = getArtworkHashesInUse()
+  let removed = 0
+  let bytesReclaimed = 0
+
+  let entries: string[]
+  try {
+    entries = await readdir(artworkDir)
+  } catch {
+    return { removed: 0, bytesReclaimed: 0 }
+  }
+
+  for (const entry of entries) {
+    const match = entry.match(/^([0-9a-f]{40})(?:_200)?\.jpg$/)
+    if (!match || inUse.has(match[1])) continue
+
+    const fullPath = join(artworkDir, entry)
+    try {
+      const s = await stat(fullPath)
+      await unlink(fullPath)
+      removed++
+      bytesReclaimed += s.size
+    } catch (err) {
+      console.error(`[artwork sweep] failed to remove ${entry}:`, err)
+    }
+  }
+
+  return { removed, bytesReclaimed }
 }
 
 // Build a consistent track data object from analysis result
 function buildTrackData(
   filepath: string,
-  result: AnalysisResult
+  result: AnalysisResult,
+  folderId: number | null = null
 ): {
   filepath: string
   filename: string
@@ -240,6 +432,7 @@ function buildTrackData(
   duration_str: string | null
   analyzed_at: string | null
   board_id: number
+  folder_id: number | null
 } {
   return {
     filepath,
@@ -261,12 +454,23 @@ function buildTrackData(
     duration_sec: result.duration_sec,
     duration_str: result.duration_str,
     analyzed_at: result.analyzed ? new Date().toISOString() : null,
-    board_id: 1
+    board_id: 1,
+    folder_id: folderId
   }
 }
 
 // move files to folders
-async function moveFileToFolder(fromPath: string, toFolder: string): Promise<string> {
+//
+// DIAGNOSTIC (temporary): returns crossDevice/fileSizeMB/durationMs and
+// logs them, to confirm whether "the move is slow" is the EXDEV fallback
+// below (rename() fails across filesystems/volumes, forcing a real
+// copy+verify+delete of the whole file) versus something else. rename() on
+// the same device is a metadata-only op — near-instant regardless of file
+// size — so a slow move should show crossDevice: true here.
+async function moveFileToFolder(
+  fromPath: string,
+  toFolder: string
+): Promise<{ path: string; crossDevice: boolean; fileSizeMB: number; durationMs: number }> {
   const ext = extname(fromPath)
   const base = basename(fromPath, ext)
   let toPath = join(toFolder, basename(fromPath))
@@ -286,12 +490,17 @@ async function moveFileToFolder(fromPath: string, toFolder: string): Promise<str
     }
   }
 
+  const sourceSize = (await stat(fromPath)).size
+  const fileSizeMB = Math.round((sourceSize / (1024 * 1024)) * 100) / 100
+  const start = Date.now()
+  let crossDevice = false
+
   try {
     await rename(fromPath, toPath)
   } catch (err) {
     if ((err as NodeJS.ErrnoException).code === 'EXDEV') {
       // Cross-device move - copy then verify than delete
-      const sourceSize = (await stat(fromPath)).size
+      crossDevice = true
       await copyFile(fromPath, toPath)
       const copiedSize = (await stat(toPath)).size
 
@@ -308,7 +517,13 @@ async function moveFileToFolder(fromPath: string, toFolder: string): Promise<str
       throw err
     }
   }
-  return toPath
+
+  const durationMs = Date.now() - start
+  console.log(
+    `[move] ${crossDevice ? 'cross-device copy' : 'same-device rename'} — ` +
+      `${fileSizeMB}MB in ${durationMs}ms (${fromPath} -> ${toPath})`
+  )
+  return { path: toPath, crossDevice, fileSizeMB, durationMs }
 }
 
 // Update just the analysis fields after Phase 2 completes
@@ -342,24 +557,38 @@ async function runFolderImport(
 }> {
   // Pause watcher for this root during import to avoid EMFILE
   const roots = getAllRoots()
-  const matchingRoot = roots.find((r) => folderPath.startsWith(r.path))
-  if (matchingRoot) await stopWatcher(matchingRoot.id)
+  const matchingRoot = roots.find((r) => isPathUnder(folderPath, r.path))
+  if (matchingRoot) {
+    await stopWatcher(matchingRoot.id)
+    // Create the root's own folder row immediately, not after Pass 1 — the
+    // renderer's root picker resolves a root's card to a folder id via
+    // folders:tree and stays unclickable (no crash, just a silent no-op)
+    // until that row exists, which previously meant the whole counting
+    // phase on a large library.
+    ensureFolderTree(matchingRoot.id, [''])
+  }
 
   const id = jobId ?? randomUUID()
-  const job: ImportJob = importJobs.get(id) ?? {
-    id,
-    folderPath,
-    filepaths: [],
-    nextIndex: 0,
-    scanned: 0,
-    found: 0,
-    skipped: 0,
-    total: 0,
-    cancelRequested: false,
-    status: 'counting',
-    batchThroughputs: []
-  }
-  importJobs.set(id, job)
+  const existing = jobs.get(id)
+  const job: ImportJob =
+    existing && existing.type === 'import'
+      ? existing
+      : {
+          type: 'import',
+          id,
+          folderPath,
+          filepaths: [],
+          relativeDirs: [],
+          nextIndex: 0,
+          scanned: 0,
+          found: 0,
+          skipped: 0,
+          total: 0,
+          cancelRequested: false,
+          status: 'counting',
+          batchThroughputs: []
+        }
+  jobs.set(id, job)
 
   const emit = (p: ImportProgressPayload): void => event.sender.send('import:progress', p)
 
@@ -384,7 +613,17 @@ async function runFolderImport(
       }
     }
 
-    job.filepaths = scanned
+    job.filepaths = scanned.files
+    // scanned.dirs are relative to folderPath, but ensureFolderTree needs
+    // them relative to the registered ROOT — the same thing only when
+    // folderPath is the root itself. Re-scanning a subfolder of an
+    // already-registered root (folderPath !== matchingRoot.path, e.g. via
+    // FolderView's "Re-scan this folder") would otherwise resolve every
+    // file's "" relative dir to the root's own folder id instead of the
+    // subfolder's.
+    job.relativeDirs = matchingRoot
+      ? scanned.dirs.map((d) => relative(matchingRoot.path, join(folderPath, d)))
+      : scanned.dirs
     job.total = job.filepaths.length
   }
 
@@ -392,8 +631,21 @@ async function runFolderImport(
     job.status = 'done'
     emit(buildProgressPayload(job, 'done'))
     if (matchingRoot) startWatcher(matchingRoot.id, matchingRoot.path)
-    importJobs.delete(id)
+    jobs.delete(id)
     return { imported: 0, failed: 0, total: 0, jobId: id }
+  }
+
+  // Build the folder tree once per job (idempotent — safe to redo on resume)
+  // and resolve each file's directory to a folder id from it. No matchingRoot
+  // means this folder isn't a registered library root — folder_id stays null
+  // for every track in that case, same as importSingleFile.
+  if (!job.folderIdByRelPath && matchingRoot) {
+    job.folderIdByRelPath = ensureFolderTree(matchingRoot.id, job.relativeDirs)
+  }
+  const resolveFolderId = (filepath: string): number | null => {
+    if (!job.folderIdByRelPath || !matchingRoot) return null
+    const relDir = relative(matchingRoot.path, dirname(filepath))
+    return job.folderIdByRelPath.get(relDir) ?? null
   }
 
   // Pass 2 (parse) — fast tag read + insert, batched into ~200-row transactions
@@ -458,7 +710,7 @@ async function runFolderImport(
               return
             }
             parsedRows.push({
-              data: buildTrackData(filepath, result),
+              data: buildTrackData(filepath, result, resolveFolderId(filepath)),
               artwork: result.artwork_base64
             })
           } catch {
@@ -476,14 +728,15 @@ async function runFolderImport(
     // One transaction per batch instead of one fsync-backed write per file
     if (parsedRows.length > 0) {
       const inserted = insertTracksBatch(parsedRows.map((r) => r.data))
-      inserted.forEach((row, idx) => {
+      for (let idx = 0; idx < inserted.length; idx++) {
+        const row = inserted[idx]
         job.found++
         const artwork = parsedRows[idx].artwork
         if (artwork && row.id > 0) {
-          const artworkPath = saveArtwork(row.id, artwork)
-          if (artworkPath) updateArtworkPath(row.id, artworkPath)
+          const hash = await storeArtwork(Buffer.from(artwork, 'base64'))
+          if (hash) setTrackArtworkHash(row.id, hash)
         }
-      })
+      }
     }
 
     job.nextIndex = i + batchPaths.length
@@ -509,7 +762,7 @@ async function runFolderImport(
 
   job.status = 'done'
   emit(buildProgressPayload(job, 'done'))
-  importJobs.delete(id)
+  jobs.delete(id)
 
   // Restart watcher after import completes
   if (matchingRoot) startWatcher(matchingRoot.id, matchingRoot.path)
@@ -694,16 +947,18 @@ app.whenReady().then(() => {
   // ── Tracks ──────────────────────────────────────────────
   ipcMain.handle('library:import-folder', async (event, folderPath: string) => {
     try {
-      const result = await runFolderImport(event, folderPath)
-
-      // Register as root if not already nested
+      // Register as root if not already nested — done BEFORE the import
+      // (not after) so runFolderImport has a library_root row to resolve
+      // folder_id against via ensureFolderTree.
       const existingRoots = getAllRoots()
-      const alreadyNested = existingRoots.some((r) => folderPath.startsWith(r.path))
+      const alreadyNested = existingRoots.some((r) => isPathUnder(folderPath, r.path))
       if (!alreadyNested) {
         const rootResult = addRoot(basename(folderPath), folderPath)
         const rootId = Number(rootResult.lastInsertRowid)
         startWatcher(rootId, folderPath)
       }
+
+      const result = await runFolderImport(event, folderPath)
 
       return { ok: true, ...result }
     } catch (err) {
@@ -712,15 +967,16 @@ app.whenReady().then(() => {
   })
 
   ipcMain.handle('import:cancel', (_e, jobId: string) => {
-    const job = importJobs.get(jobId)
-    if (!job) return { ok: false, error: 'Unknown or already-finished job' }
+    const job = jobs.get(jobId)
+    if (!job || job.type !== 'import')
+      return { ok: false, error: 'Unknown or already-finished job' }
     job.cancelRequested = true
     return { ok: true }
   })
 
   ipcMain.handle('import:resume', async (event, jobId: string) => {
-    const job = importJobs.get(jobId)
-    if (!job) {
+    const job = jobs.get(jobId)
+    if (!job || job.type !== 'import') {
       return {
         ok: false,
         error: 'Job not found — in-memory resume does not survive an app restart'
@@ -742,13 +998,14 @@ app.whenReady().then(() => {
     try {
       // Phase 1
       const fastResult = await readTagsFast(filepath)
+      // TODO: optionally resolve against a registered root if the file lives under one
       const trackData = buildTrackData(filepath, fastResult)
       const insertResult = insertTrack(trackData) as { lastInsertRowid: number | bigint }
       const trackId = Number(insertResult.lastInsertRowid)
 
       if (fastResult.artwork_base64 && trackId > 0) {
-        const artworkPath = saveArtwork(trackId, fastResult.artwork_base64)
-        if (artworkPath) updateArtworkPath(trackId, artworkPath)
+        const hash = await storeArtwork(Buffer.from(fastResult.artwork_base64, 'base64'))
+        if (hash) setTrackArtworkHash(trackId, hash)
       }
 
       // Tell renderer the track exists so it can refresh the list
@@ -817,6 +1074,14 @@ app.whenReady().then(() => {
 
   ipcMain.handle('db:track-by-id', (_e, id: number) => getTrackById(id))
 
+  // ── Artwork ────────────────────────────────────────────
+  ipcMain.handle('artwork:path-for', (_e, hash: string | null, size: 'full' | 'thumb') =>
+    artworkPathFor(hash, size)
+  )
+
+  // TODO: surface in Settings as a manual "Clean up" action
+  ipcMain.handle('artwork:sweep-orphaned', () => sweepOrphanedArtwork())
+
   ipcMain.handle('db:insert-track', (_e, track: Record<string, unknown>) => {
     try {
       const result = insertTrack(track) as { lastInsertRowid: number | bigint }
@@ -881,12 +1146,26 @@ app.whenReady().then(() => {
       }
 
       // Move the file
-      const newPath = await moveFileToFolder(fromPath, toFolder)
+      const moveResult = await moveFileToFolder(fromPath, toFolder)
 
-      // Update DB — filepath changed
-      updateTrackFilepath(fromPath, newPath)
+      // Update DB — filepath (and folder_id, via updateTrackFilepath) changed
+      updateTrackFilepath(fromPath, moveResult.path)
 
-      return { ok: true, newPath }
+      // Not an error — a move to an untracked location is valid, just worth
+      // telling the DJ about since the track's folder_id will be null.
+      const underRoot = getAllRoots().some((r) => isPathUnder(toFolder, r.path))
+
+      return {
+        ok: true,
+        newPath: moveResult.path,
+        underRoot,
+        // Temporary diagnostic — see moveFileToFolder's comment.
+        diagnostics: {
+          crossDevice: moveResult.crossDevice,
+          fileSizeMB: moveResult.fileSizeMB,
+          durationMs: moveResult.durationMs
+        }
+      }
     } catch (err) {
       return { ok: false, error: (err as Error).message }
     }
@@ -899,9 +1178,9 @@ app.whenReady().then(() => {
 
     for (const fromPath of fromPaths) {
       try {
-        const newPath = await moveFileToFolder(fromPath, toFolder)
-        updateTrackFilepath(fromPath, newPath)
-        results.push({ path: fromPath, ok: true, newPath })
+        const moveResult = await moveFileToFolder(fromPath, toFolder)
+        updateTrackFilepath(fromPath, moveResult.path)
+        results.push({ path: fromPath, ok: true, newPath: moveResult.path })
       } catch (err) {
         results.push({
           path: fromPath,
@@ -989,7 +1268,25 @@ app.whenReady().then(() => {
       }
 
       await mkdir(newFolderPath, { recursive: false })
-      return { ok: true, path: newFolderPath }
+
+      // Mirror the new directory into `folders` if it's under a registered
+      // root — same self-healing ensureFolderTree call updateTrackFilepath
+      // uses for a moved track. Without this, the folder is invisible to
+      // FolderView until a full re-import walks it. ensureFolderTree emits
+      // folderEvents' 'changed' itself when it inserts a row, forwarded to
+      // the renderer as 'folders:changed' — a plain mkdir has no effect on
+      // `tracks`, so (unlike a move) nothing else would trigger a refetch.
+      const folderId = ensureFolderForDirectory(newFolderPath)
+
+      return {
+        ok: true,
+        path: newFolderPath,
+        folderId,
+        reason:
+          folderId === null
+            ? "Not under a registered library root — this folder won't appear in the library tree"
+            : undefined
+      }
     } catch (err) {
       return { ok: false, error: (err as Error).message }
     }
@@ -1159,7 +1456,7 @@ app.whenReady().then(() => {
 
       // Check not already nested iinside existing root
       const existingRoots = getAllRoots()
-      const alreadyNested = existingRoots.some((r) => folderPath.startsWith(r.path))
+      const alreadyNested = existingRoots.some((r) => isPathUnder(folderPath, r.path))
 
       if (alreadyNested) {
         return { ok: false, error: 'This folder is already inside a registered library root' }
@@ -1191,6 +1488,22 @@ app.whenReady().then(() => {
       return { ok: false, error: (err as Error).message }
     }
   })
+
+  // ── Folders ──────────────────────────────────────────────
+
+  // One subscription covers every ensureFolderTree caller (import, watcher,
+  // fs:create-folder, and a track move) — see folderEvents' comment in db.ts.
+  folderEvents.on('changed', () => {
+    mainWindow?.webContents.send('folders:changed', {})
+  })
+
+  ipcMain.handle('folders:tree', (_e, rootId?: number) => getFolderTree(rootId))
+
+  ipcMain.handle('tracks:by-folder', (_e, folderId: number, recursive: boolean) =>
+    getTracksByFolder(folderId, recursive)
+  )
+
+  ipcMain.handle('tracks:folder-counts', () => getFolderTrackCounts())
 
   // ── Boards ──────────────────────────────────────────────
 
@@ -1225,13 +1538,23 @@ app.whenReady().then(() => {
         const result = await readTagsFast(filepath)
         if (!result.success) return
 
-        const trackData = buildTrackData(filepath, result)
+        // Resolve the containing directory to a folder id — idempotent and
+        // cheap (one directory, not a whole-tree walk) since ensureFolderTree
+        // reuses whatever's already registered under this root.
+        let folderId: number | null = null
+        const root = getAllRoots().find((r) => r.id === rootId)
+        if (root) {
+          const relDir = relative(root.path, dirname(filepath))
+          folderId = ensureFolderTree(rootId, [relDir]).get(relDir) ?? null
+        }
+
+        const trackData = buildTrackData(filepath, result, folderId)
         const insertResult = insertTrack(trackData) as { lastInsertRowid: number | bigint }
         const trackId = Number(insertResult.lastInsertRowid)
 
         if (result.artwork_base64 && trackId > 0) {
-          const artworkPath = saveArtwork(trackId, result.artwork_base64)
-          if (artworkPath) updateArtworkPath(trackId, artworkPath)
+          const hash = await storeArtwork(Buffer.from(result.artwork_base64, 'base64'))
+          if (hash) setTrackArtworkHash(trackId, hash)
         }
 
         // Queue as pending change for DJ to review
@@ -1365,6 +1688,19 @@ app.whenReady().then(() => {
   })
 
   createWindow()
+
+  // One-time, best-effort — do not await; must never delay window creation.
+  migrateArtworkToContentAddressed().catch((err) => {
+    console.error('[artwork migration] unexpected failure:', err)
+  })
+
+  // One-time, synchronous (pure SQL, no per-file I/O) — assigns folder_id to
+  // tracks imported before the folders table had a writer.
+  try {
+    backfillTrackFolderIds()
+  } catch (err) {
+    console.error('[folder backfill] unexpected failure:', err)
+  }
 
   app.on('activate', function () {
     // On macOS it's common to re-create a window in the app when the
