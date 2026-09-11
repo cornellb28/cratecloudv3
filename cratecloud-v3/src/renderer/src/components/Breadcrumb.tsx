@@ -10,8 +10,7 @@ const VIEW_LABELS: Record<View, string> = {
   dashboard: 'Home',
   library: 'All Tracks',
   board: 'Board',
-  genre: 'Genres',
-  artist: 'Artists',
+  tags: 'Tags',
   folders: 'Folders',
   crates: 'Crates',
   settings: 'Settings'

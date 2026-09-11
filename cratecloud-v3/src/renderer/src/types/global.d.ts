@@ -83,6 +83,9 @@ declare global {
         updateBoardId: (id: number, boardId: number) => Promise<{ ok: boolean; error?: string }>
         tracksByBoardId: (id: number, boardId: number) => Promise<Track[]>
         markMissing: (filepath: string) => Promise<{ ok: boolean; error?: string }>
+        // deleteFile: true also moves the audio file to the OS Trash before
+        // the DB row is dropped; false removes only the CrateCloud entry.
+        deleteTrack: (id: number, deleteFile: boolean) => Promise<{ ok: boolean; error?: string }>
         markAnalyzed: (id: number) => Promise<{ ok: boolean; error?: string }>
         tracksByFolder: (folderId: number, recursive: boolean) => Promise<Track[]>
         folderTrackCounts: () => Promise<{ folder_id: number; count: number }[]>
@@ -135,13 +138,39 @@ declare global {
 
       crates: {
         all: () => Promise<Crate[]>
+        // crate_id -> track_id[] — powers the "which crates already have
+        // this track" picker without one query per crate.
+        allTrackIds: () => Promise<Record<number, number[]>>
         insert: (
           name: string,
+          parentCrateId: number | null,
           color: string
         ) => Promise<{ ok: boolean; id?: number; error?: string }>
-        addTrack: (crateId: number, trackId: number) => Promise<{ ok: boolean; error?: string }>
+        rename: (id: number, name: string) => Promise<{ ok: boolean; error?: string }>
+        moveParent: (
+          id: number,
+          parentCrateId: number | null
+        ) => Promise<{ ok: boolean; error?: string }>
+        delete: (id: number) => Promise<{ ok: boolean; error?: string }>
+        addTracks: (crateId: number, trackIds: number[]) => Promise<{ ok: boolean; error?: string }>
+        removeTracks: (
+          crateId: number,
+          trackIds: number[]
+        ) => Promise<{ ok: boolean; error?: string }>
         tracks: (crateId: number) => Promise<Track[]>
+        // orderedTrackIds is the FULL new order for the crate — every reorder
+        // path (column-sort, drag, keyboard nudge, undo) renumbers the whole
+        // crate in one transaction; see reorderCrateTracks in main/db.ts.
+        reorder: (
+          crateId: number,
+          orderedTrackIds: number[]
+        ) => Promise<{ ok: boolean; error?: string }>
+        isSeratoRunning: () => Promise<boolean>
+        export: (crateIds: number[]) => Promise<{ jobId: string }>
       }
+
+      onCrateExportProgress: (cb: (p: ExportProgressPayload) => void) => void
+      offCrateExportProgress: () => void
 
       boards: {
         all: () => Promise<Board[]>
@@ -189,7 +218,9 @@ declare global {
         // Drag-and-drop from Finder — see fs:classify-paths/fs:copy-into-folder
         // in main/index.ts. classifyPaths never guesses from a filename; the
         // renderer just routes on the returned kind.
-        classifyPaths: (paths: string[]) => Promise<{ path: string; kind: 'dir' | 'audio' | 'other' }[]>
+        classifyPaths: (
+          paths: string[]
+        ) => Promise<{ path: string; kind: 'dir' | 'audio' | 'other' }[]>
         copyIntoFolder: (payload: {
           sourcePaths: string[]
           destAbsolutePath: string
@@ -301,7 +332,10 @@ declare global {
     id: number
     name: string
     color: string
+    parent_crate_id: number | null
     created_at: number
+    updated_at: number
+    last_exported_at: number | null
     track_count?: number
   }
 
@@ -390,6 +424,20 @@ declare global {
     totalBytes: number
     failed: { sourcePath: string; error: string }[]
     deleteSource: boolean
+  }
+
+  // TODO: independently redefined here, in main/index.ts, and in
+  // preload/index.ts — see the same TODO on JobState in useLibraryStore.ts.
+  interface ExportProgressPayload {
+    jobId: string
+    phase: 'running' | 'done' | 'error'
+    done: number
+    total: number
+    currentCrateName: string
+    volumesWritten: number
+    missingSkipped: number
+    exportedCrateNames: string[]
+    failed: { crateId: number; crateName: string; error: string }[]
   }
 
   interface LibraryRoot {

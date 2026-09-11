@@ -4,14 +4,23 @@ import { usePlayerStore } from '../store/usePlayerStore'
 import { Badge } from '@renderer/components/ui/badge'
 import { Checkbox } from '@renderer/components/ui/checkbox'
 import { useArtworkUrl } from '../hooks/useArtworkUrl'
+import { TrackRowMenu } from './TrackRowMenu'
 
 interface TrackRowProps {
   track: Track
   isSelected?: boolean
   onSelected?: (id: number) => void
+  // Set when this row is rendered inside that crate's own track list — adds
+  // a "Remove from crate" action to the row's "…" menu.
+  crateId?: number
 }
 
-export function TrackRow({ track, isSelected, onSelected }: TrackRowProps): React.JSX.Element {
+export function TrackRow({
+  track,
+  isSelected,
+  onSelected,
+  crateId
+}: TrackRowProps): React.JSX.Element {
   const { activeTrackId, setActiveTrack, trackTags } = useLibraryStore()
   const { currentTrack, isPlaying, playTrack, togglePlayPause } = usePlayerStore()
   const isActive = activeTrackId === track.id
@@ -31,8 +40,12 @@ export function TrackRow({ track, isSelected, onSelected }: TrackRowProps): Reac
   return (
     <div
       data-testid={`track-row-${track.id}`}
-      onClick={() => setActiveTrack(isActive ? null : track.id)}
+      onClick={() => {
+        setActiveTrack(isActive ? null : track.id)
+        if (!isActive) usePlayerStore.getState().playTrack(track)
+      }}
       style={{
+        position: 'relative',
         padding: '8px 16px',
         marginBottom: '2px',
         background: isActive ? '#1a1830' : '#1a1a26',
@@ -42,6 +55,9 @@ export function TrackRow({ track, isSelected, onSelected }: TrackRowProps): Reac
         transition: 'all 0.1s'
       }}
     >
+      <div style={{ position: 'absolute', top: '8px', right: '12px' }}>
+        <TrackRowMenu track={track} crateId={crateId} />
+      </div>
       <Checkbox
         checked={isSelected}
         onCheckedChange={() => onSelected?.(track.id)}
@@ -49,18 +65,20 @@ export function TrackRow({ track, isSelected, onSelected }: TrackRowProps): Reac
         className="border-[#333] data-[state=checked]:bg-[#7f77dd] data-[state=checked]:border-[#7f77dd]"
       />
       {/* Artwork */}
-      <div style={{
-        width: '40px',
-        height: '40px',
-        borderRadius: '4px',
-        flexShrink: 0,
-        overflow: 'hidden',
-        background: '#1e1e2a',
-        display: 'flex',
-        alignItems: 'center',
-        justifyContent: 'center',
-        position: 'relative'
-      }}>
+      <div
+        style={{
+          width: '40px',
+          height: '40px',
+          borderRadius: '4px',
+          flexShrink: 0,
+          overflow: 'hidden',
+          background: '#1e1e2a',
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'center',
+          position: 'relative'
+        }}
+      >
         {artworkUrl ? (
           <img
             src={artworkUrl}
@@ -104,17 +122,17 @@ export function TrackRow({ track, isSelected, onSelected }: TrackRowProps): Reac
       </div>
       <div style={{ fontWeight: 500, fontSize: '13px' }}>
         {track.title ?? track.filename ?? 'Untitled'}
-        <span style={{ color: '#555', fontWeight: 400 }}>
-          {' '}— {track.artist ?? 'Unknown'}
-        </span>
+        <span style={{ color: '#555', fontWeight: 400 }}> — {track.artist ?? 'Unknown'}</span>
       </div>
-      <div style={{
-        color: '#555',
-        fontSize: '11px',
-        marginTop: '3px',
-        display: 'flex',
-        gap: '8px',
-      }}>
+      <div
+        style={{
+          color: '#555',
+          fontSize: '11px',
+          marginTop: '3px',
+          display: 'flex',
+          gap: '8px'
+        }}
+      >
         {track.bpm && (
           <Badge
             variant="outline"
@@ -131,9 +149,7 @@ export function TrackRow({ track, isSelected, onSelected }: TrackRowProps): Reac
             {track.key_camelot}
           </Badge>
         )}
-        {track.duration_str && (
-          <span>{track.duration_str}</span>
-        )}
+        {track.duration_str && <span>{track.duration_str}</span>}
         {track.genre && (
           <Badge
             variant="outline"
@@ -143,7 +159,7 @@ export function TrackRow({ track, isSelected, onSelected }: TrackRowProps): Reac
           </Badge>
         )}
         {/* Applied tag badges */}
-        {appliedTags.map(tag => (
+        {appliedTags.map((tag) => (
           <Badge
             key={tag.id}
             variant="outline"

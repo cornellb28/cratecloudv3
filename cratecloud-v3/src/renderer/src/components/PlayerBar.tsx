@@ -236,6 +236,7 @@ export function PlayerBar(): React.JSX.Element | null {
           {currentTrack.artist ?? ''}
           {currentTrack.format ? ` · ${currentTrack.format}` : ''}
           {currentTrack.bpm ? ` · ${currentTrack.bpm} BPM` : ''}
+          {currentTrack.key_camelot ? ` · ${currentTrack.key_camelot}` : ''}
         </div>
       </div>
 

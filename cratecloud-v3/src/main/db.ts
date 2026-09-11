@@ -199,42 +199,30 @@ db.exec(`
 
   -- ─────────────────────────────────────────────────────
   -- CRATES
-  -- DJ-curated groupings. Independent of folder location.
-  -- A track can be in many crates.
-  -- A crate can have many tracks.
+  -- Ordered, nestable, Serato-exportable track lists.
+  -- Absorbs what used to be the separate (and unused)
+  -- "setlists" concept — a crate is both a DJ-curated
+  -- grouping AND the ordered list that gets exported.
+  -- A track can be in many crates. Nesting via
+  -- parent_crate_id (Serato "Parent%%Child" naming).
   -- ─────────────────────────────────────────────────────
 
   CREATE TABLE IF NOT EXISTS crates (
-    id         INTEGER PRIMARY KEY AUTOINCREMENT,
-    name       TEXT    NOT NULL,
-    color      TEXT    NOT NULL DEFAULT '#7f77dd',
-    created_at INTEGER NOT NULL DEFAULT (strftime('%s','now'))
+    id               INTEGER PRIMARY KEY AUTOINCREMENT,
+    name             TEXT    NOT NULL,
+    color            TEXT    NOT NULL DEFAULT '#7f77dd',
+    parent_crate_id  INTEGER REFERENCES crates(id) ON DELETE CASCADE,
+    created_at       INTEGER NOT NULL DEFAULT (strftime('%s','now')),
+    updated_at       INTEGER NOT NULL DEFAULT (strftime('%s','now')),
+    last_exported_at INTEGER
   );
 
   CREATE TABLE IF NOT EXISTS crate_tracks (
     crate_id INTEGER NOT NULL REFERENCES crates(id)  ON DELETE CASCADE,
     track_id INTEGER NOT NULL REFERENCES tracks(id)  ON DELETE CASCADE,
+    position INTEGER NOT NULL,
     added_at INTEGER NOT NULL DEFAULT (strftime('%s','now')),
     PRIMARY KEY (crate_id, track_id)
-  );
-
-  -- ─────────────────────────────────────────────────────
-  -- SETLISTS
-  -- Ordered track lists for gig prep.
-  -- Position column preserves the DJ's track order.
-  -- ─────────────────────────────────────────────────────
-
-  CREATE TABLE IF NOT EXISTS setlists (
-    id         INTEGER PRIMARY KEY AUTOINCREMENT,
-    name       TEXT    NOT NULL,
-    created_at INTEGER NOT NULL DEFAULT (strftime('%s','now'))
-  );
-
-  CREATE TABLE IF NOT EXISTS setlist_tracks (
-    setlist_id INTEGER NOT NULL REFERENCES setlists(id)  ON DELETE CASCADE,
-    track_id   INTEGER NOT NULL REFERENCES tracks(id)    ON DELETE CASCADE,
-    position   INTEGER NOT NULL DEFAULT 0,
-    UNIQUE(setlist_id, track_id)
   );
 
   -- ─────────────────────────────────────────────────────
@@ -389,6 +377,54 @@ if (!hasFolderMissing) {
   db.exec(`ALTER TABLE folders ADD COLUMN missing INTEGER NOT NULL DEFAULT 0`)
 }
 
+// crates: upgraded in place from a flat, unordered tagging bin (no position,
+// no nesting, no export tracking) to an ordered, nestable, Serato-exportable
+// list — added rather than dropped, since a real install could already have
+// crates with tracks in them.
+const crateColumns = db.prepare(`PRAGMA table_info(crates)`).all() as { name: string }[]
+if (!crateColumns.some((c) => c.name === 'parent_crate_id')) {
+  db.exec(
+    `ALTER TABLE crates ADD COLUMN parent_crate_id INTEGER REFERENCES crates(id) ON DELETE CASCADE`
+  )
+}
+if (!crateColumns.some((c) => c.name === 'updated_at')) {
+  db.exec(
+    `ALTER TABLE crates ADD COLUMN updated_at INTEGER NOT NULL DEFAULT (strftime('%s','now'))`
+  )
+}
+if (!crateColumns.some((c) => c.name === 'last_exported_at')) {
+  db.exec(`ALTER TABLE crates ADD COLUMN last_exported_at INTEGER`)
+}
+
+// crate_tracks.position: backfill in insertion order (rowid) using the same
+// gapped scheme new rows get, so an upgraded crate opens in its old
+// add-order rather than every track colliding at position 0.
+const crateTrackColumns = db.prepare(`PRAGMA table_info(crate_tracks)`).all() as { name: string }[]
+if (!crateTrackColumns.some((c) => c.name === 'position')) {
+  db.exec(`ALTER TABLE crate_tracks ADD COLUMN position INTEGER NOT NULL DEFAULT 0`)
+  const backfillPositions = db.transaction(() => {
+    const crateIds = db.prepare(`SELECT DISTINCT crate_id FROM crate_tracks`).all() as {
+      crate_id: number
+    }[]
+    const rowsForCrate = db.prepare(
+      `SELECT track_id FROM crate_tracks WHERE crate_id = ? ORDER BY rowid`
+    )
+    const setPosition = db.prepare(
+      `UPDATE crate_tracks SET position = ? WHERE crate_id = ? AND track_id = ?`
+    )
+    for (const { crate_id } of crateIds) {
+      const rows = rowsForCrate.all(crate_id) as { track_id: number }[]
+      rows.forEach((row, i) => setPosition.run((i + 1) * 1000, crate_id, row.track_id))
+    }
+  })
+  backfillPositions()
+}
+
+// setlists/setlist_tracks were schema-only scaffolding — never wired to any
+// function, IPC handler, or UI — fully superseded by ordered crates now.
+db.exec(`DROP TABLE IF EXISTS setlist_tracks`)
+db.exec(`DROP TABLE IF EXISTS setlists`)
+
 db.exec(`
   -- ─────────────────────────────────────────────────────
   -- APP SETTINGS
@@ -470,8 +506,10 @@ db.exec(`
     ON track_tags(tag_id);
   CREATE INDEX IF NOT EXISTS idx_crate_tracks_crate_id
     ON crate_tracks(crate_id);
-  CREATE INDEX IF NOT EXISTS idx_setlist_tracks_setlist_id
-    ON setlist_tracks(setlist_id);
+  CREATE INDEX IF NOT EXISTS idx_crate_tracks_order
+    ON crate_tracks(crate_id, position);
+  CREATE INDEX IF NOT EXISTS idx_crates_parent
+    ON crates(parent_crate_id);
   CREATE INDEX IF NOT EXISTS idx_folders_path
     ON folders(path);
   CREATE INDEX IF NOT EXISTS idx_folders_parent
@@ -592,6 +630,9 @@ const stmts = {
       updated_at   = datetime('now')
     WHERE filepath = ?
   `),
+  deleteTrack: db.prepare(`
+    DELETE FROM tracks WHERE id = ?
+  `),
 
   getNeedsSync: db.prepare(`
     SELECT * FROM tracks WHERE needs_sync = 1
@@ -704,8 +745,8 @@ const stmts = {
   // ── Crates ──────────────────────────────────────────
 
   insertCrate: db.prepare(`
-    INSERT INTO crates (name, color)
-    VALUES (@name, @color)
+    INSERT INTO crates (name, color, parent_crate_id)
+    VALUES (@name, @color, @parent_crate_id)
   `),
   getAllCrates: db.prepare(`
     SELECT
@@ -716,13 +757,21 @@ const stmts = {
     GROUP BY c.id
     ORDER BY c.name
   `),
-
-  addTrackToCrate: db.prepare(`
-    INSERT OR IGNORE INTO crate_tracks (crate_id, track_id)
-    VALUES (@crate_id, @track_id)
+  renameCrate: db.prepare(`
+    UPDATE crates SET name = @name, updated_at = strftime('%s','now') WHERE id = @id
+  `),
+  moveCrateParent: db.prepare(`
+    UPDATE crates SET parent_crate_id = @parent_crate_id, updated_at = strftime('%s','now')
+    WHERE id = @id
+  `),
+  deleteCrate: db.prepare(`
+    DELETE FROM crates WHERE id = ?
+  `),
+  touchCrateExported: db.prepare(`
+    UPDATE crates SET last_exported_at = strftime('%s','now') WHERE id = ?
   `),
 
-  removeTrackFromCrate: db.prepare(`
+  removeTracksFromCrate: db.prepare(`
     DELETE FROM crate_tracks
     WHERE crate_id = @crate_id AND track_id = @track_id
   `),
@@ -731,7 +780,25 @@ const stmts = {
     SELECT t.* FROM tracks t
     JOIN crate_tracks ct ON ct.track_id = t.id
     WHERE ct.crate_id = ?
-    ORDER BY t.artist, t.title
+    ORDER BY ct.position ASC
+  `),
+
+  getMaxCratePosition: db.prepare(`
+    SELECT MAX(position) as max_position FROM crate_tracks WHERE crate_id = ?
+  `),
+
+  addTrackToCratePosition: db.prepare(`
+    INSERT OR IGNORE INTO crate_tracks (crate_id, track_id, position)
+    VALUES (@crate_id, @track_id, @position)
+  `),
+
+  setCrateTrackPosition: db.prepare(`
+    UPDATE crate_tracks SET position = @position
+    WHERE crate_id = @crate_id AND track_id = @track_id
+  `),
+
+  getAllCrateTrackIds: db.prepare(`
+    SELECT crate_id, track_id FROM crate_tracks
   `),
 
   // ── Library roots ─────────────────────────────────────
@@ -940,6 +1007,16 @@ export function markTrackMissing(filepath: string): RunResult {
 
 export function markTrackFound(filepath: string): RunResult {
   return stmts.markFound.run(filepath)
+}
+
+// Cascades to crate_tracks/track_tags/setlist_tracks/pending_tag_imports via
+// their ON DELETE CASCADE foreign keys (PRAGMA foreign_keys is on — see top
+// of file), so this is the only statement a track removal needs at the DB
+// layer. Emits folderEvents since it changes a folder's track count.
+export function deleteTrack(id: number): RunResult {
+  const result = stmts.deleteTrack.run(id)
+  folderEvents.emit('changed')
+  return result
 }
 
 export function markTrackAnalyzed(id: number): RunResult {
@@ -1422,24 +1499,123 @@ export function confirmPendingImport(
 
 // ─── Crate functions ──────────────────────────────────────
 
-export function insertCrate(name: string, color = '#7f77dd'): RunResult {
-  return stmts.insertCrate.run({ name, color })
+// Gapped position scheme — new tracks land 1000 apart so a drag/insert only
+// ever has to touch the one row moving, not renumber the whole crate. Only
+// a full sort or a full manual reorder (reorderCrateTracks) renumbers
+// everything, in one transaction.
+const POSITION_GAP = 1000
+
+export function insertCrate(name: string, parentCrateId: number | null, color = '#7f77dd'): number {
+  const result = stmts.insertCrate.run({ name, color, parent_crate_id: parentCrateId })
+  return Number(result.lastInsertRowid)
 }
 
 export function getAllCrates(): Crate[] {
   return stmts.getAllCrates.all() as Crate[]
 }
 
-export function addTrackToCrate(crateId: number, trackId: number): RunResult {
-  return stmts.addTrackToCrate.run({ crate_id: crateId, track_id: trackId })
+export function renameCrate(id: number, name: string): void {
+  stmts.renameCrate.run({ id, name })
 }
 
-export function removeTrackFromCrate(crateId: number, trackId: number): RunResult {
-  return stmts.removeTrackFromCrate.run({ crate_id: crateId, track_id: trackId })
+// Walks the parent chain from candidateParentId looking for `id` — used to
+// reject a drag/move that would make a crate its own ancestor (e.g. dropping
+// a crate onto one of its own children). Returns true if moving `id` under
+// candidateParentId would create a cycle.
+function wouldCreateCycle(id: number, candidateParentId: number): boolean {
+  let current: number | null = candidateParentId
+  const seen = new Set<number>()
+  while (current !== null) {
+    if (current === id) return true
+    if (seen.has(current)) return true // defensive — pre-existing cycle
+    seen.add(current)
+    const row = db.prepare(`SELECT parent_crate_id FROM crates WHERE id = ?`).get(current) as
+      { parent_crate_id: number | null } | undefined
+    current = row?.parent_crate_id ?? null
+  }
+  return false
+}
+
+export function moveCrateParent(
+  id: number,
+  parentCrateId: number | null
+): { ok: boolean; error?: string } {
+  if (parentCrateId !== null) {
+    if (parentCrateId === id) return { ok: false, error: 'A crate cannot nest inside itself' }
+    if (wouldCreateCycle(id, parentCrateId)) {
+      return { ok: false, error: 'Cannot move a crate into its own subcrate' }
+    }
+  }
+  stmts.moveCrateParent.run({ id, parent_crate_id: parentCrateId })
+  return { ok: true }
+}
+
+export function deleteCrate(id: number): void {
+  stmts.deleteCrate.run(id)
 }
 
 export function getCrateTracks(crateId: number): Track[] {
   return stmts.getCrateTracks.all(crateId) as Track[]
+}
+
+// crateId -> track_id[] (in no particular order — callers that need crate
+// order use getCrateTracks). Powers the "which crates is this track already
+// in" picker without one query per crate.
+export function getAllCrateTrackIds(): Record<number, number[]> {
+  const rows = stmts.getAllCrateTrackIds.all() as { crate_id: number; track_id: number }[]
+  const byCrate: Record<number, number[]> = {}
+  for (const { crate_id, track_id } of rows) {
+    ;(byCrate[crate_id] ??= []).push(track_id)
+  }
+  return byCrate
+}
+
+// Adding an already-present track is a no-op (INSERT OR IGNORE), not a
+// duplicate — each new track appends at the end via the gapped scheme.
+export function addTracksToCrate(crateId: number, trackIds: number[]): void {
+  const run = db.transaction((ids: number[]) => {
+    for (const trackId of ids) {
+      const row = stmts.getMaxCratePosition.get(crateId) as { max_position: number | null }
+      const nextPosition = (row.max_position ?? 0) + POSITION_GAP
+      stmts.addTrackToCratePosition.run({
+        crate_id: crateId,
+        track_id: trackId,
+        position: nextPosition
+      })
+    }
+  })
+  run(trackIds)
+}
+
+export function removeTracksFromCrate(crateId: number, trackIds: number[]): void {
+  const run = db.transaction((ids: number[]) => {
+    for (const trackId of ids) {
+      stmts.removeTracksFromCrate.run({ crate_id: crateId, track_id: trackId })
+    }
+  })
+  run(trackIds)
+}
+
+// The one reorder primitive behind every reorder path: column-sort persist,
+// drag (single row or a multi-select block), keyboard nudge, and undo (which
+// just replays the previous order back through this same function). Always
+// renumbers the whole crate with fresh gaps — simplest way to guarantee no
+// collisions regardless of how the new order was produced.
+export function reorderCrateTracks(crateId: number, orderedTrackIds: number[]): void {
+  const run = db.transaction((ids: number[]) => {
+    ids.forEach((trackId, i) => {
+      stmts.setCrateTrackPosition.run({
+        crate_id: crateId,
+        track_id: trackId,
+        position: (i + 1) * POSITION_GAP
+      })
+    })
+  })
+  run(orderedTrackIds)
+}
+
+export function touchCrateExported(id: number): void {
+  stmts.touchCrateExported.run(id)
 }
 
 // ─── Board functions ──────────────────────────────────────

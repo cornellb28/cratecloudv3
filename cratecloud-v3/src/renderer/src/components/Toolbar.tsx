@@ -4,11 +4,12 @@ import { Button } from '@renderer/components/ui/button'
 import { Input } from '@renderer/components/ui/input'
 import { ViewModeToggle } from './ViewModeToggle'
 import { useViewMode } from '../hooks/useViewMode'
+import type { View } from './Sidebar'
 
 interface ToolbarProps {
   onImport: () => void
   onImportFiles: () => void
-  activeView: 'dashboard' | 'library' | 'board' | 'genre' | 'artist' | 'folders' | 'crates' | 'settings'
+  activeView: View
 }
 
 export function Toolbar({ onImport, activeView, onImportFiles }: ToolbarProps): React.JSX.Element {

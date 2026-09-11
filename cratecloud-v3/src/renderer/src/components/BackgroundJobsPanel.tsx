@@ -49,6 +49,19 @@ function moveStatusLabel(p: MoveProgressPayload): string {
   return `${label} · ${filename}`
 }
 
+function exportStatusLabel(p: ExportProgressPayload): string {
+  const label = `Exporting ${p.total} crate${p.total !== 1 ? 's' : ''} — ${p.done} of ${p.total}`
+  if (p.phase === 'running') return p.currentCrateName ? `${label} · ${p.currentCrateName}` : label
+  const missingSuffix =
+    p.missingSkipped > 0
+      ? ` · ${p.missingSkipped} missing track${p.missingSkipped !== 1 ? 's' : ''} skipped`
+      : ''
+  if (p.failed.length > 0) {
+    return `Done — ${p.exportedCrateNames.length} exported, ${p.failed.length} failed${missingSuffix}`
+  }
+  return `Done — ${p.exportedCrateNames.length} crate${p.exportedCrateNames.length !== 1 ? 's' : ''} exported to Serato${missingSuffix}`
+}
+
 function copyStatusLabel(p: CopyProgressPayload): string {
   // Same job, two labels — deleteSource is a FolderView Finder-drop (move
   // in place), unset is the EmptyView/Board copy-then-import path.
@@ -176,6 +189,18 @@ export function BackgroundJobsPanel({
                   </button>
                 ) : undefined
               }
+            />
+          )
+        }
+
+        if (job.type === 'export') {
+          const pct = job.total > 0 ? Math.round((job.done / job.total) * 100) : 0
+          return (
+            <ProgressRow
+              key={job.jobId}
+              label={exportStatusLabel(job)}
+              pct={pct}
+              showBar={job.phase === 'running'}
             />
           )
         }

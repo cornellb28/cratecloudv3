@@ -42,6 +42,20 @@ interface CopyProgressPayload {
   deleteSource: boolean
 }
 
+// TODO: independently redefined here, in main/index.ts, and in global.d.ts
+// — see the same TODO on JobState in useLibraryStore.ts.
+interface ExportProgressPayload {
+  jobId: string
+  phase: 'running' | 'done' | 'error'
+  done: number
+  total: number
+  currentCrateName: string
+  volumesWritten: number
+  missingSkipped: number
+  exportedCrateNames: string[]
+  failed: { crateId: number; crateName: string; error: string }[]
+}
+
 // Custom APIs for renderer
 const api = {
   // ── Audio analysis ─────────────────────────────────────────────────────
@@ -109,6 +123,8 @@ const api = {
       ipcRenderer.invoke('db:update-board-id', id, boardId),
     tracksByBoardId: (boardId: number) => ipcRenderer.invoke('db:tracks-by-board-id', boardId),
     markMissing: (filepath: string) => ipcRenderer.invoke('db:mark-missing', filepath),
+    deleteTrack: (id: number, deleteFile: boolean) =>
+      ipcRenderer.invoke('db:delete-track', id, deleteFile),
     markAnalyzed: (id: number) => ipcRenderer.invoke('db:mark-analyzed', id),
     tracksByFolder: (folderId: number, recursive: boolean) =>
       ipcRenderer.invoke('tracks:by-folder', folderId, recursive),
@@ -145,11 +161,26 @@ const api = {
   // Crates
   crates: {
     all: () => ipcRenderer.invoke('crates:all'),
-    insert: (name: string, color: string) => ipcRenderer.invoke('crates:insert', name, color),
-    addTrack: (crateId: number, trackId: number) =>
-      ipcRenderer.invoke('crates:add-track', crateId, trackId),
-    tracks: (crateId: number) => ipcRenderer.invoke('crates:tracks', crateId)
+    allTrackIds: () => ipcRenderer.invoke('crates:all-track-ids'),
+    insert: (name: string, parentCrateId: number | null, color: string) =>
+      ipcRenderer.invoke('crates:insert', name, parentCrateId, color),
+    rename: (id: number, name: string) => ipcRenderer.invoke('crates:rename', id, name),
+    moveParent: (id: number, parentCrateId: number | null) =>
+      ipcRenderer.invoke('crates:move-parent', id, parentCrateId),
+    delete: (id: number) => ipcRenderer.invoke('crates:delete', id),
+    addTracks: (crateId: number, trackIds: number[]) =>
+      ipcRenderer.invoke('crates:add-tracks', crateId, trackIds),
+    removeTracks: (crateId: number, trackIds: number[]) =>
+      ipcRenderer.invoke('crates:remove-tracks', crateId, trackIds),
+    tracks: (crateId: number) => ipcRenderer.invoke('crates:tracks', crateId),
+    reorder: (crateId: number, orderedTrackIds: number[]) =>
+      ipcRenderer.invoke('crates:reorder', crateId, orderedTrackIds),
+    isSeratoRunning: () => ipcRenderer.invoke('crates:is-serato-running'),
+    export: (crateIds: number[]) => ipcRenderer.invoke('crates:export', crateIds)
   },
+  onCrateExportProgress: (cb: (p: ExportProgressPayload) => void) =>
+    ipcRenderer.on('crate-export:progress', (_e, p) => cb(p)),
+  offCrateExportProgress: () => ipcRenderer.removeAllListeners('crate-export:progress'),
 
   // Library roots
   roots: {

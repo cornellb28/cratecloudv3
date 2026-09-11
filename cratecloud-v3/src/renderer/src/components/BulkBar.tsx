@@ -1,26 +1,34 @@
 import { BulkEditModal } from './BulkEditModal'
 import React, { useState, useRef } from 'react'
+import { toast } from 'sonner'
 import { useLibraryStore } from '../store/useLibraryStore'
 import { Button } from './ui/button'
 import { FolderTreeDropdown } from './FolderTreeDropdown'
 import { CrossDeviceMoveDialog } from './CrossDeviceMoveDialog'
+import { CratePicker } from './CratePicker'
 
 interface BulkBarProps {
   selectedIds: Set<number>
   onClearSelect: () => void
   onSelectAll: () => void
   totalCount: number
+  // When set, BulkBar is rendered inside that crate's own track list — swaps
+  // in a "Remove from crate" action instead of (well, in addition to)
+  // "Add to crate", since the selection is already scoped to one crate.
+  crateId?: number
 }
 
 export function BulkBar({
   selectedIds,
   onClearSelect,
   totalCount,
-  onSelectAll
+  onSelectAll,
+  crateId
 }: BulkBarProps): React.JSX.Element | null {
-  const { tracks, upsertJob } = useLibraryStore()
+  const { tracks, upsertJob, removeTracksFromCrateLocally } = useLibraryStore()
   const [editModalOpen, setEditModalOpen] = useState(false)
   const [dropdownOpen, setDropdownOpen] = useState(false)
+  const [cratePickerOpen, setCratePickerOpen] = useState(false)
   const [anchor, setAnchor] = useState({ top: 0, left: 0, width: 0 })
   const [pendingMove, setPendingMove] = useState<{
     path: string
@@ -28,6 +36,7 @@ export function BulkBar({
     totalMB: number
   } | null>(null)
   const moveButtonRef = useRef<HTMLButtonElement>(null)
+  const crateButtonRef = useRef<HTMLButtonElement>(null)
 
   // Hide when nothing is selected
   if (selectedIds.size === 0) return null
@@ -79,6 +88,20 @@ export function BulkBar({
     // Same device, or the precheck itself failed — let the move job surface
     // any real error per-file rather than blocking on a failed precheck.
     startMoveJob(destAbsolutePath)
+  }
+
+  async function handleRemoveFromCrate(): Promise<void> {
+    if (crateId === undefined) return
+    const result = await window.api.crates.removeTracks(crateId, selectedArray)
+    if (result.ok) {
+      removeTracksFromCrateLocally(crateId, selectedArray)
+      toast.success(
+        `Removed ${selectedArray.length} track${selectedArray.length !== 1 ? 's' : ''} from crate`
+      )
+      onClearSelect()
+    } else {
+      toast.error('Could not remove from crate', { description: result.error })
+    }
   }
 
   return (
@@ -164,6 +187,38 @@ export function BulkBar({
         >
           Edit labels
         </Button>
+
+        {/* Add to crate button */}
+        <Button
+          ref={crateButtonRef}
+          variant="outline"
+          size="sm"
+          onClick={() => setCratePickerOpen((v) => !v)}
+          className="text-xs"
+          style={{ borderColor: '#7f77dd', color: '#a09be8' }}
+        >
+          Add to crate
+        </Button>
+        {cratePickerOpen && (
+          <CratePicker
+            trackIds={selectedArray}
+            anchorRef={crateButtonRef}
+            onClose={() => setCratePickerOpen(false)}
+          />
+        )}
+
+        {/* Remove from crate — only when BulkBar is scoped to one crate's view */}
+        {crateId !== undefined && (
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={() => void handleRemoveFromCrate()}
+            className="text-xs"
+            style={{ borderColor: '#3a3060', color: '#a09be8' }}
+          >
+            Remove from crate
+          </Button>
+        )}
 
         {/* Move to... button */}
         <Button

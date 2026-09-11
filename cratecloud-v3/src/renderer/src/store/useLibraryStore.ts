@@ -14,6 +14,7 @@ type JobState =
   | (ImportProgressPayload & { type: 'import' })
   | (MoveProgressPayload & { type: 'move'; trackIds: number[] })
   | (CopyProgressPayload & { type: 'copy' })
+  | (ExportProgressPayload & { type: 'export' })
 
 // ─── State shape ─────────────────────────────────────────
 
@@ -45,6 +46,13 @@ interface LibraryState {
   // etc.) sees the same data without each mounting its own fetch.
   folders: FolderRow[]
   folderCounts: { folder_id: number; count: number }[]
+
+  // Crates — the flat list (nesting is derived from parent_crate_id at
+  // render time, not stored as a tree here). crateTrackIds mirrors the
+  // crate_tracks join for cheap "is this track already in crate X"
+  // lookups (CratePicker), keyed by crateId.
+  crates: Crate[]
+  crateTrackIds: Map<number, Set<number>>
 
   // Background jobs (import today, move once added) keyed by jobId — see
   // JobState above for the pending 'move' variant.
@@ -91,6 +99,15 @@ interface LibraryState {
   upsertJob: (job: JobState) => void
   removeJob: (jobId: string) => void
   setPendingFolderNav: (folderId: number | null) => void
+
+  // ── Crates ───────────────────────────────────────────
+  setCrates: (crates: Crate[]) => void
+  setCrateTrackIds: (byCrate: Record<number, number[]>) => void
+  upsertCrateLocally: (crate: Crate) => void
+  patchCrateLocally: (id: number, changes: Partial<Crate>) => void
+  removeCrateLocally: (id: number) => void
+  addTracksToCrateLocally: (crateId: number, trackIds: number[]) => void
+  removeTracksFromCrateLocally: (crateId: number, trackIds: number[]) => void
 }
 
 // ─── Store ───────────────────────────────────────────────
@@ -107,6 +124,8 @@ export const useLibraryStore = create<LibraryState>((set) => ({
   trackTags: new Map(),
   folders: [],
   folderCounts: [],
+  crates: [],
+  crateTrackIds: new Map(),
   jobs: {},
   pendingFolderNav: null,
   viewModes: {},
@@ -210,7 +229,81 @@ export const useLibraryStore = create<LibraryState>((set) => ({
     }),
 
   // ── Cross-component navigation signal ──────────────────
-  setPendingFolderNav: (folderId) => set({ pendingFolderNav: folderId })
+  setPendingFolderNav: (folderId) => set({ pendingFolderNav: folderId }),
+
+  // ── Crates ─────────────────────────────────────────────
+  setCrates: (crates) => set({ crates }),
+
+  setCrateTrackIds: (byCrate) =>
+    set({
+      crateTrackIds: new Map(
+        Object.entries(byCrate).map(([crateId, trackIds]) => [Number(crateId), new Set(trackIds)])
+      )
+    }),
+
+  upsertCrateLocally: (crate) =>
+    set((state) => {
+      const exists = state.crates.some((c) => c.id === crate.id)
+      return {
+        crates: exists
+          ? state.crates.map((c) => (c.id === crate.id ? crate : c))
+          : [...state.crates, crate]
+      }
+    }),
+
+  patchCrateLocally: (id, changes) =>
+    set((state) => ({
+      crates: state.crates.map((c) => (c.id === id ? { ...c, ...changes } : c))
+    })),
+
+  removeCrateLocally: (id) =>
+    set((state) => {
+      // Cascades client-side too — parent_crate_id ON DELETE CASCADE means
+      // the server already dropped every descendant crate; mirror that here
+      // so a deleted parent's children don't linger in the sidebar until
+      // the next full crates:all refetch.
+      const dropped = new Set<number>([id])
+      let grew = true
+      while (grew) {
+        grew = false
+        for (const c of state.crates) {
+          if (c.parent_crate_id !== null && dropped.has(c.parent_crate_id) && !dropped.has(c.id)) {
+            dropped.add(c.id)
+            grew = true
+          }
+        }
+      }
+      const nextTrackIds = new Map(state.crateTrackIds)
+      dropped.forEach((cid) => nextTrackIds.delete(cid))
+      return {
+        crates: state.crates.filter((c) => !dropped.has(c.id)),
+        crateTrackIds: nextTrackIds
+      }
+    }),
+
+  addTracksToCrateLocally: (crateId, trackIds) =>
+    set((state) => {
+      const next = new Map(state.crateTrackIds)
+      const set_ = new Set(next.get(crateId) ?? [])
+      trackIds.forEach((id) => set_.add(id))
+      next.set(crateId, set_)
+      return {
+        crateTrackIds: next,
+        crates: state.crates.map((c) => (c.id === crateId ? { ...c, track_count: set_.size } : c))
+      }
+    }),
+
+  removeTracksFromCrateLocally: (crateId, trackIds) =>
+    set((state) => {
+      const next = new Map(state.crateTrackIds)
+      const set_ = new Set(next.get(crateId) ?? [])
+      trackIds.forEach((id) => set_.delete(id))
+      next.set(crateId, set_)
+      return {
+        crateTrackIds: next,
+        crates: state.crates.map((c) => (c.id === crateId ? { ...c, track_count: set_.size } : c))
+      }
+    })
 }))
 
 // ─── Derived state ────────────────────────────────────────

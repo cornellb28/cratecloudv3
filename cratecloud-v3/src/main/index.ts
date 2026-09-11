@@ -15,6 +15,7 @@ import {
   getTracksByIds,
   updateTrackMeta,
   markTrackMissing,
+  deleteTrack,
   getAllTags,
   getMostUsedTags,
   addRoot,
@@ -29,8 +30,15 @@ import {
   getPendingImports,
   getAllCrates,
   insertCrate,
-  addTrackToCrate,
+  renameCrate,
+  moveCrateParent,
+  deleteCrate,
+  addTracksToCrate,
+  removeTracksFromCrate,
   getCrateTracks,
+  getAllCrateTrackIds,
+  reorderCrateTracks,
+  touchCrateExported,
   getAllBoards,
   getTracksByColumn,
   updateBoardId,
@@ -65,6 +73,12 @@ import {
   isPathUnder
 } from './db'
 import { analyzeFile, readTagsFast } from './sidecar'
+import {
+  exportCrateToSerato,
+  isSeratoRunning,
+  buildCrateFileBaseName,
+  type CrateExportSettings
+} from './serato'
 
 // Raise file handle limit for large libraries
 try {
@@ -223,8 +237,45 @@ interface CopyJob {
   deleteSource: boolean
 }
 
+// ── Crate export job state (in-memory only) ──────────────────────────────
+// Deliberately coarse-grained (per-crate, not per-track) — writing a .crate
+// file is fast, so "progress" here is really "which crate in this batch are
+// we on," mainly useful for the "Export all crates" case.
+type ExportPhase = 'running' | 'done' | 'error'
+
+interface ExportFailure {
+  crateId: number
+  crateName: string
+  error: string
+}
+
+interface ExportProgressPayload {
+  jobId: string
+  phase: ExportPhase
+  done: number
+  total: number
+  currentCrateName: string
+  volumesWritten: number
+  missingSkipped: number
+  exportedCrateNames: string[]
+  failed: ExportFailure[]
+}
+
+interface ExportJob {
+  type: 'export'
+  id: string
+  crateIds: number[]
+  status: ExportPhase
+  doneCount: number
+  currentCrateName: string
+  volumesWritten: number
+  missingSkipped: number
+  exportedCrateNames: string[]
+  failed: ExportFailure[]
+}
+
 // One registry for every background job type, discriminated by `type`.
-type Job = ImportJob | MoveJob | CopyJob
+type Job = ImportJob | MoveJob | CopyJob | ExportJob
 const jobs = new Map<string, Job>()
 
 const COUNT_PROGRESS_INTERVAL_MS = 250
@@ -989,6 +1040,87 @@ function maybeEmitCopyProgress(
     job.lastEmitAt = now
     event.sender.send('copy:progress', buildCopyProgressPayload(job))
   }
+}
+
+// ── Crate export job ──────────────────────────────────────────────────────
+
+function buildExportProgressPayload(job: ExportJob): ExportProgressPayload {
+  return {
+    jobId: job.id,
+    phase: job.status,
+    done: job.doneCount,
+    total: job.crateIds.length,
+    currentCrateName: job.currentCrateName,
+    volumesWritten: job.volumesWritten,
+    missingSkipped: job.missingSkipped,
+    exportedCrateNames: job.exportedCrateNames,
+    failed: job.failed
+  }
+}
+
+// Root-first ancestor names for Serato's "Parent%%Child" nested-crate file
+// naming — walks parent_crate_id up from crateId, not including crateId's
+// own name (the caller appends that itself via buildCrateFileBaseName).
+function getAncestorNames(crateId: number, byId: Map<number, Crate>): string[] {
+  const names: string[] = []
+  const seen = new Set<number>()
+  let current = byId.get(crateId)?.parent_crate_id ?? null
+  while (current !== null && !seen.has(current)) {
+    seen.add(current)
+    const parent = byId.get(current)
+    if (!parent) break
+    names.unshift(parent.name)
+    current = parent.parent_crate_id
+  }
+  return names
+}
+
+// Each crateId in the job is independent — nesting is purely a Serato
+// display/naming convention (Parent%%Child), not track containment, so
+// exporting a parent never pulls in a child's tracks and vice versa. Every
+// crate writes its own file(s) from its own crate_tracks rows only.
+async function runExportJob(event: Electron.IpcMainInvokeEvent, job: ExportJob): Promise<void> {
+  const byId = new Map(getAllCrates().map((c) => [c.id, c]))
+  const settings: CrateExportSettings = {
+    libraryOverridePath: getSetting('serato_library_override'),
+    overwriteExisting: getSetting('serato_overwrite_existing') !== 'false'
+  }
+
+  for (const crateId of job.crateIds) {
+    const crate = byId.get(crateId)
+    if (!crate) continue
+    job.currentCrateName = crate.name
+    event.sender.send('crate-export:progress', buildExportProgressPayload(job))
+
+    const tracks = getCrateTracks(crateId)
+    const fileBaseName = buildCrateFileBaseName(getAncestorNames(crateId, byId), crate.name)
+    const outcome = await exportCrateToSerato(
+      {
+        id: crateId,
+        fileBaseName,
+        tracks: tracks.map((t) => ({ id: t.id, filepath: t.filepath, missing: !!t.missing }))
+      },
+      settings
+    )
+
+    job.doneCount += 1
+    job.missingSkipped += outcome.missingSkipped
+    if (outcome.error) {
+      job.failed.push({ crateId, crateName: crate.name, error: outcome.error })
+    } else {
+      job.volumesWritten += outcome.paths.length
+      if (outcome.paths.length > 0) {
+        job.exportedCrateNames.push(crate.name)
+        touchCrateExported(crateId)
+      }
+    }
+    event.sender.send('crate-export:progress', buildExportProgressPayload(job))
+  }
+
+  job.status =
+    job.crateIds.length > 0 && job.failed.length === job.crateIds.length ? 'error' : 'done'
+  event.sender.send('crate-export:progress', buildExportProgressPayload(job))
+  setTimeout(() => jobs.delete(job.id), 15000)
 }
 
 // Update just the analysis fields after Phase 2 completes
@@ -1904,6 +2036,33 @@ app.whenReady().then(() => {
     }
   })
 
+  // deleteFile moves the audio file to the OS Trash (recoverable) before
+  // dropping the DB row. An ENOENT (file already gone from disk) is not
+  // treated as failure — the desired end state already holds — but any
+  // other trash error (permissions, file in use) aborts before touching the
+  // DB, so a track never silently disappears from CrateCloud while its file
+  // is left behind untouched.
+  ipcMain.handle('db:delete-track', async (_e, id: number, deleteFile: boolean) => {
+    try {
+      const track = getTrackById(id)
+      if (!track) return { ok: false, error: 'Track not found' }
+      if (deleteFile) {
+        try {
+          await shell.trashItem(track.filepath)
+        } catch (err) {
+          const code = (err as NodeJS.ErrnoException).code
+          if (code !== 'ENOENT') {
+            return { ok: false, error: `Could not delete file: ${(err as Error).message}` }
+          }
+        }
+      }
+      deleteTrack(id)
+      return { ok: true }
+    } catch (err) {
+      return { ok: false, error: (err as Error).message }
+    }
+  })
+
   ipcMain.handle('sidecar:analyze', async (_e, filepath: string) => {
     try {
       const result = await analyzeFile(filepath)
@@ -2233,18 +2392,58 @@ app.whenReady().then(() => {
 
   ipcMain.handle('crates:all', () => getAllCrates())
 
-  ipcMain.handle('crates:insert', (_e, name: string, color: string) => {
+  ipcMain.handle('crates:all-track-ids', () => getAllCrateTrackIds())
+
+  ipcMain.handle(
+    'crates:insert',
+    (_e, name: string, parentCrateId: number | null, color: string) => {
+      try {
+        const id = insertCrate(name, parentCrateId, color)
+        return { ok: true, id }
+      } catch (err) {
+        return { ok: false, error: (err as Error).message }
+      }
+    }
+  )
+
+  ipcMain.handle('crates:rename', (_e, id: number, name: string) => {
     try {
-      const result = insertCrate(name, color)
-      return { ok: true, id: Number(result.lastInsertRowid) }
+      renameCrate(id, name)
+      return { ok: true }
     } catch (err) {
       return { ok: false, error: (err as Error).message }
     }
   })
 
-  ipcMain.handle('crates:add-track', (_e, crateId: number, trackId: number) => {
+  ipcMain.handle('crates:move-parent', (_e, id: number, parentCrateId: number | null) => {
     try {
-      addTrackToCrate(crateId, trackId)
+      return moveCrateParent(id, parentCrateId)
+    } catch (err) {
+      return { ok: false, error: (err as Error).message }
+    }
+  })
+
+  ipcMain.handle('crates:delete', (_e, id: number) => {
+    try {
+      deleteCrate(id)
+      return { ok: true }
+    } catch (err) {
+      return { ok: false, error: (err as Error).message }
+    }
+  })
+
+  ipcMain.handle('crates:add-tracks', (_e, crateId: number, trackIds: number[]) => {
+    try {
+      addTracksToCrate(crateId, trackIds)
+      return { ok: true }
+    } catch (err) {
+      return { ok: false, error: (err as Error).message }
+    }
+  })
+
+  ipcMain.handle('crates:remove-tracks', (_e, crateId: number, trackIds: number[]) => {
+    try {
+      removeTracksFromCrate(crateId, trackIds)
       return { ok: true }
     } catch (err) {
       return { ok: false, error: (err as Error).message }
@@ -2252,6 +2451,35 @@ app.whenReady().then(() => {
   })
 
   ipcMain.handle('crates:tracks', (_e, crateId: number) => getCrateTracks(crateId))
+
+  ipcMain.handle('crates:reorder', (_e, crateId: number, orderedTrackIds: number[]) => {
+    try {
+      reorderCrateTracks(crateId, orderedTrackIds)
+      return { ok: true }
+    } catch (err) {
+      return { ok: false, error: (err as Error).message }
+    }
+  })
+
+  ipcMain.handle('crates:is-serato-running', () => isSeratoRunning())
+
+  ipcMain.handle('crates:export', (event, crateIds: number[]) => {
+    const job: ExportJob = {
+      type: 'export',
+      id: randomUUID(),
+      crateIds,
+      status: 'running',
+      doneCount: 0,
+      currentCrateName: '',
+      volumesWritten: 0,
+      missingSkipped: 0,
+      exportedCrateNames: [],
+      failed: []
+    }
+    jobs.set(job.id, job)
+    runExportJob(event, job) // fire-and-forget — progress goes out over crate-export:progress
+    return { jobId: job.id }
+  })
 
   // ── Library roots ────────────────────────────────────────
 

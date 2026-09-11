@@ -16,6 +16,9 @@ import { ReconciliationModal } from './components/ReconciliationModal'
 import { Toaster } from './components/ui/sonner'
 import { BackgroundJobsPanel } from './components/BackgroundJobsPanel'
 import { PlayerBar } from './components/PlayerBar'
+import { TagsCloudView } from './views/TagsCloudView'
+import { TagPageView } from './views/TagPageView'
+import { CrateView } from './views/CrateView'
 
 // type View = 'dashboard' | 'library' | 'board' | 'genre' | 'artist' | 'folders' | 'crates' | 'settings'
 
@@ -39,13 +42,17 @@ function App(): React.JSX.Element {
     upsertJob,
     removeJob,
     mergeTracks,
-    setPendingFolderNav
+    setPendingFolderNav,
+    setCrates,
+    setCrateTrackIds
   } = useLibraryStore()
   const [activeView, setActiveView] = useState<View>('dashboard')
   // Add library roots to app state
   const [libraryRoots, setLibraryRoots] = useState<LibraryRoot[]>([])
   const [settingsOpen, setSettingsOpen] = useState(false)
   const [reconcileOpen, setReconcileOpen] = useState(false)
+  const [selectedTag, setSelectedTag] = useState<Tag | null>(null)
+  const [selectedCrateId, setSelectedCrateId] = useState<number | null>(null)
   const [analysisProgress, setAnalysisProgress] = useState<{
     done: number
     total: number
@@ -126,20 +133,34 @@ function App(): React.JSX.Element {
   // ── Load data on startup ──────────────────────────────
   useEffect(() => {
     async function load(): Promise<void> {
-      const [tracks, boards, tags, quickTags, roots, folderTree, folderCounts] = await Promise.all([
+      const [
+        tracks,
+        boards,
+        tags,
+        quickTags,
+        roots,
+        folderTree,
+        folderCounts,
+        crates,
+        crateTrackIds
+      ] = await Promise.all([
         window.api.db.allTracks(),
         window.api.boards.all(),
         window.api.tags.all(),
         window.api.tags.mostUsed(),
         window.api.roots.all(),
         window.api.folders.tree(),
-        window.api.db.folderTrackCounts()
+        window.api.db.folderTrackCounts(),
+        window.api.crates.all(),
+        window.api.crates.allTrackIds()
       ])
       setTracks(tracks)
       setBoards(boards)
       setTags(tags)
       setQuickTags(quickTags)
       setLibraryRoots(roots)
+      setCrates(crates)
+      setCrateTrackIds(crateTrackIds)
       // Initial snapshot — folders:changed (subscribed below) keeps it fresh
       // from here on, but that event only fires on a subsequent change, so
       // a library that's already fully imported needs this or the slice
@@ -258,6 +279,18 @@ function App(): React.JSX.Element {
       }
     })
 
+    // Crate export progress — coarse-grained (per-crate, not per-track), see
+    // ExportJob in main/index.ts. Failures surface inline in the panel label
+    // rather than a toast — a partial "Export all crates" failure isn't
+    // urgent enough to interrupt, and the per-crate error detail is already
+    // in the payload if that's ever surfaced in the UI.
+    window.api.onCrateExportProgress((p) => {
+      upsertJob({ ...p, type: 'export' })
+      if (p.phase === 'done' || p.phase === 'error') {
+        setTimeout(() => removeJob(p.jobId), 4000)
+      }
+    })
+
     // Phase 2 — update individual tracks as BPM/key comes in
     window.api.onTrackAnalyzed((data) => {
       updateTrack(data.trackId, {
@@ -286,6 +319,7 @@ function App(): React.JSX.Element {
       // touches the same block for, not something new to this task.
       window.api.offMoveProgress()
       window.api.offCopyProgress()
+      window.api.offCrateExportProgress()
       if (batchRefreshTimer.current) clearTimeout(batchRefreshTimer.current)
       if (foldersRefreshTimer.current) clearTimeout(foldersRefreshTimer.current)
     }
@@ -338,6 +372,11 @@ function App(): React.JSX.Element {
 
   async function handleCancelMove(jobId: string): Promise<void> {
     await window.api.fs.cancelMove(jobId)
+  }
+
+  function handleViewChange(view: View): void {
+    setActiveView(view)
+    if (view !== 'tags') setSelectedTag(null)
   }
 
   async function handleCancelCopy(jobId: string): Promise<void> {
@@ -418,11 +457,6 @@ function App(): React.JSX.Element {
     setPendingFolderNav(folder.id)
   }
 
-  // ── View change ───────────────────────────────────────
-  function handleViewChange(view: View): void {
-    setActiveView(view)
-  }
-
   return (
     <div
       style={{
@@ -497,6 +531,8 @@ function App(): React.JSX.Element {
           collapsed={sidebarCollapsed}
           onToggleCollapsed={() => setSidebarCollapsed(!sidebarCollapsed)}
           onOpenSettings={() => setSettingsOpen(true)}
+          selectedCrateId={selectedCrateId}
+          onSelectCrate={setSelectedCrateId}
         />
 
         {/* Content area */}
@@ -545,50 +581,34 @@ function App(): React.JSX.Element {
               </div>
             ))}
 
-          {activeView === 'genre' && (
-            <div
-              style={{
-                flex: 1,
-                display: 'flex',
-                alignItems: 'center',
-                justifyContent: 'center',
-                color: '#333',
-                fontSize: '14px'
-              }}
-            >
-              Genre view — coming soon
-            </div>
+          {activeView === 'tags' && !selectedTag && (
+            <TagsCloudView onTagSelect={(tag) => setSelectedTag(tag)} />
           )}
 
-          {activeView === 'artist' && (
-            <div
-              style={{
-                flex: 1,
-                display: 'flex',
-                alignItems: 'center',
-                justifyContent: 'center',
-                color: '#333',
-                fontSize: '14px'
-              }}
-            >
-              Artist view — coming soon
-            </div>
+          {activeView === 'tags' && selectedTag && (
+            <TagPageView tag={selectedTag} onBack={() => setSelectedTag(null)} />
           )}
 
-          {activeView === 'crates' && (
-            <div
-              style={{
-                flex: 1,
-                display: 'flex',
-                alignItems: 'center',
-                justifyContent: 'center',
-                color: '#333',
-                fontSize: '14px'
-              }}
-            >
-              Crates — coming soon
-            </div>
-          )}
+          {activeView === 'crates' &&
+            (selectedCrateId !== null ? (
+              <CrateView key={selectedCrateId} crateId={selectedCrateId} />
+            ) : (
+              <div
+                style={{
+                  flex: 1,
+                  display: 'flex',
+                  flexDirection: 'column',
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                  gap: '8px',
+                  color: '#333',
+                  fontSize: '14px'
+                }}
+              >
+                <span style={{ fontSize: '48px' }}>◫</span>
+                <div>Select a crate from the sidebar</div>
+              </div>
+            ))}
         </div>
 
         {/* Inspector slides in from the right when a track is selected */}
