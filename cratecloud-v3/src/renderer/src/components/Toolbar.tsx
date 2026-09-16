@@ -1,20 +1,38 @@
 import React from 'react'
 import { useLibraryStore } from '../store/useLibraryStore'
-import { Button } from '@renderer/components/ui/button'
+import { ImportDropzone } from './ImportDropzone'
 import { Input } from '@renderer/components/ui/input'
 import { ViewModeToggle } from './ViewModeToggle'
 import { useViewMode } from '../hooks/useViewMode'
 import type { View } from './Sidebar'
 
 interface ToolbarProps {
-  onImport: () => void
-  onImportFiles: () => void
+  onImportFolder: (path: string) => void
+  onImportFiles: (paths: string[]) => void
   activeView: View
 }
 
-export function Toolbar({ onImport, activeView, onImportFiles }: ToolbarProps): React.JSX.Element {
-  const { isAnalyzing, tracks, searchQuery, setSearchQuery } = useLibraryStore()
+const BPM_RANGES: { label: string; range: [number, number] }[] = [
+  { label: '<90', range: [0, 90] },
+  { label: '90–110', range: [90, 110] },
+  { label: '110–120', range: [110, 120] },
+  { label: '120–128', range: [120, 128] },
+  { label: '128–135', range: [128, 135] },
+  { label: '135–145', range: [135, 145] },
+  { label: '145+', range: [145, Infinity] }
+]
+
+export function Toolbar({ onImportFolder, activeView, onImportFiles }: ToolbarProps): React.JSX.Element {
+  const { isAnalyzing, tracks, searchQuery, setSearchQuery, bpmRange, setBpmRange } = useLibraryStore()
   const [viewMode, setViewMode] = useViewMode('all_tracks', 'list')
+
+  const showSearch = activeView !== 'board'
+  const showFilters = activeView !== 'board'
+
+  function toggleBpmRange(range: [number, number]): void {
+    const isActive = bpmRange?.[0] === range[0] && bpmRange?.[1] === range[1]
+    setBpmRange(isActive ? null : range)
+  }
 
   return (
     <div
@@ -27,45 +45,105 @@ export function Toolbar({ onImport, activeView, onImportFiles }: ToolbarProps): 
         gap: '10px',
         flexShrink: 0
       }}>
-      <Button
-        onClick={onImport}
+      <ImportDropzone
+        onImportFolder={onImportFolder}
+        onImportFiles={onImportFiles}
         disabled={isAnalyzing}
-        variant="outline"
-        size="sm"
-      >
-        {isAnalyzing ? 'Importing...' : '+ Import folder'}
-      </Button>
-      <Button
-        onClick={onImportFiles}
-        disabled={isAnalyzing}
-        variant="ghost"
-        size="sm"
-        className="shrink-0"
-      >
-        + Add files
-      </Button>
+      />
+
       {activeView === 'library' && (
-        <div className="relative flex-1">
-          <Input
-          data-testid="search-input"
-            type="text"
-            placeholder="Search title, artist, BPM, key..."
-            value={searchQuery}
-            onChange={(e) => setSearchQuery(e.target.value)}
-            className="bg-[#1a1a26] border-[#252535] text-[#e8e8f0] placeholder:text-[#444] h-8 text-xs font-mono"
-          />
-          {searchQuery && (
-            <button
-              onClick={() => setSearchQuery('')}
-              className="absolute right-2 top-1/2 -translate-y-1/2 text-[#444] hover:text-[#a09be8] text-sm"
-            >
-              ✕
-            </button>
+        <div className="relative flex gap-4 items-center justify-between">
+          {/* Search — shorter, shares row with BPM */}
+          {showSearch && (
+            <div style={{ position: 'relative', width: '400px', flexShrink: 0 }}>
+              <Input
+                data-testid="search-input"
+                type="text"
+                placeholder="Search title or tag..."
+                value={searchQuery}
+                onChange={(e) => setSearchQuery(e.target.value)}
+                className="bg-[#1a1a26] border-[#252535] text-[#e8e8f0] placeholder:text-[#444] h-7 text-xs font-mono"
+              />
+              {searchQuery && (
+                <button
+                  onClick={() => setSearchQuery('')}
+                  style={{
+                    position: 'absolute',
+                    right: '6px',
+                    top: '50%',
+                    transform: 'translateY(-50%)',
+                    background: 'none',
+                    border: 'none',
+                    color: '#444',
+                    cursor: 'pointer',
+                    fontSize: '11px',
+                    padding: 0
+                  }}
+                >
+                  ✕
+                </button>
+              )}
+            </div>
+          )}
+
+          {/* BPM range buttons */}
+          {showFilters && (
+            <div style={{
+              display: 'flex',
+              gap: '3px',
+              flex: 1,
+              flexWrap: 'wrap',
+            }}>
+              {BPM_RANGES.map(({ label, range }) => {
+                const isActive = bpmRange?.[0] === range[0] && bpmRange?.[1] === range[1]
+                return (
+                  <button
+                    key={label}
+                    onClick={() => toggleBpmRange(range)}
+                    style={{
+                      background: isActive ? '#7f77dd' : '#1a1a26',
+                      border: `0.5px solid ${isActive ? '#7f77dd' : '#252535'}`,
+                      borderRadius: '4px',
+                      color: isActive ? '#fff' : '#555',
+                      fontSize: '10px',
+                      fontFamily: 'monospace',
+                      padding: '3px 7px',
+                      cursor: 'pointer',
+                      transition: 'all 0.1s',
+                      whiteSpace: 'nowrap',
+                      height: '22px'
+                    }}
+                  >
+                    {label}
+                  </button>
+                )
+              })}
+
+              {/* Clear filter indicator */}
+              {bpmRange && (
+                <button
+                  onClick={() => setBpmRange(null)}
+                  style={{
+                    background: 'none',
+                    border: '0.5px solid #333',
+                    borderRadius: '4px',
+                    color: '#555',
+                    fontSize: '10px',
+                    padding: '3px 7px',
+                    cursor: 'pointer',
+                    height: '22px'
+                  }}
+                >
+                  ✕ clear
+                </button>
+              )}
+            </div>
           )}
         </div>
       )}
-
-      {activeView === 'library' && <ViewModeToggle mode={viewMode} onChange={setViewMode} />}
+      <div className="flex justify-end">
+        {activeView === 'library' && <ViewModeToggle mode={viewMode} onChange={setViewMode} />}
+      </div>
 
       {/* Board view label instead of search */}
       {activeView === 'board' && (

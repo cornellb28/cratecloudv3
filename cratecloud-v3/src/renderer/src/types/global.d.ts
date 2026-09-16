@@ -16,6 +16,16 @@ declare global {
         data?: AnalysisResult
         error?: string
       }>
+      writeTags: (filepath: string, meta: Record<string, unknown>) => Promise<{ ok: boolean; results?: unknown[]; error?: string }>
+      // Job-based, like fs.moveFiles/crates.export — resolves immediately
+      // with a jobId; progress comes over onEditTagsProgress. No DB update
+      // happens as part of this yet — see runEditTagsJob in main/index.ts.
+      editTagsBatch: (
+        items: { filepath: string; meta: EditTagsMeta }[],
+        options?: { writeSerato?: boolean }
+      ) => Promise<{ jobId: string }>
+      onEditTagsProgress: (cb: (p: EditTagsProgressPayload) => void) => void
+      offEditTagsProgress: () => void
 
       importFolder: (folderPath: string) => Promise<{
         ok: boolean
@@ -424,6 +434,33 @@ declare global {
     totalBytes: number
     failed: { sourcePath: string; error: string }[]
     deleteSource: boolean
+  }
+
+  // TODO: independently redefined here, in main/index.ts, and in
+  // preload/index.ts — see the same TODO on JobState in useLibraryStore.ts.
+  interface EditTagsProgressPayload {
+    jobId: string
+    phase: 'running' | 'done' | 'error'
+    done: number
+    total: number
+    currentFile: string
+    failed: { filepath: string; error: string }[]
+  }
+
+  interface EditTagsMeta {
+    title?: string
+    artist?: string
+    album?: string
+    genre?: string
+    bpm?: number | string
+    key?: string
+    year?: string
+    remixer?: string
+    grouping?: string
+    composer?: string
+    comment?: string
+    label?: string
+    cratecloud_id?: string
   }
 
   // TODO: independently redefined here, in main/index.ts, and in

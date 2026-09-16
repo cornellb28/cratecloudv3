@@ -56,6 +56,33 @@ interface ExportProgressPayload {
   failed: { crateId: number; crateName: string; error: string }[]
 }
 
+// TODO: independently redefined here, in main/index.ts, and in global.d.ts
+// — see the same TODO on JobState in useLibraryStore.ts.
+interface EditTagsProgressPayload {
+  jobId: string
+  phase: 'running' | 'done' | 'error'
+  done: number
+  total: number
+  currentFile: string
+  failed: { filepath: string; error: string }[]
+}
+
+interface EditTagsMeta {
+  title?: string
+  artist?: string
+  album?: string
+  genre?: string
+  bpm?: number | string
+  key?: string
+  year?: string
+  remixer?: string
+  grouping?: string
+  composer?: string
+  comment?: string
+  label?: string
+  cratecloud_id?: string
+}
+
 // Custom APIs for renderer
 const api = {
   // ── Audio analysis ─────────────────────────────────────────────────────
@@ -65,6 +92,17 @@ const api = {
   importFile: (filepath: string) => ipcRenderer.invoke('library:import-file', filepath),
   importFiles: (filepaths: string[]) => ipcRenderer.invoke('library:import-files', filepaths),
   analyzeFile: (filepath: string) => ipcRenderer.invoke('sidecar:analyze', filepath),
+  writeTags: (filepath: string, meta: Record<string, unknown>) => ipcRenderer.invoke('sidecar:write-tags', filepath, meta),
+  // Job-based, like fs.moveFiles/crates.export — resolves immediately with
+  // a jobId; progress comes over onEditTagsProgress. See runEditTagsJob in
+  // main/index.ts — no DB update happens as part of this yet.
+  editTagsBatch: (
+    items: { filepath: string; meta: EditTagsMeta }[],
+    options?: { writeSerato?: boolean }
+  ) => ipcRenderer.invoke('sidecar:edit-tags-batch', items, options),
+  onEditTagsProgress: (cb: (p: EditTagsProgressPayload) => void) =>
+    ipcRenderer.on('edit-tags:progress', (_e, p) => cb(p)),
+  offEditTagsProgress: () => ipcRenderer.removeAllListeners('edit-tags:progress'),
   importFolder: (folderPath: string) => ipcRenderer.invoke('library:import-folder', folderPath),
   cancelImport: (jobId: string) => ipcRenderer.invoke('import:cancel', jobId),
   resumeImport: (jobId: string) => ipcRenderer.invoke('import:resume', jobId),

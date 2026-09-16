@@ -1,4 +1,5 @@
 import React, { useState, useRef, useEffect } from 'react'
+import { toast } from 'sonner'
 import { useLibraryStore } from '../store/useLibraryStore'
 import { Badge } from './ui/badge'
 
@@ -64,6 +65,55 @@ export function TagInput({ trackId, field, label, color = '#7f77dd' }: TagInputP
     return () => document.removeEventListener('mousedown', handleClick)
   }, [])
 
+  // Write all current tags for this field back to the file on disk
+  async function writeFieldToDisk(currentTags: Tag[]): Promise<void> {
+    const store = useLibraryStore.getState()
+    const track = store.tracks.find((t) => t.id === trackId)
+    if (!track) return
+
+    // Join multiple tag values with a separator Serato can read
+    // e.g. comment field: "FTW / CLASSIC / HEADZ"
+    const value = currentTags.length > 0 ? currentTags.map((t) => t.value).join(' / ') : null
+
+    console.log('[TagInput] writeFieldToDisk:', {
+      filepath: track.filepath,
+      field,
+      metaKey: fieldToMetaKey(field),
+      value,
+      tagCount: currentTags.length
+    })
+
+    // Fire and forget — don't block the UI
+    const result = await window.api.writeTags(track.filepath, {
+      [fieldToMetaKey(field)]: value ?? ''
+    })
+    console.log('[TagInput] writeTags result:', result)
+
+    if (!result.ok) {
+      toast.error('Could not save tag to file', { description: result.error ?? 'Unknown error' })
+      return
+    }
+    const fileResult = result.results?.[0] as { success?: boolean; error?: string } | undefined
+    if (fileResult && fileResult.success === false) {
+      toast.error('Could not save tag to file', { description: fileResult.error ?? 'Unknown error' })
+    }
+  }
+
+  // Map tag field names to edit_tags.py meta keys
+  function fieldToMetaKey(f: string): string {
+    const map: Record<string, string> = {
+      comment: 'comment',
+      grouping: 'grouping',
+      remixer: 'remixer',
+      genre: 'genre',
+      label: 'label',
+      composer: 'composer',
+      artist: 'artist',
+      album: 'album',
+    }
+    return map[f] ?? f
+  }
+
   // Apply an existing tag to the track
   // In applyTag — after optimistic update:
   async function applyTag(tag: Tag): Promise<void> {
@@ -74,14 +124,17 @@ export function TagInput({ trackId, field, label, color = '#7f77dd' }: TagInputP
 
     // Sync full track tags to store so cache is fresh on remount
     const allCurrent = useLibraryStore.getState().trackTags.get(trackId) ?? []
-    const merged = [...allCurrent.filter(t => t.id !== tag.id), tag]
+    const merged = [...allCurrent.filter((t) => t.id !== tag.id), tag]
     useLibraryStore.getState().setTrackTags(trackId, merged)
 
     const result = await window.api.tags.apply(trackId, tag.id)
     if (!result.ok) {
       setAppliedTags((prev) => prev.filter(t => t.id !== tag.id))
       useLibraryStore.getState().setTrackTags(trackId, allCurrent)
+      return
     }
+    // Write all tags for this field to disk
+    await writeFieldToDisk(updated)
   }
 
   // In removeAppliedTag — after optimistic update:
@@ -91,14 +144,17 @@ export function TagInput({ trackId, field, label, color = '#7f77dd' }: TagInputP
 
     // Sync to store
     const allCurrent = useLibraryStore.getState().trackTags.get(trackId) ?? []
-    const merged = allCurrent.filter(t => t.id !== tag.id)
+    const merged = allCurrent.filter((t) => t.id !== tag.id)
     useLibraryStore.getState().setTrackTags(trackId, merged)
 
     const result = await window.api.tags.remove(trackId, tag.id)
     if (!result.ok) {
       setAppliedTags((prev) => [...prev, tag])
       useLibraryStore.getState().setTrackTags(trackId, allCurrent)
+      return
     }
+    // Write updated tags for this field to disk
+    await writeFieldToDisk(updated)
   }
 
   // Create a new tag and apply it
@@ -114,7 +170,7 @@ export function TagInput({ trackId, field, label, color = '#7f77dd' }: TagInputP
       field,
       value: queryNormalized,
       color,
-      created_at: Date.now(),
+      created_at: Date.now()
     }
 
     // Add to store so it appears in future searches

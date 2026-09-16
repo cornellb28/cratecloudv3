@@ -15,10 +15,14 @@ type JobState =
   | (MoveProgressPayload & { type: 'move'; trackIds: number[] })
   | (CopyProgressPayload & { type: 'copy' })
   | (ExportProgressPayload & { type: 'export' })
+  | (EditTagsProgressPayload & { type: 'editTags' })
 
 // ─── State shape ─────────────────────────────────────────
 
 interface LibraryState {
+  //Search Query
+  bpmRange: [number, number] | null
+  setBpmRange: (range: [number, number] | null) => void
   // The full track list
   tracks: Track[]
   // Which track the DJ has clicked on
@@ -129,7 +133,8 @@ export const useLibraryStore = create<LibraryState>((set) => ({
   jobs: {},
   pendingFolderNav: null,
   viewModes: {},
-
+  bpmRange: null,
+  setBpmRange: (range) => set({ bpmRange: range }),
   sidebarCollapsed: localStorage.getItem('cratecloud_sidebar_collapsed') === 'true',
   displayMode: (localStorage.getItem('cratecloud_display_mode') as 'list' | 'grid') ?? 'list',
 
@@ -310,22 +315,36 @@ export const useLibraryStore = create<LibraryState>((set) => ({
 // Computed from store — not stored directly
 // Using separate selectors avoids unnecessary re-renders
 
-export function useFilteredTracks(): Track[] {
+export function useFilteredTracks(sourceTracks?: Track[]): Track[] {
   const tracks = useLibraryStore((s) => s.tracks)
   const searchQuery = useLibraryStore((s) => s.searchQuery)
+  const bpmRange = useLibraryStore((s) => s.bpmRange)
+  const trackTags = useLibraryStore((s) => s.trackTags)
 
-  if (!searchQuery.trim()) return tracks
+  const base = sourceTracks ?? tracks
 
-  const q = searchQuery.toLowerCase()
+  let result = base
 
-  return tracks.filter(
-    (t) =>
-      t.title?.toLowerCase().includes(q) ||
-      t.artist?.toLowerCase().includes(q) ||
-      t.genre?.toLowerCase().includes(q) ||
-      t.key_camelot?.toLowerCase().includes(q) ||
-      t.bpm?.toString().includes(q) ||
-      t.album?.toLowerCase().includes(q) ||
-      t.comment?.toLowerCase().includes(q)
-  )
+  // BPM range filter
+  if (bpmRange) {
+    result = result.filter((t) => {
+      if (!t.bpm) return false
+      const bpm = Number(t.bpm)
+      const [min, max] = bpmRange
+      return bpm >= min && (max === Infinity ? true : bpm < max)
+    })
+  }
+
+  if (searchQuery.trim()) {
+    const q = searchQuery.trim().toLowerCase()
+    result = result.filter((t) => {
+      // Title match
+      if (t.title?.toLowerCase().includes(q)) return true
+      if (t.filename?.toLowerCase().includes(q)) return true
+      // Tag match — any field
+      const tags = trackTags.get(t.id) ?? []
+      return tags.some((tag) => tag.value.toLowerCase().includes(q))
+    })
+  }
+  return result
 }

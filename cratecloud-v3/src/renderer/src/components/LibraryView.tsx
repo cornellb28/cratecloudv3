@@ -6,7 +6,7 @@ import { VirtualizedTrackGrid, type VirtualizedTrackGridHandle } from '../compon
 import { useViewMode } from '../hooks/useViewMode'
 
 export function LibraryView(): React.JSX.Element {
-  const { tracks, searchQuery } = useLibraryStore()
+  const { tracks, searchQuery, bpmRange } = useLibraryStore()
   const [mode] = useViewMode('all_tracks', 'list')
   const [selectedIds, setSelectedIds] = useState<Set<number>>(new Set())
 
@@ -19,8 +19,16 @@ export function LibraryView(): React.JSX.Element {
   const prevModeRef = useRef(mode)
 
   const query = searchQuery.trim().toLowerCase()
-  const filteredTracks = query
+  const bpmFilteredTracks = bpmRange
     ? tracks.filter(t => {
+      if (!t.bpm) return false
+      const bpm = Number(t.bpm)
+      const [min, max] = bpmRange
+      return bpm >= min && (max === Infinity ? true : bpm < max)
+    })
+    : tracks
+  const filteredTracks = query
+    ? bpmFilteredTracks.filter(t => {
       const haystack = [
         t.title, t.artist, t.bpm,
         t.key_camelot, t.camelot, t.genre, t.comment,
@@ -30,7 +38,7 @@ export function LibraryView(): React.JSX.Element {
         .toLowerCase()
       return haystack.includes(query)
     })
-    : tracks
+    : bpmFilteredTracks
 
   function toggleSelect(id: number): void {
     setSelectedIds((prev) => {

@@ -62,6 +62,18 @@ function exportStatusLabel(p: ExportProgressPayload): string {
   return `Done — ${p.exportedCrateNames.length} crate${p.exportedCrateNames.length !== 1 ? 's' : ''} exported to Serato${missingSuffix}`
 }
 
+function editTagsStatusLabel(p: EditTagsProgressPayload): string {
+  const label = `Editing tags — ${p.done} of ${p.total}`
+  if (p.phase === 'error') return 'Tag edit failed'
+  if (p.phase === 'done') {
+    return p.failed.length > 0
+      ? `Done — ${p.done - p.failed.length} updated, ${p.failed.length} failed`
+      : `Done — ${p.done} updated`
+  }
+  const filename = p.currentFile.split('/').pop() ?? p.currentFile
+  return p.currentFile ? `${label} · ${filename}` : label
+}
+
 function copyStatusLabel(p: CopyProgressPayload): string {
   // Same job, two labels — deleteSource is a FolderView Finder-drop (move
   // in place), unset is the EmptyView/Board copy-then-import path.
@@ -199,6 +211,18 @@ export function BackgroundJobsPanel({
             <ProgressRow
               key={job.jobId}
               label={exportStatusLabel(job)}
+              pct={pct}
+              showBar={job.phase === 'running'}
+            />
+          )
+        }
+
+        if (job.type === 'editTags') {
+          const pct = job.total > 0 ? Math.round((job.done / job.total) * 100) : 0
+          return (
+            <ProgressRow
+              key={job.jobId}
+              label={editTagsStatusLabel(job)}
               pct={pct}
               showBar={job.phase === 'running'}
             />

@@ -1,4 +1,5 @@
 import React, { useRef, useEffect, useState } from 'react'
+import { toast } from 'sonner'
 import { useLibraryStore } from '../store/useLibraryStore'
 import { Slider } from '@renderer/components/ui/slider'
 import { Separator } from '@renderer/components/ui/separator'
@@ -78,7 +79,12 @@ export function Inspector(): React.JSX.Element {
 
   async function saveField(field: string, value: string): Promise<void> {
     if (!track) return
-    updateTrack(track.id, { [field]: value })
+
+    // 1 - Update store
+    const newValue = field === 'bpm' ? parseFloat(value) || null : value || null
+    updateTrack(track.id, { [field]: newValue })
+
+    // 2 - Update Sqlite
     await window.api.db.updateTrackMeta({
       id: track.id,
       title: track.title,
@@ -90,7 +96,39 @@ export function Inspector(): React.JSX.Element {
       comment: track.comment,
       needs_sync: track.needs_sync,
       pending_changes: track.pending_changes,
-      [field]: field === 'bpm' ? parseFloat(value) || null : value || null
+      [field]: newValue
+    })
+
+    // 3 — Write to file on disk (Serato + ID3)
+    // Build full meta from current track + the field that just changed
+    const meta = {
+      title: field === 'title' ? value : track.title,
+      artist: field === 'artist' ? value : track.artist,
+      album: field === 'album' ? value : track.album,
+      genre: field === 'genre' ? value : track.genre,
+      bpm: field === 'bpm' ? parseFloat(value) || undefined : track.bpm,
+      key: field === 'key_camelot' ? value : track.key_camelot,
+      year: field === 'year' ? value : track.year,
+      remixer: field === 'remixer' ? value : track.remixer,
+      grouping: field === 'grouping' ? value : track.grouping,
+      composer: field === 'composer' ? value : track.composer,
+      comment: field === 'comment' ? value : track.comment,
+      label: field === 'label' ? value : track.label,
+    }
+
+    // Fire and forget — don't block the UI waiting for disk write
+    window.api.writeTags(track.filepath, meta).then((result) => {
+      if (!result.ok) {
+        toast.error('Could not save to file', { description: result.error ?? 'Unknown error' })
+        return
+      }
+      const fileResult = result.results?.[0] as { success?: boolean; error?: string } | undefined
+      if (fileResult && fileResult.success === false) {
+        toast.error('Could not save to file', { description: fileResult.error ?? 'Unknown error' })
+      }
+    }).catch((err) => {
+      console.error('[Inspector] writeTags failed:', err)
+      toast.error('Could not save to file', { description: (err as Error).message })
     })
   }
 

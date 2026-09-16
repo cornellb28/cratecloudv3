@@ -291,6 +291,30 @@ function App(): React.JSX.Element {
       }
     })
 
+    // Batch tag-edit progress (see editTagsBatch/runEditTagsJob in
+    // main/index.ts). This only reflects sidecar progress — no DB update is
+    // wired up yet, so track rows are never refetched here (there's nothing
+    // to refetch; see the TODO on runEditTagsJob).
+    window.api.onEditTagsProgress((p) => {
+      upsertJob({ ...p, type: 'editTags' })
+      if (p.phase === 'done' || p.phase === 'error') {
+        if (p.phase === 'done') {
+          const failedCount = p.failed.length
+          const succeededCount = p.done - failedCount
+          if (failedCount > 0) {
+            toast.error(`${succeededCount} updated, ${failedCount} failed`, {
+              description: p.failed
+                .map((f) => `${f.filepath.split('/').pop()}: ${f.error}`)
+                .join('\n')
+            })
+          } else if (succeededCount > 0) {
+            toast.success(`${succeededCount} track${succeededCount !== 1 ? 's' : ''} updated`)
+          }
+        }
+        setTimeout(() => removeJob(p.jobId), 1500)
+      }
+    })
+
     // Phase 2 — update individual tracks as BPM/key comes in
     window.api.onTrackAnalyzed((data) => {
       updateTrack(data.trackId, {
@@ -320,16 +344,17 @@ function App(): React.JSX.Element {
       window.api.offMoveProgress()
       window.api.offCopyProgress()
       window.api.offCrateExportProgress()
+      window.api.offEditTagsProgress()
       if (batchRefreshTimer.current) clearTimeout(batchRefreshTimer.current)
       if (foldersRefreshTimer.current) clearTimeout(foldersRefreshTimer.current)
     }
   }, [setTracks, updateTrack, upsertJob, removeJob, setFolderData, mergeTracks])
 
   // ── Import handlers ───────────────────────────────────
-  async function handleImport(): Promise<void> {
-    const folderPath = await window.api.openFolder()
-    if (!folderPath) return
-
+  // Shared by the dialog flow (handleImport, below) and ImportDropzone's
+  // onImportFolder (dialog button or a dropped folder — it resolves the
+  // path itself either way and hands it here already resolved).
+  async function handleImportFolder(folderPath: string): Promise<void> {
     setAnalyzing(true)
 
     const result = await window.api.importFolder(folderPath)
@@ -354,6 +379,12 @@ function App(): React.JSX.Element {
 
     setAnalyzing(false)
     // Progress bar is cleared by the 'done' phase of onImportProgress
+  }
+
+  async function handleImport(): Promise<void> {
+    const folderPath = await window.api.openFolder()
+    if (!folderPath) return
+    await handleImportFolder(folderPath)
   }
 
   async function handleCancelImport(jobId: string): Promise<void> {
@@ -383,15 +414,17 @@ function App(): React.JSX.Element {
     await window.api.fs.cancelCopy(jobId)
   }
 
-  // Add import files handler
-  async function handleImportFiles(): Promise<void> {
-    const filepaths = await window.api.openFiles()
+  // Add import files handler — shared by ImportDropzone's onImportFiles
+  // (dialog button or dropped loose files, already-resolved paths either way).
+  async function handleImportFiles(filepaths: string[]): Promise<void> {
     if (!filepaths.length) return
 
+    setAnalyzing(true)
     for (const filepath of filepaths) {
       await window.api.importFile(filepath)
       window.api.db.allTracks().then(setTracks)
     }
+    setAnalyzing(false)
   }
 
   // Drag-and-drop from Finder onto EmptyView — same import handlers the
@@ -478,7 +511,7 @@ function App(): React.JSX.Element {
       </div>
 
       {/* Toolbar at the top */}
-      <Toolbar onImport={handleImport} activeView={activeView} onImportFiles={handleImportFiles} />
+      <Toolbar onImportFolder={handleImportFolder} activeView={activeView} onImportFiles={handleImportFiles} />
 
       {/* Background jobs (import, move, copy) — non-modal, stays visible across navigation */}
       <BackgroundJobsPanel

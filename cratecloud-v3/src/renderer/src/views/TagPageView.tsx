@@ -1,5 +1,5 @@
 import React, { useState } from 'react'
-import { useLibraryStore } from '../store/useLibraryStore'
+import { useLibraryStore, useFilteredTracks } from '../store/useLibraryStore'
 import { Badge } from '@renderer/components/ui/badge'
 import { TrackRow } from '../components/TrackRow'
 import { TrackCard } from '../components/TrackCard'
@@ -22,7 +22,9 @@ export function TagPageView({ tag, onBack }: TagPageViewProps): React.JSX.Elemen
     }
   })
 
-  const taggedTracks = tracks.filter((t) => taggedTrackIds.has(t.id))
+  //const taggedTracks = tracks.filter((t) => taggedTrackIds.has(t.id))
+  const allTagged = tracks.filter(t => taggedTrackIds.has(t.id))
+  const taggedTracks = useFilteredTracks(allTagged)
 
   function toggleSelect(id: number): void {
     setSelectedIds((prev) => {

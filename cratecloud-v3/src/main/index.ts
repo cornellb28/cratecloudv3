@@ -1,12 +1,18 @@
-import { app, shell, BrowserWindow, ipcMain, dialog, protocol, nativeImage } from 'electron'
+import { app, shell, BrowserWindow, ipcMain, dialog, protocol } from 'electron'
 import { join, extname, basename, dirname, relative } from 'path'
 import { electronApp, optimizer, is } from '@electron-toolkit/utils'
 import icon from '../../resources/icon.png?asset'
 import { execSync } from 'child_process'
 import { randomUUID, createHash } from 'crypto'
-import { rename, stat, unlink, mkdir, readdir, readFile, writeFile, open } from 'fs/promises'
+import { rename, stat, unlink, mkdir, readdir, readFile, open } from 'fs/promises'
 import { createReadStream, createWriteStream } from 'fs'
 import { startWatcher, stopWatcher, stopAllWatchers, setWatcherCallbacks } from './libraryWatcher'
+import {
+  storeArtwork,
+  artworkPathFor,
+  sweepOrphanedArtwork,
+  migrateArtworkToContentAddressed
+} from './artwork'
 import {
   insertTrack,
   insertTracksBatch,
@@ -48,8 +54,6 @@ import {
   findOrCreateTag,
   getUnanalyzedTracks,
   setTrackArtworkHash,
-  getArtworkHashesInUse,
-  getTracksWithLegacyArtwork,
   updateTrackFilepath,
   getMissingTracks,
   relinkTrack,
@@ -72,7 +76,13 @@ import {
   backfillTrackFolderIds,
   isPathUnder
 } from './db'
-import { analyzeFile, readTagsFast } from './sidecar'
+import {
+  analyzeFile,
+  readTagsFast,
+  editTagsBatch,
+  type EditTagsBatchItem,
+  type EditTagsResult
+} from './sidecar'
 import {
   exportCrateToSerato,
   isSeratoRunning,
@@ -274,8 +284,61 @@ interface ExportJob {
   failed: ExportFailure[]
 }
 
+// ── Per-file write-tags serialization ─────────────────────────────────────
+// Each sidecar:write-tags call spawns its own edit_tags.py process (copy ->
+// edit copy -> atomic replace). Two calls for the same filepath racing in
+// parallel can otherwise interleave and silently drop one write — see the
+// comment on the sidecar:write-tags handler. Chaining onto the prior
+// promise for that filepath forces same-file writes to run one at a time;
+// unrelated files are unaffected and still write concurrently.
+const writeTagsQueues = new Map<string, Promise<unknown>>()
+
+function queueTagWrite<T>(filepath: string, task: () => Promise<T>): Promise<T> {
+  const prior = writeTagsQueues.get(filepath) ?? Promise.resolve()
+  const run = prior.then(task, task)
+  const tracked = run.then(
+    () => undefined,
+    () => undefined
+  )
+  writeTagsQueues.set(filepath, tracked)
+  tracked.finally(() => {
+    if (writeTagsQueues.get(filepath) === tracked) writeTagsQueues.delete(filepath)
+  })
+  return run
+}
+
+// ── Batch tag-edit job state (in-memory only) ─────────────────────────────
+// One spawned edit_tags.py --batch process per job (see editTagsBatch in
+// sidecar.ts) — coarse-grained like export: one tick per file, not per
+// byte. No DB write happens from this job yet — see runEditTagsJob.
+type EditTagsPhase = 'running' | 'done' | 'error'
+
+interface EditTagsFailure {
+  filepath: string
+  error: string
+}
+
+interface EditTagsProgressPayload {
+  jobId: string
+  phase: EditTagsPhase
+  done: number
+  total: number
+  currentFile: string
+  failed: EditTagsFailure[]
+}
+
+interface EditTagsJob {
+  type: 'editTags'
+  id: string
+  total: number
+  doneCount: number
+  currentFile: string
+  status: EditTagsPhase
+  failed: EditTagsFailure[]
+}
+
 // One registry for every background job type, discriminated by `type`.
-type Job = ImportJob | MoveJob | CopyJob | ExportJob
+type Job = ImportJob | MoveJob | CopyJob | ExportJob | EditTagsJob
 const jobs = new Map<string, Job>()
 
 const COUNT_PROGRESS_INTERVAL_MS = 250
@@ -398,184 +461,6 @@ async function countAudioFiles(folderPath: string): Promise<number> {
 // embeds the same cover (the common case — every track on an album) instead
 // of one file per track. See migrateArtworkToContentAddressed for the
 // one-time move of legacy per-track <trackId>.jpg files onto this scheme.
-const artworkDir = join(app.getPath('userData'), 'cratecloud', 'artwork')
-const ARTWORK_MIGRATION_SETTING_KEY = 'artwork_migration_v1'
-
-function artworkFullPath(hash: string): string {
-  return join(artworkDir, `${hash}.jpg`)
-}
-
-function artworkThumbPath(hash: string): string {
-  return join(artworkDir, `${hash}_200.jpg`)
-}
-
-async function fileExists(path: string): Promise<boolean> {
-  try {
-    await stat(path)
-    return true
-  } catch {
-    return false
-  }
-}
-
-// nativeImage.resize() stretches to fit when both width and height are given,
-// so a true 200x200 cover crop needs the smaller side resized to 200 first
-// (preserving aspect ratio) and the result center-cropped.
-function makeThumbnailJpeg(image: Electron.NativeImage): Buffer {
-  const { width, height } = image.getSize()
-  const scale = 200 / Math.min(width, height)
-  const resized = image.resize({
-    width: Math.round(width * scale),
-    height: Math.round(height * scale),
-    quality: 'good'
-  })
-  const { width: rw, height: rh } = resized.getSize()
-  const cropped = resized.crop({
-    x: Math.max(0, Math.floor((rw - 200) / 2)),
-    y: Math.max(0, Math.floor((rh - 200) / 2)),
-    width: Math.min(200, rw),
-    height: Math.min(200, rh)
-  })
-  return cropped.toJPEG(80)
-}
-
-// Hashes the image bytes and writes <hash>.jpg + a <hash>_200.jpg thumbnail
-// once; every subsequent track that embeds the same cover just reuses the
-// existing files. Returns the hash to store on the track row, or null on
-// failure — a bad/corrupt embedded image must never fail the track import.
-async function storeArtwork(imageBytes: Buffer): Promise<string | null> {
-  try {
-    await mkdir(artworkDir, { recursive: true })
-    const hash = createHash('sha1').update(imageBytes).digest('hex')
-    const fullPath = artworkFullPath(hash)
-
-    if (await fileExists(fullPath)) return hash // another track already stored this cover
-
-    await writeFile(fullPath, imageBytes)
-
-    try {
-      const image = nativeImage.createFromBuffer(imageBytes)
-      if (!image.isEmpty()) {
-        await writeFile(artworkThumbPath(hash), makeThumbnailJpeg(image))
-      }
-    } catch (err) {
-      // Full-size art is saved and usable — a missing thumbnail just means
-      // the renderer's 'thumb' request resolves to null and falls back to
-      // its placeholder.
-      console.error('[artwork] thumbnail generation failed:', err)
-    }
-
-    return hash
-  } catch (err) {
-    console.error('[artwork] storeArtwork failed:', err)
-    return null
-  }
-}
-
-// Single main-side resolver — the renderer never constructs a <hash>.jpg /
-// <hash>_200.jpg path itself, it only ever asks for a hash + size.
-async function artworkPathFor(hash: string | null, size: 'full' | 'thumb'): Promise<string | null> {
-  if (!hash) return null
-  const path = size === 'thumb' ? artworkThumbPath(hash) : artworkFullPath(hash)
-  return (await fileExists(path)) ? path : null
-}
-
-// One-time migration of legacy per-track artwork onto content-addressed
-// storage. Runs once, after the schema migration, off the import/analysis
-// paths — throttled with a short pause every 25 files so it never starves
-// IPC handlers while walking a large library. Completion is recorded in
-// app_settings so it never re-runs; a row whose legacy file is already gone
-// by the time this runs is simply left with artwork_hash NULL for good.
-async function migrateArtworkToContentAddressed(): Promise<void> {
-  if (getSetting(ARTWORK_MIGRATION_SETTING_KEY) === 'done') return
-
-  const rows = getTracksWithLegacyArtwork()
-  let migrated = 0
-  let duplicatesRemoved = 0
-  let bytesReclaimed = 0
-  let failed = 0
-
-  for (const row of rows) {
-    try {
-      const legacyStat = await stat(row.artwork_path) // throws if the file is gone
-      const bytes = await readFile(row.artwork_path)
-      const hash = createHash('sha1').update(bytes).digest('hex')
-      const fullPath = artworkFullPath(hash)
-
-      if (await fileExists(fullPath)) {
-        // Another track already claimed this hash — this legacy file is a duplicate.
-        await unlink(row.artwork_path)
-        duplicatesRemoved++
-        bytesReclaimed += legacyStat.size
-      } else {
-        await mkdir(artworkDir, { recursive: true })
-        await rename(row.artwork_path, fullPath)
-      }
-
-      if (!(await fileExists(artworkThumbPath(hash)))) {
-        try {
-          const image = nativeImage.createFromBuffer(bytes)
-          if (!image.isEmpty()) {
-            await writeFile(artworkThumbPath(hash), makeThumbnailJpeg(image))
-          }
-        } catch (err) {
-          console.error('[artwork migration] thumbnail generation failed:', err)
-        }
-      }
-
-      setTrackArtworkHash(row.id, hash)
-      migrated++
-    } catch (err) {
-      failed++
-      console.error(`[artwork migration] track ${row.id} failed:`, err)
-    }
-
-    if (migrated % 25 === 0) {
-      await new Promise((r) => setTimeout(r, 15))
-    }
-  }
-
-  setSetting(ARTWORK_MIGRATION_SETTING_KEY, 'done')
-  console.log(
-    `[artwork migration] done — ${migrated} migrated, ${duplicatesRemoved} duplicates removed, ` +
-      `${(bytesReclaimed / 1024 / 1024).toFixed(2)} MB reclaimed, ${failed} failed`
-  )
-}
-
-// Deletes any <hash>.jpg / <hash>_200.jpg under the artwork dir whose hash
-// isn't referenced by any track. Never runs automatically — only exposed via
-// IPC for a manual cleanup action.
-// TODO: surface in Settings
-async function sweepOrphanedArtwork(): Promise<{ removed: number; bytesReclaimed: number }> {
-  const inUse = getArtworkHashesInUse()
-  let removed = 0
-  let bytesReclaimed = 0
-
-  let entries: string[]
-  try {
-    entries = await readdir(artworkDir)
-  } catch {
-    return { removed: 0, bytesReclaimed: 0 }
-  }
-
-  for (const entry of entries) {
-    const match = entry.match(/^([0-9a-f]{40})(?:_200)?\.jpg$/)
-    if (!match || inUse.has(match[1])) continue
-
-    const fullPath = join(artworkDir, entry)
-    try {
-      const s = await stat(fullPath)
-      await unlink(fullPath)
-      removed++
-      bytesReclaimed += s.size
-    } catch (err) {
-      console.error(`[artwork sweep] failed to remove ${entry}:`, err)
-    }
-  }
-
-  return { removed, bytesReclaimed }
-}
-
 // Build a consistent track data object from analysis result
 function buildTrackData(
   filepath: string,
@@ -1121,6 +1006,60 @@ async function runExportJob(event: Electron.IpcMainInvokeEvent, job: ExportJob):
     job.crateIds.length > 0 && job.failed.length === job.crateIds.length ? 'error' : 'done'
   event.sender.send('crate-export:progress', buildExportProgressPayload(job))
   setTimeout(() => jobs.delete(job.id), 15000)
+}
+
+function buildEditTagsProgressPayload(
+  job: EditTagsJob,
+  phaseOverride?: EditTagsPhase
+): EditTagsProgressPayload {
+  return {
+    jobId: job.id,
+    phase: phaseOverride ?? job.status,
+    done: job.doneCount,
+    total: job.total,
+    currentFile: job.currentFile,
+    failed: job.failed
+  }
+}
+
+// Spawns edit_tags.py once in --batch mode (see editTagsBatch in
+// sidecar.ts) and streams one progress tick per file. This only spawns the
+// sidecar and reports progress — no DB write happens here yet.
+// TODO(cratecloud): stamping updated_at / recording write-back status per
+// track needs its own confirmed step once the result shape is signed off —
+// see the CRATECLOUD_ID write-back plan.
+async function runEditTagsJob(
+  event: Electron.IpcMainInvokeEvent,
+  job: EditTagsJob,
+  items: EditTagsBatchItem[],
+  writeSerato: boolean
+): Promise<void> {
+  try {
+    await editTagsBatch(
+      items,
+      (result: EditTagsResult) => {
+        job.doneCount++
+        job.currentFile = result.filepath ?? job.currentFile
+        if (!result.success) {
+          job.failed.push({
+            filepath: result.filepath ?? '(unknown)',
+            error: result.error ?? 'Unknown error'
+          })
+        }
+        event.sender.send('edit-tags:progress', buildEditTagsProgressPayload(job))
+      },
+      { writeSerato }
+    )
+    job.status = 'done'
+  } catch (err) {
+    job.status = 'error'
+    job.failed.push({
+      filepath: '(batch)',
+      error: err instanceof Error ? err.message : String(err)
+    })
+  }
+  event.sender.send('edit-tags:progress', buildEditTagsProgressPayload(job))
+  jobs.delete(job.id)
 }
 
 // Update just the analysis fields after Phase 2 completes
@@ -2073,6 +2012,27 @@ app.whenReady().then(() => {
     }
   })
 
+  // Job-based, like move/copy/export — resolves immediately with a jobId;
+  // progress comes over edit-tags:progress. Does not touch the DB; see the
+  // TODO on runEditTagsJob.
+  ipcMain.handle(
+    'sidecar:edit-tags-batch',
+    (event, items: EditTagsBatchItem[], options?: { writeSerato?: boolean }) => {
+      const job: EditTagsJob = {
+        type: 'editTags',
+        id: randomUUID(),
+        total: items.length,
+        doneCount: 0,
+        currentFile: '',
+        status: 'running',
+        failed: []
+      }
+      jobs.set(job.id, job)
+      runEditTagsJob(event, job, items, options?.writeSerato ?? true) // fire-and-forget — progress goes out over edit-tags:progress
+      return { jobId: job.id }
+    }
+  )
+
   // ── Move files to a folder (job-based — see MoveJob/runMoveJob above) ──
 
   function createMoveJob(trackIds: number[], destAbsolutePath: string): MoveJob {
@@ -2199,6 +2159,33 @@ app.whenReady().then(() => {
       return { ok: true, newPath }
     } catch (err) {
       return { ok: false, error: (err as Error).message }
+    }
+  })
+
+  // ── Update File Metadata ──────────────────────────────────
+  // TagInput (per tag-field writes) and the Inspector's saveField both fire
+  // independent, un-awaited writeTags calls for the same track. Each spawns
+  // its own edit_tags.py process that copies the file, edits the copy, then
+  // atomically replaces the original — so two calls racing on the same file
+  // can interleave: whichever process's replace lands last wins outright,
+  // silently discarding the other's edit (its copy was taken before the
+  // first process committed, so nothing it wrote could have included that
+  // change). Serializing here per filepath ensures each write starts only
+  // after the previous write to that same file has fully landed on disk.
+  ipcMain.handle('sidecar:write-tags', async (_e, filepath: string, meta: Record<string, unknown>) => {
+    try {
+      const results = await queueTagWrite(filepath, async () => {
+        const items: unknown[] = []
+        await editTagsBatch(
+          [{ filepath, meta }],
+          (result) => items.push(result),
+          { writeSerato: true }
+        )
+        return items
+      })
+      return { ok: true, results }
+    } catch (err) {
+      return { ok: false, error: (err as Error).message}
     }
   })
 
