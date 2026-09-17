@@ -271,7 +271,8 @@ const api = {
       currentFolderPath: string
       deleteSource?: boolean
     }) => ipcRenderer.invoke('fs:copy-into-folder', payload),
-    cancelCopy: (jobId: string) => ipcRenderer.invoke('fs:cancel-copy', jobId)
+    cancelCopy: (jobId: string) => ipcRenderer.invoke('fs:cancel-copy', jobId),
+    showInFolder: (filepath: string): Promise<void> => ipcRenderer.invoke('fs:showInFolder', filepath)
   },
   onMoveProgress: (cb: (p: MoveProgressPayload) => void) =>
     ipcRenderer.on('move:progress', (_e, p) => cb(p)),
@@ -282,6 +283,7 @@ const api = {
   // Modern Electron removed File.path — the renderer must resolve a
   // dropped File's real path through the preload/main process instead.
   getPathForFile: (file: File): string => webUtils.getPathForFile(file),
+
   watcher: {
     pendingChanges: () => ipcRenderer.invoke('watcher:pending-changes'),
     acceptChange: (id: number) => ipcRenderer.invoke('watcher:accept-change', id),

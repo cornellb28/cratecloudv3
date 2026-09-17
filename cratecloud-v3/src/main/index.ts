@@ -1896,6 +1896,11 @@ app.whenReady().then(() => {
     return { ok: true }
   })
 
+  // ── Finder/Explorer integration ─────────────────────────────────────────────
+  ipcMain.handle('fs:show-in-folder', (_event, filepath: string) => {
+    shell.showItemInFolder(filepath)
+  })
+
   // ── Multi file import ────────────────────────────────────
 
   ipcMain.handle('library:import-files', async (event, filepaths: string[]) => {

@@ -238,6 +238,7 @@ declare global {
           deleteSource?: boolean
         }) => Promise<{ jobId: string }>
         cancelCopy: (jobId: string) => Promise<{ ok: boolean; error?: string }>
+        showInFolder: (filepath: string) => Promise<void>
       }
 
       onFoldersChanged: (cb: () => void) => void
