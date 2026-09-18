@@ -62,6 +62,14 @@ function exportStatusLabel(p: ExportProgressPayload): string {
   return `Done — ${p.exportedCrateNames.length} crate${p.exportedCrateNames.length !== 1 ? 's' : ''} exported to Serato${missingSuffix}`
 }
 
+function seratoImportStatusLabel(p: SeratoImportProgressPayload): string {
+  if (p.phase === 'error') return `Serato import failed${p.error ? ` — ${p.error}` : ''}`
+  const stageLabel = { database: 'database V2', crates: 'crates', history: 'history' }[p.stage]
+  if (p.phase === 'running') return `Importing Serato data — reading ${stageLabel}…`
+  const t = p.tally
+  return `Serato import done — ${t.dbEntriesMatched} tracks matched, ${t.cratesCreated} crates, ${t.playsImported} plays`
+}
+
 function editTagsStatusLabel(p: EditTagsProgressPayload): string {
   const label = `Editing tags — ${p.done} of ${p.total}`
   if (p.phase === 'error') return 'Tag edit failed'
@@ -225,6 +233,17 @@ export function BackgroundJobsPanel({
               label={editTagsStatusLabel(job)}
               pct={pct}
               showBar={job.phase === 'running'}
+            />
+          )
+        }
+
+        if (job.type === 'seratoImport') {
+          return (
+            <ProgressRow
+              key={job.jobId}
+              label={seratoImportStatusLabel(job)}
+              pct={0}
+              showBar={false}
             />
           )
         }

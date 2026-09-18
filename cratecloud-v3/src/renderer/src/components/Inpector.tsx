@@ -15,7 +15,13 @@ const CAMELOT_KEYS = [
 ]
 
 export function Inspector(): React.JSX.Element {
-  const { tracks, activeTrackId, setActiveTrack, updateTrack, setTrackTags } = useLibraryStore()
+  const {
+    tracks,
+    activeTrackId,
+    setActiveTrack,
+    updateTrack,
+    setTrackTags,
+  } = useLibraryStore()
 
   const track = tracks.find((t) => t.id === activeTrackId) ?? null
   const isOpen = track !== null
@@ -23,30 +29,10 @@ export function Inspector(): React.JSX.Element {
   const [analyzing, setAnalyzing] = useState(false)
   const artworkUrl = useArtworkUrl(track?.artwork_hash, 'full')
 
-  // Preload all tags for this track into store on open
-  useEffect(() => {
-    if (!activeTrackId) return
-    async function preload(): Promise<void> {
-      const result = await window.api.tags.forTrack(activeTrackId!)
-      setTrackTags(activeTrackId!, result)
-    }
-    preload()
-  }, [activeTrackId])
-
-  // Auto-analyze if BPM or key is missing
-  useEffect(() => {
-    if (!track) return
-    if (!track.bpm || !track.key_camelot) {
-      autoAnalyze()
-    }
-  }, [activeTrackId])
-
-  useEffect(() => {
-    if (isOpen && titleRef.current) {
-      titleRef.current.focus()
-      titleRef.current.select()
-    }
-  }, [activeTrackId, isOpen])
+  // Prev / next navigation
+  const currentIndex = tracks.findIndex((t) => t.id === activeTrackId)
+  const prevTrack = currentIndex > 0 ? tracks[currentIndex - 1] : null
+  const nextTrack = currentIndex < tracks.length - 1 ? tracks[currentIndex + 1] : null
 
   async function autoAnalyze(): Promise<void> {
     if (!track || analyzing) return
@@ -77,14 +63,77 @@ export function Inspector(): React.JSX.Element {
     }
   }
 
+  async function changeArtwork(): Promise<void> {
+    if (!track) return
+    const result = await window.api.artwork.pick(track.id)
+    if (result.ok && result.hash) {
+      updateTrack(track.id, { artwork_hash: result.hash })
+    } else if (result.error) {
+      toast.error('Could not change artwork', { description: result.error })
+    }
+  }
+
+  // Preload all tags for this track into store on open
+  useEffect(() => {
+    if (!activeTrackId) return
+    async function preload(): Promise<void> {
+      const result = await window.api.tags.forTrack(activeTrackId!)
+      setTrackTags(activeTrackId!, result)
+    }
+    preload()
+  }, [activeTrackId])
+
+  // Auto-analyze if BPM or key is missing
+  useEffect(() => {
+    if (!track) return
+    if (!track.bpm || !track.key_camelot) {
+      queueMicrotask(() => {
+        autoAnalyze()
+      })
+    }
+  }, [activeTrackId])
+
+  // Focus title on open
+  useEffect(() => {
+    if (isOpen && titleRef.current) {
+      titleRef.current.focus()
+      titleRef.current.select()
+    }
+  }, [activeTrackId, isOpen])
+
+  // Keyboard navigation
+  useEffect(() => {
+    function handleKey(e: KeyboardEvent): void {
+      if (!isOpen) return
+      const target = e.target as HTMLElement
+      if (
+        target.tagName === 'INPUT' ||
+        target.tagName === 'TEXTAREA' ||
+        target.tagName === 'SELECT'
+      ) return
+
+      if (e.key === 'ArrowUp' && prevTrack) {
+        e.preventDefault()
+        setActiveTrack(prevTrack.id)
+      }
+      if (e.key === 'ArrowDown' && nextTrack) {
+        e.preventDefault()
+        setActiveTrack(nextTrack.id)
+      }
+      if (e.key === 'Escape') {
+        setActiveTrack(null)
+      }
+    }
+    window.addEventListener('keydown', handleKey)
+    return () => window.removeEventListener('keydown', handleKey)
+  }, [isOpen, prevTrack, nextTrack, setActiveTrack])
+
   async function saveField(field: string, value: string): Promise<void> {
     if (!track) return
 
-    // 1 - Update store
     const newValue = field === 'bpm' ? parseFloat(value) || null : value || null
     updateTrack(track.id, { [field]: newValue })
 
-    // 2 - Update Sqlite
     await window.api.db.updateTrackMeta({
       id: track.id,
       title: track.title,
@@ -96,11 +145,9 @@ export function Inspector(): React.JSX.Element {
       comment: track.comment,
       needs_sync: track.needs_sync,
       pending_changes: track.pending_changes,
-      [field]: newValue
+      [field]: newValue,
     })
 
-    // 3 — Write to file on disk (Serato + ID3)
-    // Build full meta from current track + the field that just changed
     const meta = {
       title: field === 'title' ? value : track.title,
       artist: field === 'artist' ? value : track.artist,
@@ -116,7 +163,6 @@ export function Inspector(): React.JSX.Element {
       label: field === 'label' ? value : track.label,
     }
 
-    // Fire and forget — don't block the UI waiting for disk write
     window.api.writeTags(track.filepath, meta).then((result) => {
       if (!result.ok) {
         toast.error('Could not save to file', { description: result.error ?? 'Unknown error' })
@@ -148,7 +194,7 @@ export function Inspector(): React.JSX.Element {
         overflow: 'hidden',
         display: 'flex',
         flexDirection: 'column',
-        transition: 'width 0.25s ease'
+        transition: 'width 0.25s ease',
       }}
     >
       {isOpen && track && (
@@ -157,34 +203,97 @@ export function Inspector(): React.JSX.Element {
           flexDirection: 'column',
           minWidth: '260px',
           height: '100%',
-          overflow: 'hidden'
+          overflow: 'hidden',
         }}>
 
           {/* Fixed header */}
           <div style={{
-            padding: '16px 16px 0 16px',
+            padding: '12px 16px 0 16px',
             display: 'flex',
             flexDirection: 'column',
             gap: '12px',
-            flexShrink: 0
+            flexShrink: 0,
           }}>
-            <div style={{ display: 'flex', justifyContent: 'flex-end' }}>
+
+            {/* Nav row */}
+            <div style={{
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'space-between',
+            }}>
+              {/* Prev */}
+              <button
+                onClick={() => prevTrack && setActiveTrack(prevTrack.id)}
+                disabled={!prevTrack}
+                title="Previous track (↑)"
+                style={{
+                  background: 'none',
+                  border: 'none',
+                  color: prevTrack ? '#7f77dd' : '#2a2a3a',
+                  cursor: prevTrack ? 'pointer' : 'default',
+                  fontSize: '16px',
+                  padding: '2px 6px',
+                  lineHeight: 1,
+                  borderRadius: '4px',
+                }}
+              >
+                ↑
+              </button>
+
+              {/* Position */}
+              <span style={{ fontSize: '10px', color: '#333' }}>
+                {currentIndex >= 0 ? `${currentIndex + 1} / ${tracks.length}` : ''}
+              </span>
+
+              {/* Next */}
+              <button
+                onClick={() => nextTrack && setActiveTrack(nextTrack.id)}
+                disabled={!nextTrack}
+                title="Next track (↓)"
+                style={{
+                  background: 'none',
+                  border: 'none',
+                  color: nextTrack ? '#7f77dd' : '#2a2a3a',
+                  cursor: nextTrack ? 'pointer' : 'default',
+                  fontSize: '16px',
+                  padding: '2px 6px',
+                  lineHeight: 1,
+                  borderRadius: '4px',
+                }}
+              >
+                ↓
+              </button>
+
+              {/* Close */}
               <button
                 onClick={() => setActiveTrack(null)}
+                title="Close (Esc)"
                 style={{
-                  background: 'none', border: 'none',
-                  color: '#444', cursor: 'pointer',
-                  fontSize: '16px', padding: '0', lineHeight: 1
+                  background: 'none',
+                  border: 'none',
+                  color: '#444',
+                  cursor: 'pointer',
+                  fontSize: '16px',
+                  padding: '2px 4px',
+                  lineHeight: 1,
+                  borderRadius: '4px',
                 }}
-              >✕</button>
+              >
+                ✕
+              </button>
             </div>
 
             {/* Artwork */}
+            <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
             <div style={{
-              width: '100%', aspectRatio: '1',
-              borderRadius: '8px', overflow: 'hidden',
-              background: '#1e1e2a', marginBottom: '4px',
-              display: 'flex', alignItems: 'center', justifyContent: 'center',
+              width: '100%',
+              aspectRatio: '1',
+              borderRadius: '8px',
+              overflow: 'hidden',
+              background: '#1e1e2a',
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'center',
               position: 'relative',
             }}>
               {artworkUrl ? (
@@ -198,6 +307,7 @@ export function Inspector(): React.JSX.Element {
               ) : (
                 <span style={{ fontSize: '48px', color: '#333' }}>♪</span>
               )}
+
               {/* Analyzing overlay */}
               {analyzing && (
                 <div style={{
@@ -221,16 +331,38 @@ export function Inspector(): React.JSX.Element {
                 </div>
               )}
             </div>
+            <button
+              type="button"
+              data-testid="inspector-change-artwork"
+              onClick={changeArtwork}
+              style={{
+                alignSelf: 'center',
+                background: 'none',
+                border: 'none',
+                padding: 0,
+                color: '#7f77dd',
+                fontSize: '11px',
+                cursor: 'pointer',
+              }}
+              onMouseEnter={(e) => (e.currentTarget.style.textDecoration = 'underline')}
+              onMouseLeave={(e) => (e.currentTarget.style.textDecoration = 'none')}
+            >
+              Change artwork
+            </button>
+            </div>
 
             <Separator className="bg-[#1e1e2a]" />
           </div>
-
-          <MoveFileButton track={track} />
+          <div className="flex" style={{padding: '0 15px'}}>
+            <MoveFileButton track={track} />
+          </div>
 
           {/* Scrollable editing section */}
           <div style={{
-            flex: 1, minHeight: 0,
-            overflowY: 'auto', overflowX: 'hidden',
+            flex: 1,
+            minHeight: 0,
+            overflowY: 'auto',
+            overflowX: 'hidden',
             padding: '12px 16px'
           }}>
             <div style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
@@ -253,7 +385,7 @@ export function Inspector(): React.JSX.Element {
               <TagInput trackId={track.id} field="composer" label="Composer" color="#ba7517" />
               <TagInput trackId={track.id} field="album" label="Album" color="#888780" />
 
-              {/* BPM — auto-detects if empty */}
+              {/* BPM */}
               <div>
                 <label className="text-[10px] font-medium tracking-widest uppercase text-muted-foreground">
                   BPM
@@ -285,7 +417,7 @@ export function Inspector(): React.JSX.Element {
                 </div>
               </div>
 
-              {/* Key — Camelot dropdown */}
+              {/* Key */}
               <div>
                 <label className="text-[10px] font-medium tracking-widest uppercase text-muted-foreground">
                   Key
@@ -321,7 +453,7 @@ export function Inspector(): React.JSX.Element {
                 </select>
               </div>
 
-              {/* Energy slider */}
+              {/* Energy */}
               <div className="flex flex-col gap-2">
                 <label className="text-[10px] font-medium tracking-widest uppercase text-muted-foreground">
                   Energy
@@ -342,9 +474,12 @@ export function Inspector(): React.JSX.Element {
               {/* Year */}
               <div>
                 <div style={{
-                  fontSize: '10px', fontWeight: 500,
-                  letterSpacing: '0.8px', textTransform: 'uppercase',
-                  color: '#333', marginBottom: '3px'
+                  fontSize: '10px',
+                  fontWeight: 500,
+                  letterSpacing: '0.8px',
+                  textTransform: 'uppercase',
+                  color: '#333',
+                  marginBottom: '3px',
                 }}>
                   Year
                 </div>
@@ -353,11 +488,17 @@ export function Inspector(): React.JSX.Element {
                   defaultValue={track.year ?? String(new Date().getFullYear())}
                   onChange={(e) => saveField('year', e.target.value)}
                   style={{
-                    width: '100%', background: '#1a1a26',
-                    border: '0.5px solid #252535', borderRadius: '5px',
-                    padding: '5px 8px', color: '#c0c0d8',
-                    fontSize: '12px', fontFamily: 'monospace',
-                    outline: 'none', cursor: 'pointer', height: '28px',
+                    width: '100%',
+                    background: '#1a1a26',
+                    border: '0.5px solid #252535',
+                    borderRadius: '5px',
+                    padding: '5px 8px',
+                    color: '#c0c0d8',
+                    fontSize: '12px',
+                    fontFamily: 'monospace',
+                    outline: 'none',
+                    cursor: 'pointer',
+                    height: '28px',
                   }}
                   onFocus={(e) => (e.target.style.borderColor = '#7f77dd')}
                   onBlur={(e) => (e.target.style.borderColor = '#252535')}
@@ -377,7 +518,7 @@ export function Inspector(): React.JSX.Element {
             display: 'flex',
             flexDirection: 'column',
             gap: '12px',
-            flexShrink: 0
+            flexShrink: 0,
           }}>
             <Separator className="bg-[#1e1e2a]" />
             <ReadField label="Duration" value={track.duration_str} />
@@ -386,15 +527,20 @@ export function Inspector(): React.JSX.Element {
             <Separator className="bg-[#1e1e2a]" />
             <div>
               <div style={{
-                fontSize: '10px', fontWeight: 500,
-                letterSpacing: '0.8px', textTransform: 'uppercase',
-                color: '#333', marginBottom: '4px'
+                fontSize: '10px',
+                fontWeight: 500,
+                letterSpacing: '0.8px',
+                textTransform: 'uppercase',
+                color: '#333',
+                marginBottom: '4px',
               }}>
                 File path
               </div>
               <div style={{
-                fontSize: '10px', color: '#444',
-                wordBreak: 'break-all', lineHeight: 1.5
+                fontSize: '10px',
+                color: '#444',
+                wordBreak: 'break-all',
+                lineHeight: 1.5,
               }}>
                 {track.filepath}
               </div>
@@ -439,13 +585,22 @@ EditField.displayName = 'EditField'
 
 // ─── ReadField ────────────────────────────────────────────
 
-function ReadField({ label, value }: { label: string; value?: string | null }): React.JSX.Element | null {
+function ReadField({
+  label,
+  value,
+}: {
+  label: string
+  value?: string | null
+}): React.JSX.Element | null {
   if (!value) return null
   return (
     <div style={{ display: 'flex', justifyContent: 'space-between' }}>
       <span style={{
-        fontSize: '11px', fontWeight: 500,
-        letterSpacing: '0.6px', textTransform: 'uppercase', color: '#444'
+        fontSize: '11px',
+        fontWeight: 500,
+        letterSpacing: '0.6px',
+        textTransform: 'uppercase',
+        color: '#444',
       }}>
         {label}
       </span>

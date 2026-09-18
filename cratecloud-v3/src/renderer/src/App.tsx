@@ -13,6 +13,7 @@ import { DashboardView } from '@renderer/views/DashboardView'
 import type { View } from './components/Sidebar'
 import { Breadcrumb } from './components/Breadcrumb'
 import { ReconciliationModal } from './components/ReconciliationModal'
+import { SeratoImportConfirmDialog } from './components/SeratoImportConfirmDialog'
 import { Toaster } from './components/ui/sonner'
 import { BackgroundJobsPanel } from './components/BackgroundJobsPanel'
 import { PlayerBar } from './components/PlayerBar'
@@ -56,6 +57,10 @@ function App(): React.JSX.Element {
   const [analysisProgress, setAnalysisProgress] = useState<{
     done: number
     total: number
+  } | null>(null)
+  const [seratoImportPrompt, setSeratoImportPrompt] = useState<{
+    folderPath: string
+    seratoDir: string
   } | null>(null)
   // Batch-committed events fire once per ~200-row transaction — debounce the
   // resulting track-list refetch so a burst of fast batches collapses into one.
@@ -291,6 +296,27 @@ function App(): React.JSX.Element {
       }
     })
 
+    // Serato import progress — chained after a folder import that had
+    // "Import Serato data" checked (see maybeRunSeratoImport in
+    // main/index.ts). Refetch tracks once it's done since it can fill
+    // previously-empty fields and set added_at on freshly-imported rows.
+    window.api.onSeratoImportProgress((p) => {
+      upsertJob({ ...p, type: 'seratoImport' })
+      if (p.phase === 'done') {
+        window.api.db.allTracks().then(setTracks)
+        const t = p.tally
+        if (t.dbEntriesMatched > 0 || t.cratesCreated > 0 || t.playsImported > 0) {
+          toast.success(
+            `Serato import: ${t.dbEntriesMatched} tracks matched, ${t.cratesCreated} crates, ${t.playsImported} plays`
+          )
+        }
+        setTimeout(() => removeJob(p.jobId), 4000)
+      } else if (p.phase === 'error') {
+        toast.error('Serato import failed', { description: p.error })
+        setTimeout(() => removeJob(p.jobId), 4000)
+      }
+    })
+
     // Batch tag-edit progress (see editTagsBatch/runEditTagsJob in
     // main/index.ts). This only reflects sidecar progress — no DB update is
     // wired up yet, so track rows are never refetched here (there's nothing
@@ -345,6 +371,7 @@ function App(): React.JSX.Element {
       window.api.offCopyProgress()
       window.api.offCrateExportProgress()
       window.api.offEditTagsProgress()
+      window.api.offSeratoImportProgress()
       if (batchRefreshTimer.current) clearTimeout(batchRefreshTimer.current)
       if (foldersRefreshTimer.current) clearTimeout(foldersRefreshTimer.current)
     }
@@ -354,10 +381,10 @@ function App(): React.JSX.Element {
   // Shared by the dialog flow (handleImport, below) and ImportDropzone's
   // onImportFolder (dialog button or a dropped folder — it resolves the
   // path itself either way and hands it here already resolved).
-  async function handleImportFolder(folderPath: string): Promise<void> {
+  async function performImportFolder(folderPath: string, importSeratoData: boolean): Promise<void> {
     setAnalyzing(true)
 
-    const result = await window.api.importFolder(folderPath)
+    const result = await window.api.importFolder(folderPath, importSeratoData)
 
     if (result.ok) {
       // Final reload to make sure everything is in sync
@@ -379,6 +406,19 @@ function App(): React.JSX.Element {
 
     setAnalyzing(false)
     // Progress bar is cleared by the 'done' phase of onImportProgress
+  }
+
+  // Offers "Import Serato data from this library" before the import starts
+  // whenever the folder's volume has a `_Serato_` — see detectSeratoLibrary
+  // in main/serato/seratoImport.ts. No Serato library found just imports
+  // immediately, same as before this existed.
+  async function handleImportFolder(folderPath: string): Promise<void> {
+    const detection = await window.api.detectSeratoForFolder(folderPath)
+    if (detection.found && detection.seratoDir) {
+      setSeratoImportPrompt({ folderPath, seratoDir: detection.seratoDir })
+      return
+    }
+    await performImportFolder(folderPath, false)
   }
 
   async function handleImport(): Promise<void> {
@@ -511,7 +551,11 @@ function App(): React.JSX.Element {
       </div>
 
       {/* Toolbar at the top */}
-      <Toolbar onImportFolder={handleImportFolder} activeView={activeView} onImportFiles={handleImportFiles} />
+      <Toolbar
+        onImportFolder={handleImportFolder}
+        activeView={activeView}
+        onImportFiles={handleImportFiles}
+      />
 
       {/* Background jobs (import, move, copy) — non-modal, stays visible across navigation */}
       <BackgroundJobsPanel
@@ -657,6 +701,16 @@ function App(): React.JSX.Element {
         onRootsChanged={reloadRoots}
       />
       <ReconciliationModal open={reconcileOpen} onClose={() => setReconcileOpen(false)} />
+      <SeratoImportConfirmDialog
+        open={seratoImportPrompt !== null}
+        seratoDir={seratoImportPrompt?.seratoDir ?? ''}
+        onCancel={() => setSeratoImportPrompt(null)}
+        onConfirm={(importSeratoData) => {
+          const folderPath = seratoImportPrompt?.folderPath
+          setSeratoImportPrompt(null)
+          if (folderPath) void performImportFolder(folderPath, importSeratoData)
+        }}
+      />
       <Toaster />
     </div>
   )

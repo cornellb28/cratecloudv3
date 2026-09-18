@@ -2,6 +2,7 @@ import React, { useEffect, useState } from 'react'
 import { Dialog, DialogContent } from '@renderer/components/ui/dialog'
 import { Button } from '@renderer/components/ui/button'
 import { ReconciliationModal } from './ReconciliationModal'
+import { SeratoImportConfirmDialog } from './SeratoImportConfirmDialog'
 
 interface SettingsModalProps {
   open: boolean
@@ -21,6 +22,10 @@ export function SettingsModal({
 }: SettingsModalProps): React.JSX.Element {
   const [adding, setAdding] = useState(false)
   const [reconcileOpen, setReconcileOpen] = useState(false)
+  const [seratoImportPrompt, setSeratoImportPrompt] = useState<{
+    folderPath: string
+    seratoDir: string
+  } | null>(null)
   const [seratoOverride, setSeratoOverride] = useState<string | null>(null)
   const [overwriteExisting, setOverwriteExisting] = useState(true)
 
@@ -61,14 +66,23 @@ export function SettingsModal({
     await window.api.settings.set(SERATO_OVERWRITE_KEY, String(next))
   }
 
+  async function addRoot(folderPath: string, importSeratoData: boolean): Promise<void> {
+    setAdding(true)
+    await window.api.roots.add(folderPath, importSeratoData)
+    setAdding(false)
+    onRootsChanged()
+  }
+
   async function handleAddFolder(): Promise<void> {
     const folderPath = await window.api.openFolder()
     if (!folderPath) return
 
-    setAdding(true)
-    await window.api.roots.add(folderPath)
-    setAdding(false)
-    onRootsChanged()
+    const detection = await window.api.detectSeratoForFolder(folderPath)
+    if (detection.found && detection.seratoDir) {
+      setSeratoImportPrompt({ folderPath, seratoDir: detection.seratoDir })
+      return
+    }
+    await addRoot(folderPath, false)
   }
 
   async function handleRemove(id: number): Promise<void> {
@@ -178,6 +192,16 @@ export function SettingsModal({
           </Button>
 
           <ReconciliationModal open={reconcileOpen} onClose={() => setReconcileOpen(false)} />
+          <SeratoImportConfirmDialog
+            open={seratoImportPrompt !== null}
+            seratoDir={seratoImportPrompt?.seratoDir ?? ''}
+            onCancel={() => setSeratoImportPrompt(null)}
+            onConfirm={(importSeratoData) => {
+              const folderPath = seratoImportPrompt?.folderPath
+              setSeratoImportPrompt(null)
+              if (folderPath) void addRoot(folderPath, importSeratoData)
+            }}
+          />
         </div>
 
         <div style={{ padding: '16px' }}>

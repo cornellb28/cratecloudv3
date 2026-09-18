@@ -67,6 +67,29 @@ interface EditTagsProgressPayload {
   failed: { filepath: string; error: string }[]
 }
 
+// TODO: independently redefined here, in main/index.ts, and in global.d.ts
+// — see the same TODO on JobState in useLibraryStore.ts.
+interface SeratoImportTally {
+  dbEntriesRead: number
+  dbEntriesMatched: number
+  fieldsFilledByField: Record<string, number>
+  addedAtFilled: number
+  cratesCreated: number
+  crateTracksLinked: number
+  crateUnresolvedPaths: number
+  playsImported: number
+  playsUnresolvedPaths: number
+  unresolvedPathSamples: string[]
+}
+
+interface SeratoImportProgressPayload {
+  jobId: string
+  phase: 'running' | 'done' | 'error'
+  stage: 'database' | 'crates' | 'history'
+  tally: SeratoImportTally
+  error?: string
+}
+
 interface EditTagsMeta {
   title?: string
   artist?: string
@@ -92,7 +115,8 @@ const api = {
   importFile: (filepath: string) => ipcRenderer.invoke('library:import-file', filepath),
   importFiles: (filepaths: string[]) => ipcRenderer.invoke('library:import-files', filepaths),
   analyzeFile: (filepath: string) => ipcRenderer.invoke('sidecar:analyze', filepath),
-  writeTags: (filepath: string, meta: Record<string, unknown>) => ipcRenderer.invoke('sidecar:write-tags', filepath, meta),
+  writeTags: (filepath: string, meta: Record<string, unknown>) =>
+    ipcRenderer.invoke('sidecar:write-tags', filepath, meta),
   // Job-based, like fs.moveFiles/crates.export — resolves immediately with
   // a jobId; progress comes over onEditTagsProgress. See runEditTagsJob in
   // main/index.ts — no DB update happens as part of this yet.
@@ -103,7 +127,8 @@ const api = {
   onEditTagsProgress: (cb: (p: EditTagsProgressPayload) => void) =>
     ipcRenderer.on('edit-tags:progress', (_e, p) => cb(p)),
   offEditTagsProgress: () => ipcRenderer.removeAllListeners('edit-tags:progress'),
-  importFolder: (folderPath: string) => ipcRenderer.invoke('library:import-folder', folderPath),
+  importFolder: (folderPath: string, importSeratoData?: boolean) =>
+    ipcRenderer.invoke('library:import-folder', folderPath, importSeratoData),
   cancelImport: (jobId: string) => ipcRenderer.invoke('import:cancel', jobId),
   resumeImport: (jobId: string) => ipcRenderer.invoke('import:resume', jobId),
   onImportProgress: (cb: (p: ImportProgressPayload) => void) =>
@@ -114,6 +139,15 @@ const api = {
     ipcRenderer.removeAllListeners('import:progress')
     ipcRenderer.removeAllListeners('import:batch-committed')
   },
+  // Serato: detection is a plain invoke (renderer decides whether to show
+  // the "Import Serato data" checkbox before an import even starts); the
+  // import itself rides along on library:import-folder/roots.add and
+  // reports back on its own progress channel like every other job.
+  detectSeratoForFolder: (folderPath: string): Promise<{ found: boolean; seratoDir?: string }> =>
+    ipcRenderer.invoke('serato:detect-for-folder', folderPath),
+  onSeratoImportProgress: (cb: (p: SeratoImportProgressPayload) => void) =>
+    ipcRenderer.on('serato-import:progress', (_e, p) => cb(p)),
+  offSeratoImportProgress: () => ipcRenderer.removeAllListeners('serato-import:progress'),
   onTrackAnalyzed: (
     cb: (data: {
       trackId: number
@@ -223,7 +257,8 @@ const api = {
   // Library roots
   roots: {
     all: () => ipcRenderer.invoke('roots:all'),
-    add: (folderPath: string) => ipcRenderer.invoke('roots:add', folderPath),
+    add: (folderPath: string, importSeratoData?: boolean) =>
+      ipcRenderer.invoke('roots:add', folderPath, importSeratoData),
     remove: (id: number) => ipcRenderer.invoke('roots:remove', id)
   },
 
@@ -244,6 +279,7 @@ const api = {
   artwork: {
     pathFor: (hash: string | null, size: 'full' | 'thumb') =>
       ipcRenderer.invoke('artwork:path-for', hash, size),
+    pick: (trackId: number) => ipcRenderer.invoke('artwork:pick', trackId),
     sweepOrphaned: () => ipcRenderer.invoke('artwork:sweep-orphaned')
   },
   fs: {
@@ -272,7 +308,8 @@ const api = {
       deleteSource?: boolean
     }) => ipcRenderer.invoke('fs:copy-into-folder', payload),
     cancelCopy: (jobId: string) => ipcRenderer.invoke('fs:cancel-copy', jobId),
-    showInFolder: (filepath: string): Promise<void> => ipcRenderer.invoke('fs:showInFolder', filepath)
+    showInFolder: (filepath: string): Promise<void> =>
+      ipcRenderer.invoke('fs:showInFolder', filepath)
   },
   onMoveProgress: (cb: (p: MoveProgressPayload) => void) =>
     ipcRenderer.on('move:progress', (_e, p) => cb(p)),

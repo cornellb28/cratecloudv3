@@ -466,6 +466,33 @@ db.exec(`
 );
 
   -- ─────────────────────────────────────────────────────
+  -- PLAY HISTORY
+  -- Imported from Serato's History/Sessions/*.session files
+  -- (see src/main/serato/seratoHistory.ts). track_id is
+  -- nullable and ON DELETE SET NULL — a play should survive
+  -- its track being deleted from the library, kept under its
+  -- raw filepath, rather than vanish or block the delete.
+  -- The (filepath, played_at, source) unique index makes a
+  -- re-import (or a future incremental re-sync) idempotent:
+  -- re-reading the same session twice just no-ops the rows
+  -- that already exist instead of duplicating them.
+  -- ─────────────────────────────────────────────────────
+
+  CREATE TABLE IF NOT EXISTS plays (
+    id                   INTEGER PRIMARY KEY AUTOINCREMENT,
+    track_id             INTEGER REFERENCES tracks(id) ON DELETE SET NULL,
+    filepath             TEXT    NOT NULL,
+    played_at            INTEGER NOT NULL,
+    duration_played_sec  INTEGER,
+    source               TEXT    NOT NULL DEFAULT 'serato',
+    imported_at          INTEGER NOT NULL DEFAULT (strftime('%s','now'))
+  );
+
+  CREATE INDEX IF NOT EXISTS idx_plays_track_id ON plays(track_id);
+  CREATE INDEX IF NOT EXISTS idx_plays_played_at ON plays(played_at);
+  CREATE UNIQUE INDEX IF NOT EXISTS idx_plays_dedupe ON plays(filepath, played_at, source);
+
+  -- ─────────────────────────────────────────────────────
   -- INDEXES
   -- These make queries fast. Without them SQLite reads
   -- every row to find matches. With them it jumps
@@ -899,7 +926,9 @@ const stmts = {
 
 // --- Track Functions ------------------------------------------
 
-export function insertTrack(track: Record<string, unknown>): { lastInsertRowid: number | bigint } {
+export function insertTrack(
+  track: Record<string, unknown>
+): { lastInsertRowid: number | bigint; wasInserted: boolean } {
   // Fill in null for any missing fields so the prepared
   // statement never throws "Missing named parameter"
   const safe = {
@@ -935,7 +964,7 @@ export function insertTrack(track: Record<string, unknown>): { lastInsertRowid: 
     client_uuid: track.client_uuid ?? randomUUID(),
     partial_hash: track.partial_hash ?? null
   }
-  stmts.insertTrack.run(safe)
+  const result = stmts.insertTrack.run(safe)
 
   // better-sqlite3's lastInsertRowid is unreliable here: on the
   // ON CONFLICT DO UPDATE path it is NOT reset to 0 — it holds
@@ -944,7 +973,18 @@ export function insertTrack(track: Record<string, unknown>): { lastInsertRowid: 
   // resolve the id by filepath (UNIQUE, indexed) instead of
   // trusting the statement result.
   const existing = stmts.getTrackByFilepath.get(safe.filepath) as { id: number } | undefined
-  return { lastInsertRowid: existing?.id ?? 0 }
+
+  // That same staleness is exactly what makes lastInsertRowid useful for a
+  // DIFFERENT purpose here: it only ever changes when a real INSERT just
+  // fired (never on the ON CONFLICT DO UPDATE path), so comparing it to the
+  // row we just resolved tells us whether THIS call genuinely created a new
+  // row versus updated a pre-existing one — a distinction insertTrack's
+  // upsert otherwise erases. The Serato importer relies on this: it must
+  // never treat a re-scanned, already-existing track as "freshly inserted."
+  const wasInserted =
+    existing !== undefined && Number(result.lastInsertRowid) === existing.id
+
+  return { lastInsertRowid: existing?.id ?? 0, wasInserted }
 }
 
 // Batched version of insertTrack — wraps N rows in a single transaction so a
@@ -953,11 +993,15 @@ export function insertTrack(track: Record<string, unknown>): { lastInsertRowid: 
 // single-file inserts stay byte-for-byte identical.
 export function insertTracksBatch(
   tracks: Record<string, unknown>[]
-): { id: number; filepath: string }[] {
+): { id: number; filepath: string; wasInserted: boolean }[] {
   const insertMany = db.transaction((rows: Record<string, unknown>[]) => {
     return rows.map((track) => {
       const result = insertTrack(track)
-      return { id: Number(result.lastInsertRowid), filepath: track.filepath as string }
+      return {
+        id: Number(result.lastInsertRowid),
+        filepath: track.filepath as string,
+        wasInserted: result.wasInserted
+      }
     })
   })
   return insertMany(tracks)
@@ -1757,6 +1801,109 @@ export function relinkTrack(trackId: number, newPath: string): RunResult {
     })
   folderEvents.emit('changed')
   return result
+}
+
+// ─── Serato import ─────────────────────────────────────────
+// Precedence for a Serato-sourced value: whatever the file's own tags
+// already gave us wins. Serato's database only ever fills a field that's
+// currently null/empty — this is deliberately NOT updateTrackMeta's merge
+// (which always overwrites with whatever the caller passes), since that
+// would let a stale Serato-DB value clobber a value the sidecar already
+// read straight off the file.
+//
+// key_camelot/camelot/openkey are left out on purpose: Serato's `tkey`
+// string is written in whatever notation the user configured in Serato's
+// own display preferences (musical, Camelot, or Open Key) and there's no
+// reliable way to tell which one it is from the database alone — filling
+// key_full (a free-text field) is safe, filling a specifically-typed key
+// column with an unverified notation is not.
+const SERATO_FILLABLE_TRACK_FIELDS = [
+  'title',
+  'artist',
+  'album',
+  'genre',
+  'year',
+  'comment',
+  'label',
+  'remixer',
+  'composer',
+  'grouping',
+  'bpm',
+  'key_full',
+  'duration_sec',
+  'duration_str',
+  'file_size_bytes'
+] as const
+type SeratoFillableField = (typeof SERATO_FILLABLE_TRACK_FIELDS)[number]
+
+function isEmptyValue(value: unknown): boolean {
+  return value === null || value === undefined || value === ''
+}
+
+// Returns the field names actually changed — the caller (the Serato import
+// job) tallies these across every track for the per-field fill-count report.
+export function fillTrackFieldsIfEmpty(
+  trackId: number,
+  candidates: Partial<Record<SeratoFillableField, unknown>>
+): SeratoFillableField[] {
+  const existing = stmts.getTrackById.get(trackId) as Record<string, unknown> | undefined
+  if (!existing) return []
+
+  const toSet: Record<string, unknown> = {}
+  const filled: SeratoFillableField[] = []
+  for (const field of SERATO_FILLABLE_TRACK_FIELDS) {
+    if (!(field in candidates)) continue
+    const candidate = candidates[field]
+    if (isEmptyValue(candidate)) continue
+    if (!isEmptyValue(existing[field])) continue
+    toSet[field] = candidate
+    filled.push(field)
+  }
+  if (filled.length === 0) return []
+
+  const setClause = filled.map((f) => `${f} = @${f}`).join(', ')
+  db.prepare(`UPDATE tracks SET ${setClause}, updated_at = datetime('now') WHERE id = @id`).run({
+    ...toSet,
+    id: trackId
+  })
+  return filled
+}
+
+// Only ever called for a track this same Serato-import job just inserted
+// (added_at otherwise already reflects a real prior "added to CrateCloud"
+// moment, via its own NOT NULL DEFAULT — see the tracks table — which a
+// later Serato import has no business overwriting).
+export function setTrackAddedAt(trackId: number, epochSeconds: number): void {
+  db.prepare(`UPDATE tracks SET added_at = datetime(@epoch, 'unixepoch') WHERE id = @id`).run({
+    epoch: epochSeconds,
+    id: trackId
+  })
+}
+
+export interface SeratoPlayInsert {
+  track_id: number | null
+  filepath: string
+  played_at: number
+  duration_played_sec: number | null
+  source: string
+}
+
+// INSERT OR IGNORE against idx_plays_dedupe — re-running the Serato import
+// (or a future incremental re-sync) skips rows it already imported instead
+// of duplicating them. Returns how many rows were actually new.
+export function insertPlaysBatch(plays: SeratoPlayInsert[]): number {
+  const insert = db.prepare(`
+    INSERT OR IGNORE INTO plays (track_id, filepath, played_at, duration_played_sec, source)
+    VALUES (@track_id, @filepath, @played_at, @duration_played_sec, @source)
+  `)
+  const run = db.transaction((rows: SeratoPlayInsert[]) => {
+    let inserted = 0
+    for (const row of rows) {
+      if (insert.run(row).changes > 0) inserted++
+    }
+    return inserted
+  })
+  return run(plays)
 }
 
 export function insertPendingChange(data: {

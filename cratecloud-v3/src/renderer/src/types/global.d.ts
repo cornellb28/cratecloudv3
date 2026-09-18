@@ -16,7 +16,10 @@ declare global {
         data?: AnalysisResult
         error?: string
       }>
-      writeTags: (filepath: string, meta: Record<string, unknown>) => Promise<{ ok: boolean; results?: unknown[]; error?: string }>
+      writeTags: (
+        filepath: string,
+        meta: Record<string, unknown>
+      ) => Promise<{ ok: boolean; results?: unknown[]; error?: string }>
       // Job-based, like fs.moveFiles/crates.export — resolves immediately
       // with a jobId; progress comes over onEditTagsProgress. No DB update
       // happens as part of this yet — see runEditTagsJob in main/index.ts.
@@ -27,7 +30,10 @@ declare global {
       onEditTagsProgress: (cb: (p: EditTagsProgressPayload) => void) => void
       offEditTagsProgress: () => void
 
-      importFolder: (folderPath: string) => Promise<{
+      importFolder: (
+        folderPath: string,
+        importSeratoData?: boolean
+      ) => Promise<{
         ok: boolean
         imported?: number
         failed?: number
@@ -54,6 +60,12 @@ declare global {
       onImportBatchCommitted: (cb: (data: { jobId: string }) => void) => void
 
       offImportProgress: () => void
+
+      // Read-only pre-check before showing the "Import Serato data from this
+      // library" checkbox — see detectSeratoLibrary in main/serato/seratoImport.ts.
+      detectSeratoForFolder: (folderPath: string) => Promise<{ found: boolean; seratoDir?: string }>
+      onSeratoImportProgress: (cb: (p: SeratoImportProgressPayload) => void) => void
+      offSeratoImportProgress: () => void
 
       onTrackAnalyzed: (
         cb: (data: {
@@ -142,7 +154,10 @@ declare global {
 
       roots: {
         all: () => Promise<LibraryRoot[]>
-        add: (folderPath: string) => Promise<{ ok: boolean; id?: number; error?: string }>
+        add: (
+          folderPath: string,
+          importSeratoData?: boolean
+        ) => Promise<{ ok: boolean; id?: number; error?: string }>
         remove: (id: number) => Promise<{ ok: boolean; error?: string }>
       }
 
@@ -254,6 +269,7 @@ declare global {
 
       artwork: {
         pathFor: (hash: string | null, size: 'full' | 'thumb') => Promise<string | null>
+        pick: (trackId: number) => Promise<{ ok: boolean; hash?: string; error?: string }>
         sweepOrphaned: () => Promise<{ removed: number; bytesReclaimed: number }>
       }
     }
@@ -476,6 +492,27 @@ declare global {
     missingSkipped: number
     exportedCrateNames: string[]
     failed: { crateId: number; crateName: string; error: string }[]
+  }
+
+  interface SeratoImportTally {
+    dbEntriesRead: number
+    dbEntriesMatched: number
+    fieldsFilledByField: Record<string, number>
+    addedAtFilled: number
+    cratesCreated: number
+    crateTracksLinked: number
+    crateUnresolvedPaths: number
+    playsImported: number
+    playsUnresolvedPaths: number
+    unresolvedPathSamples: string[]
+  }
+
+  interface SeratoImportProgressPayload {
+    jobId: string
+    phase: 'running' | 'done' | 'error'
+    stage: 'database' | 'crates' | 'history'
+    tally: SeratoImportTally
+    error?: string
   }
 
   interface LibraryRoot {

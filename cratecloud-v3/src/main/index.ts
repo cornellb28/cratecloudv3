@@ -1,9 +1,9 @@
-import { app, shell, BrowserWindow, ipcMain, dialog, protocol } from 'electron'
+import { app, shell, BrowserWindow, ipcMain, dialog, nativeImage, protocol } from 'electron'
 import { join, extname, basename, dirname, relative } from 'path'
 import { electronApp, optimizer, is } from '@electron-toolkit/utils'
 import icon from '../../resources/icon.png?asset'
 import { execSync } from 'child_process'
-import { randomUUID, createHash } from 'crypto'
+import { randomUUID } from 'crypto'
 import { rename, stat, unlink, mkdir, readdir, readFile, open } from 'fs/promises'
 import { createReadStream, createWriteStream } from 'fs'
 import { startWatcher, stopWatcher, stopAllWatchers, setWatcherCallbacks } from './libraryWatcher'
@@ -57,7 +57,6 @@ import {
   updateTrackFilepath,
   getMissingTracks,
   relinkTrack,
-  type MissingTrackCandidate,
   markTrackAnalyzed,
   insertPendingChange,
   getPendingChanges,
@@ -89,6 +88,13 @@ import {
   buildCrateFileBaseName,
   type CrateExportSettings
 } from './serato'
+import { computePartialHash, findReconcileMatch } from './reconcile'
+import {
+  runSeratoImport,
+  detectSeratoLibrary,
+  type SeratoLibraryLocation,
+  type SeratoImportTally
+} from './serato/seratoImport'
 
 // Raise file handle limit for large libraries
 try {
@@ -154,6 +160,13 @@ interface ImportJob {
   cancelRequested: boolean
   status: ImportPhase
   batchThroughputs: number[] // files/sec, rolling window — used for the ETA
+  // Ids of rows genuinely INSERTed this job (not relinked) — the Serato
+  // import chained after this job uses this to decide which tracks' added_at
+  // is still a meaningless "just now" default versus a real prior value.
+  insertedTrackIds: number[]
+  // Set once the folder-import dialog's "Import Serato data" checkbox was
+  // checked — read after the job reaches 'done' to chain runSeratoImport.
+  importSeratoData: boolean
 }
 
 // ── Move job state (in-memory only) ──────────────────────────────────────
@@ -284,6 +297,32 @@ interface ExportJob {
   failed: ExportFailure[]
 }
 
+// ── Serato import job state (in-memory only) ──────────────────────────────
+// Chained after a folder-import job that had "Import Serato data" checked —
+// see maybeRunSeratoImport. Coarse-grained like ExportJob: three stages
+// (database/crates/history), not per-file progress, since each stage is
+// itself already a single streamed pass rather than something worth
+// reporting file-by-file.
+type SeratoImportPhase = 'running' | 'done' | 'error'
+type SeratoImportStage = 'database' | 'crates' | 'history'
+
+interface SeratoImportProgressPayload {
+  jobId: string
+  phase: SeratoImportPhase
+  stage: SeratoImportStage
+  tally: SeratoImportTally
+  error?: string
+}
+
+interface SeratoImportJob {
+  type: 'seratoImport'
+  id: string
+  status: SeratoImportPhase
+  stage: SeratoImportStage
+  tally: SeratoImportTally
+  error?: string
+}
+
 // ── Per-file write-tags serialization ─────────────────────────────────────
 // Each sidecar:write-tags call spawns its own edit_tags.py process (copy ->
 // edit copy -> atomic replace). Two calls for the same filepath racing in
@@ -338,7 +377,7 @@ interface EditTagsJob {
 }
 
 // One registry for every background job type, discriminated by `type`.
-type Job = ImportJob | MoveJob | CopyJob | ExportJob | EditTagsJob
+type Job = ImportJob | MoveJob | CopyJob | ExportJob | EditTagsJob | SeratoImportJob
 const jobs = new Map<string, Job>()
 
 const COUNT_PROGRESS_INTERVAL_MS = 250
@@ -520,97 +559,6 @@ function buildTrackData(
     // findReconcileMatch).
     client_uuid: result.client_uuid ?? null
   }
-}
-
-// Encoder/container rounding tolerance for the fingerprint fallback's
-// duration comparison — not an exact-match field like size or filename.
-const FINGERPRINT_DURATION_TOLERANCE_SEC = 0.5
-
-// A 64KB slice ~40% into the file — cheap (one small read, not a full-file
-// hash) but, combined with an already-exact size+duration match, more than
-// enough to tell two genuinely different tracks apart. Deliberately NOT the
-// head or tail of the file: write_tags (sidecar/analyze.py) rewrites the
-// ID3v2/APEv2/MP4 metadata containers that live there, so a hash taken from
-// either end would go stale the moment a track gets its BPM/key written
-// back — exactly the case reconcile most needs to survive. Only ever called
-// lazily, when size+duration alone left more than one candidate — see
-// findReconcileMatch. Stored on every track at insert time regardless (see
-// buildTrackData's callers): a track can't be hashed once it's gone
-// missing, so the value has to already be sitting on the row before that
-// happens, not computed on demand for the missing side.
-const PARTIAL_HASH_BYTES = 65536
-
-async function computePartialHash(filepath: string): Promise<string | null> {
-  try {
-    const { size } = await stat(filepath)
-    if (size <= PARTIAL_HASH_BYTES) {
-      const buffer = await readFile(filepath)
-      return createHash('sha256').update(buffer).digest('hex')
-    }
-    const offset = Math.floor(size * 0.4)
-    const handle = await open(filepath, 'r')
-    try {
-      const buffer = Buffer.alloc(PARTIAL_HASH_BYTES)
-      const { bytesRead } = await handle.read(buffer, 0, PARTIAL_HASH_BYTES, offset)
-      return createHash('sha256').update(buffer.subarray(0, bytesRead)).digest('hex')
-    } finally {
-      await handle.close()
-    }
-  } catch {
-    return null
-  }
-}
-
-// client_uuid first (strong signal, survives a filename/location change) —
-// then size + duration, which narrows the missing pool to "plausible"
-// candidates but can easily still leave more than one (two rips of the
-// same track, a full album where every track shares a runtime, etc). Ties
-// are broken by partial_hash, computed lazily right here (not for every
-// candidate — only once, for the file actually being matched, and only
-// because a tie actually happened). filename is the last resort, and only
-// a resort: if the hash still doesn't narrow it to exactly one — because
-// the tied rows predate this column and never got a hash stored, or
-// because they somehow also hash the same — a matching filename among
-// what's left is a reasonable tiebreak, but genuine, unresolved ambiguity
-// returns null (a new row) rather than guessing at which existing track to
-// overwrite the identity of.
-async function findReconcileMatch(
-  candidate: {
-    filepath: string
-    filename: string
-    client_uuid: string | null
-    file_size_bytes: number | null
-    duration_sec: number | null
-  },
-  pool: MissingTrackCandidate[]
-): Promise<MissingTrackCandidate | null> {
-  if (candidate.client_uuid) {
-    const byUuid = pool.find((m) => m.client_uuid === candidate.client_uuid)
-    if (byUuid) return byUuid
-  }
-
-  if (candidate.file_size_bytes == null || candidate.duration_sec == null) return null
-
-  const bySizeAndDuration = pool.filter(
-    (m) =>
-      m.file_size_bytes === candidate.file_size_bytes &&
-      m.duration_sec != null &&
-      Math.abs(m.duration_sec - (candidate.duration_sec as number)) <=
-        FINGERPRINT_DURATION_TOLERANCE_SEC
-  )
-  if (bySizeAndDuration.length === 0) return null
-  if (bySizeAndDuration.length === 1) return bySizeAndDuration[0]
-
-  // A real tie — worth the read.
-  const candidateHash = await computePartialHash(candidate.filepath)
-  const byHash = candidateHash
-    ? bySizeAndDuration.filter((m) => m.partial_hash === candidateHash)
-    : []
-  if (byHash.length === 1) return byHash[0]
-
-  const stillTied = byHash.length > 1 ? byHash : bySizeAndDuration
-  const byFilename = stillTied.filter((m) => m.filename === candidate.filename)
-  return byFilename.length === 1 ? byFilename[0] : null
 }
 
 // Copies fromPath to toPath in 1MB chunks, reporting cumulative bytes
@@ -1008,6 +956,62 @@ async function runExportJob(event: Electron.IpcMainInvokeEvent, job: ExportJob):
   setTimeout(() => jobs.delete(job.id), 15000)
 }
 
+function buildSeratoImportProgressPayload(job: SeratoImportJob): SeratoImportProgressPayload {
+  return { jobId: job.id, phase: job.status, stage: job.stage, tally: job.tally, error: job.error }
+}
+
+// Chained after a folder-import job that had "Import Serato data" checked —
+// never awaited by the caller (fire-and-forget, same as roots:add's own
+// auto-import), so the folder-import IPC call itself still resolves
+// immediately; progress streams over its own channel like every other job.
+function maybeRunSeratoImport(
+  event: Electron.IpcMainInvokeEvent,
+  location: SeratoLibraryLocation,
+  folderPath: string,
+  rootId: number,
+  freshlyInsertedTrackIds: number[]
+): void {
+  const id = randomUUID()
+  const job: SeratoImportJob = {
+    type: 'seratoImport',
+    id,
+    status: 'running',
+    stage: 'database',
+    tally: {
+      dbEntriesRead: 0,
+      dbEntriesMatched: 0,
+      fieldsFilledByField: {},
+      addedAtFilled: 0,
+      cratesCreated: 0,
+      crateTracksLinked: 0,
+      crateUnresolvedPaths: 0,
+      playsImported: 0,
+      playsUnresolvedPaths: 0,
+      unresolvedPathSamples: []
+    }
+  }
+  jobs.set(id, job)
+  event.sender.send('serato-import:progress', buildSeratoImportProgressPayload(job))
+
+  runSeratoImport(location, folderPath, rootId, new Set(freshlyInsertedTrackIds), (stage) => {
+    job.stage = stage
+    event.sender.send('serato-import:progress', buildSeratoImportProgressPayload(job))
+  })
+    .then((tally) => {
+      job.tally = tally
+      job.status = 'done'
+      event.sender.send('serato-import:progress', buildSeratoImportProgressPayload(job))
+    })
+    .catch((err) => {
+      job.status = 'error'
+      job.error = err instanceof Error ? err.message : String(err)
+      event.sender.send('serato-import:progress', buildSeratoImportProgressPayload(job))
+    })
+    .finally(() => {
+      setTimeout(() => jobs.delete(id), 15000)
+    })
+}
+
 function buildEditTagsProgressPayload(
   job: EditTagsJob,
   phaseOverride?: EditTagsPhase
@@ -1083,7 +1087,8 @@ function updateTrackAnalysis(trackId: number, result: AnalysisResult): void {
 async function runFolderImport(
   event: Electron.IpcMainInvokeEvent,
   folderPath: string,
-  jobId?: string
+  jobId?: string,
+  importSeratoData = false
 ): Promise<{
   imported: number
   failed: number
@@ -1123,7 +1128,9 @@ async function runFolderImport(
           total: 0,
           cancelRequested: false,
           status: 'counting',
-          batchThroughputs: []
+          batchThroughputs: [],
+          insertedTrackIds: [],
+          importSeratoData
         }
   jobs.set(id, job)
 
@@ -1314,6 +1321,7 @@ async function runFolderImport(
       for (let idx = 0; idx < inserted.length; idx++) {
         const row = inserted[idx]
         job.found++
+        if (row.id > 0 && row.wasInserted) job.insertedTrackIds.push(row.id)
         const artwork = withHashes[idx].artwork
         if (artwork && row.id > 0) {
           const hash = await storeArtwork(Buffer.from(artwork, 'base64'))
@@ -1351,6 +1359,18 @@ async function runFolderImport(
   if (matchingRoot) startWatcher(matchingRoot.id, matchingRoot.path)
 
   runPhase2Analysis(event)
+
+  if (matchingRoot && job.importSeratoData && !(await isSeratoRunning())) {
+    // Never read `_Serato_` while Serato itself might have it open — same
+    // refusal serato.ts's export path already enforces, reused here rather
+    // than duplicated. A checkbox checked earlier and Serato launched since
+    // is simply skipped, not surfaced as an error: the folder import itself
+    // still succeeded.
+    const location = detectSeratoLibrary(folderPath, getSetting('serato_library_override'))
+    if (location) {
+      maybeRunSeratoImport(event, location, folderPath, matchingRoot.id, job.insertedTrackIds)
+    }
+  }
 
   return { imported: job.found, failed: job.skipped, total: job.total, jobId: id }
 }
@@ -1641,30 +1661,41 @@ app.whenReady().then(() => {
   })
 
   // ── Tracks ──────────────────────────────────────────────
-  ipcMain.handle('library:import-folder', async (event, folderPath: string) => {
-    try {
-      // Register as root if not already nested — done BEFORE the import
-      // (not after) so runFolderImport has a library_root row to resolve
-      // folder_id against via ensureFolderTree. 'already-covered' (a re-scan
-      // of an already-registered root or one of its subfolders) falls
-      // through to import same as 'registered' — only 'conflict' (this
-      // folder is a PARENT of an already-registered root) refuses, since
-      // silently merging two roots isn't a decision to make here.
-      const registerResult = registerLibraryRoot(folderPath)
-      if (registerResult.status === 'conflict') {
-        const names = registerResult.conflictingRoots.map((r) => r.name).join(', ')
-        return {
-          ok: false,
-          error: `This folder already contains a registered library folder (${names}) — import that folder directly instead of its parent.`
+  ipcMain.handle(
+    'library:import-folder',
+    async (event, folderPath: string, importSeratoData?: boolean) => {
+      try {
+        // Register as root if not already nested — done BEFORE the import
+        // (not after) so runFolderImport has a library_root row to resolve
+        // folder_id against via ensureFolderTree. 'already-covered' (a re-scan
+        // of an already-registered root or one of its subfolders) falls
+        // through to import same as 'registered' — only 'conflict' (this
+        // folder is a PARENT of an already-registered root) refuses, since
+        // silently merging two roots isn't a decision to make here.
+        const registerResult = registerLibraryRoot(folderPath)
+        if (registerResult.status === 'conflict') {
+          const names = registerResult.conflictingRoots.map((r) => r.name).join(', ')
+          return {
+            ok: false,
+            error: `This folder already contains a registered library folder (${names}) — import that folder directly instead of its parent.`
+          }
         }
+
+        const result = await runFolderImport(event, folderPath, undefined, importSeratoData)
+
+        return { ok: true, ...result }
+      } catch (err) {
+        return { ok: false, error: (err as Error).message }
       }
-
-      const result = await runFolderImport(event, folderPath)
-
-      return { ok: true, ...result }
-    } catch (err) {
-      return { ok: false, error: (err as Error).message }
     }
+  )
+
+  // Read-only pre-check the renderer calls before showing the "Import
+  // Serato data from this library" checkbox — never creates `_Serato_`,
+  // just reports whether one is already there for this folder's volume.
+  ipcMain.handle('serato:detect-for-folder', (_e, folderPath: string) => {
+    const location = detectSeratoLibrary(folderPath, getSetting('serato_library_override'))
+    return location ? { found: true, seratoDir: location.seratoDir } : { found: false }
   })
 
   ipcMain.handle('import:cancel', (_e, jobId: string) => {
@@ -1937,6 +1968,38 @@ app.whenReady().then(() => {
     artworkPathFor(hash, size)
   )
 
+  // Lets the user replace one track's cover from an image file. Stores it
+  // content-addressed like embedded art, so picking the same image for many
+  // tracks costs one file. Sets artwork_hash in the DB only — the audio
+  // file's embedded picture is not touched. No `error` on a failed result
+  // means the dialog was cancelled.
+  ipcMain.handle(
+    'artwork:pick',
+    async (_e, trackId: number): Promise<{ ok: boolean; hash?: string; error?: string }> => {
+      if (!mainWindow) return { ok: false }
+      const { canceled, filePaths } = await dialog.showOpenDialog(mainWindow, {
+        properties: ['openFile'],
+        title: 'Choose album artwork',
+        filters: [{ name: 'Images', extensions: ['jpg', 'jpeg', 'png'] }]
+      })
+      if (canceled || filePaths.length === 0) return { ok: false }
+
+      try {
+        const bytes = await readFile(filePaths[0])
+        if (nativeImage.createFromBuffer(bytes).isEmpty()) {
+          return { ok: false, error: 'That file is not a valid JPEG or PNG image.' }
+        }
+        const hash = await storeArtwork(bytes)
+        if (!hash) return { ok: false, error: 'Could not save the artwork.' }
+        setTrackArtworkHash(trackId, hash)
+        return { ok: true, hash }
+      } catch (err) {
+        console.error('artwork:pick failed:', err)
+        return { ok: false, error: (err as Error).message }
+      }
+    }
+  )
+
   // TODO: surface in Settings as a manual "Clean up" action
   ipcMain.handle('artwork:sweep-orphaned', () => sweepOrphanedArtwork())
 
@@ -2177,22 +2240,23 @@ app.whenReady().then(() => {
   // first process committed, so nothing it wrote could have included that
   // change). Serializing here per filepath ensures each write starts only
   // after the previous write to that same file has fully landed on disk.
-  ipcMain.handle('sidecar:write-tags', async (_e, filepath: string, meta: Record<string, unknown>) => {
-    try {
-      const results = await queueTagWrite(filepath, async () => {
-        const items: unknown[] = []
-        await editTagsBatch(
-          [{ filepath, meta }],
-          (result) => items.push(result),
-          { writeSerato: true }
-        )
-        return items
-      })
-      return { ok: true, results }
-    } catch (err) {
-      return { ok: false, error: (err as Error).message}
+  ipcMain.handle(
+    'sidecar:write-tags',
+    async (_e, filepath: string, meta: Record<string, unknown>) => {
+      try {
+        const results = await queueTagWrite(filepath, async () => {
+          const items: unknown[] = []
+          await editTagsBatch([{ filepath, meta }], (result) => items.push(result), {
+            writeSerato: true
+          })
+          return items
+        })
+        return { ok: true, results }
+      } catch (err) {
+        return { ok: false, error: (err as Error).message }
+      }
     }
-  })
+  )
 
   // ── Create a new folder ──────────────────────────────────
 
@@ -2486,7 +2550,7 @@ app.whenReady().then(() => {
 
   ipcMain.handle('roots:all', () => getAllRoots())
 
-  ipcMain.handle('roots:add', async (event, folderPath: string) => {
+  ipcMain.handle('roots:add', async (event, folderPath: string, importSeratoData?: boolean) => {
     try {
       await stat(folderPath) // confirm it exists
 
@@ -2508,7 +2572,7 @@ app.whenReady().then(() => {
 
       // Auto-import in background — same as clicking Import folder
       // Do not await — returns immediately so Settings modal stays responsive
-      runFolderImport(event, folderPath)
+      runFolderImport(event, folderPath, undefined, importSeratoData)
 
       return { ok: true, id: registerResult.rootId }
     } catch (err) {

@@ -16,6 +16,7 @@ type JobState =
   | (CopyProgressPayload & { type: 'copy' })
   | (ExportProgressPayload & { type: 'export' })
   | (EditTagsProgressPayload & { type: 'editTags' })
+  | (SeratoImportProgressPayload & { type: 'seratoImport' })
 
 // ─── State shape ─────────────────────────────────────────
 

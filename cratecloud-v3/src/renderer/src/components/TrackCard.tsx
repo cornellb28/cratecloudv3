@@ -1,10 +1,10 @@
-import React from 'react'
+import React, { useState } from 'react'
 import { useLibraryStore } from '../store/useLibraryStore'
 import { usePlayerStore } from '../store/usePlayerStore'
 import { Badge } from '@renderer/components/ui/badge'
 import { Checkbox } from '@renderer/components/ui/checkbox'
-import { MoveFileButton } from './MoveFileButton'
 import { useArtworkUrl } from '../hooks/useArtworkUrl'
+import { TrackRowMenu } from './TrackRowMenu'
 
 interface TrackCardProps {
   track: Track
@@ -17,15 +17,20 @@ export function TrackCard({
   isSelected = false,
   onSelect
 }: TrackCardProps): React.JSX.Element {
-  const { activeTrackId, setActiveTrack, trackTags } = useLibraryStore()
+  const { activeTrackId, setActiveTrack, trackTags, boards } = useLibraryStore()
   const { currentTrack, isPlaying, playTrack, togglePlayPause } = usePlayerStore()
+  const [hovered, setHovered] = useState(false)
+
   const isActive = activeTrackId === track.id
+  const isCurrentTrack = currentTrack?.id === track.id
+  const isMissing = !!track.missing
+
   const appliedTags = trackTags.get(track.id) ?? []
   const commentTags = appliedTags.filter((t) => t.field === 'comment')
   const artworkUrl = useArtworkUrl(track.artwork_hash, 'thumb')
 
-  const isCurrentTrack = currentTrack?.id === track.id
-  const isMissing = !!track.missing
+  // Board pill
+  const board = boards.find((b) => b.id === track.board_id)
 
   function handlePlayToggle(e: React.MouseEvent): void {
     e.stopPropagation()
@@ -34,21 +39,29 @@ export function TrackCard({
     else playTrack(track)
   }
 
+  const borderColor = isActive
+    ? '#7f77dd'
+    : isSelected
+      ? '#3a3060'
+      : hovered
+        ? '#2a2a40'
+        : '#1e1e2a' // ← subtler default border
+  const bgColor = isSelected ? '#1e1b3a' : isActive ? '#1a1830' : hovered ? '#1e1e2c' : '#13131b' // ← darker default so hover is visible
+
   return (
     <div
+      onMouseEnter={() => setHovered(true)}
+      onMouseLeave={() => setHovered(false)}
       style={{
-        background: isSelected ? '#1e1b3a' : isActive ? '#1a1830' : '#1a1a26',
-        border: isActive
-          ? '0.5px solid #7f77dd'
-          : isSelected
-            ? '0.5px solid #3a3060'
-            : '0.5px solid #252535',
+        background: bgColor,
+        border: `0.5px solid ${borderColor}`,
         borderRadius: '8px',
-        overflow: 'hidden',
         display: 'flex',
         flexDirection: 'column',
+        overflow: 'hidden',
         position: 'relative',
-        transition: 'all 0.1s'
+        transition: 'all 0.1s',
+        opacity: isMissing ? 0.6 : 1
       }}
     >
       {/* Artwork */}
@@ -57,11 +70,10 @@ export function TrackCard({
         style={{
           width: '100%',
           aspectRatio: '1',
-          background: '#1e1e2a',
+          background: 'linear-gradient(135deg, #1a1a2e 0%, #16213e 100%)',
           display: 'flex',
           alignItems: 'center',
           justifyContent: 'center',
-          overflow: 'hidden',
           cursor: 'pointer',
           flexShrink: 0,
           position: 'relative'
@@ -69,19 +81,35 @@ export function TrackCard({
       >
         {/* Checkbox overlay - top left corner */}
         <div
-          onClick={(e) => e.stopPropagation()}
+          onClick={(e) => { e.stopPropagation(); onSelect?.(track.id) }}
           style={{
             position: 'absolute',
             top: '6px',
             left: '6px',
-            zIndex: 2
+            zIndex: 3
           }}
         >
           <Checkbox
             checked={isSelected}
             onCheckedChange={() => onSelect?.(track.id)}
+            onClick={(e) => e.stopPropagation()}
             className="border-[rgba(255,255,255,0.4)] bg-[rgba(0,0,0,0.45)] data-[state=checked]:bg-[#7f77dd] data-[state=checked]:border-[#7f77dd]"
           />
+        </div>
+
+        {/* ⋯ menu — top right */}
+        <div
+          onClick={(e) => e.stopPropagation()}
+          style={{
+            position: 'absolute',
+            top: '4px',
+            right: '4px',
+            zIndex: 50,
+            opacity: hovered ? 1 : 0,
+            transition: 'opacity 0.1s'
+          }}
+        >
+          <TrackRowMenu track={track} />
         </div>
 
         {artworkUrl ? (
@@ -94,6 +122,28 @@ export function TrackCard({
           />
         ) : (
           <span style={{ fontSize: '32px', color: '#2a2a3a' }}>♪</span>
+        )}
+
+        {/* Missing dot */}
+        {isMissing && (
+          <div
+            title="File not Found on disk"
+            style={{
+              position: 'absolute',
+              top: '6px',
+              left: '50%',
+              transform: 'translateX(-50%)',
+              background: '#e08a80',
+              color: '#fff',
+              fontSize: '9px',
+              fontWeight: 500,
+              padding: '2px 6px',
+              borderRadius: '4px',
+              zIndex: 3
+            }}
+          >
+            ⚠ Missing
+          </div>
         )}
 
         {/* Play/pause overlay — bottom-right corner of the artwork */}
@@ -117,15 +167,19 @@ export function TrackCard({
               cursor: 'pointer',
               display: 'flex',
               alignItems: 'center',
-              justifyContent: 'center'
+              justifyContent: 'center',
+              opacity: isCurrentTrack || hovered ? 1 : 0,
+              transition: 'opacity 0.15s'
+            }}
+            onMouseEnter={(e) => e.currentTarget.style.opacity = '1'}
+            onMouseLeave={(e) => {
+              if (!isCurrentTrack) e.currentTarget.style.opacity = '0'
             }}
           >
             {isCurrentTrack && isPlaying ? '⏸' : '▶'}
           </button>
         )}
       </div>
-
-      <MoveFileButton track={track} />
 
       {/* Info */}
       <div
@@ -200,7 +254,36 @@ export function TrackCard({
               {track.key_camelot}
             </Badge>
           )}
+          {track.energy && (
+            <Badge variant="outline" style={{
+              fontSize: '9px', height: '16px', padding: '0 5px',
+              background: '#261a1a', color: '#d4537e', borderColor: '#261a1a',
+            }}>
+              E{track.energy}
+            </Badge>
+          )}
         </div>
+
+        {/* Board pill */}
+        {board && (
+          <div style={{
+            display: 'flex',
+            alignItems: 'center',
+            gap: '4px',
+            marginBottom: commentTags.length > 0 ? '4px' : '0'
+          }}>
+            <span style={{
+              width: '6px',
+              height: '6px',
+              borderRadius: '50%',
+              background: board.color,
+              flexShrink: 0
+            }} />
+            <span style={{ fontSize: '9px', color: '#444' }}>
+              {board.name}
+            </span>
+          </div>
+        )}
 
         {/* Comment tags */}
         {commentTags.length > 0 && (

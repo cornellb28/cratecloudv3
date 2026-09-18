@@ -21,14 +21,17 @@ export function TrackRow({
   onSelected,
   crateId
 }: TrackRowProps): React.JSX.Element {
-  const { activeTrackId, setActiveTrack, trackTags } = useLibraryStore()
+  const { activeTrackId, setActiveTrack, trackTags, boards } = useLibraryStore()
   const { currentTrack, isPlaying, playTrack, togglePlayPause } = usePlayerStore()
+
   const isActive = activeTrackId === track.id
   const appliedTags = trackTags.get(track.id) ?? []
   const artworkUrl = useArtworkUrl(track.artwork_hash, 'thumb')
 
   const isCurrentTrack = currentTrack?.id === track.id
   const isMissing = !!track.missing
+
+  const board = boards.find((b) => b.id === track.board_id)
 
   function handlePlayToggle(e: React.MouseEvent): void {
     e.stopPropagation()
@@ -37,34 +40,42 @@ export function TrackRow({
     else playTrack(track)
   }
 
+  function handleRowClick(): void {
+    setActiveTrack(isActive ? null : track.id)
+    if (!isActive && !isMissing) playTrack(track)
+  }
+
+  //const borderColor = isActive ? '#7f77dd' : 'transparent'
+  const bgColor = isActive ? '#1a1830' : isSelected ? '#1e1b3a' : '#1a1a26'
+
   return (
     <div
       data-testid={`track-row-${track.id}`}
-      onClick={() => {
-        setActiveTrack(isActive ? null : track.id)
-        if (!isActive) usePlayerStore.getState().playTrack(track)
-      }}
+      onClick={handleRowClick}
       style={{
         position: 'relative',
-        padding: '8px 16px',
+        padding: '6px 10px 6px 6px',
         marginBottom: '2px',
-        background: isActive ? '#1a1830' : '#1a1a26',
+        background: bgColor,
         borderRadius: '6px',
         cursor: 'pointer',
-        border: isActive ? '0.5px solid #7f77dd' : '0.5px solid transparent',
-        transition: 'all 0.1s'
+        border: '0.5px solid ${borderColor}',
+        transition: 'all 0.1s',
+        display: 'flex',
+        opacity: isMissing ? 0.6 : 1,
+        gap: '10px',
+        alignItems: 'center'
       }}
     >
-      <div style={{ position: 'absolute', top: '8px', right: '12px' }}>
-        <TrackRowMenu track={track} crateId={crateId} />
+      {/* Checkbox */}
+      <div onClick={(e) => { e.stopPropagation(); onSelected?.(track.id) }} style={{ flexShrink: 0 }}>
+        <Checkbox
+          checked={isSelected}
+          onCheckedChange={() => onSelected?.(track.id)}
+          className="border-[#333] data-[state=checked]:bg-[#7f77dd] data-[state=checked]:border-[#7f77dd]"
+        />
       </div>
-      <Checkbox
-        checked={isSelected}
-        onCheckedChange={() => onSelected?.(track.id)}
-        onClick={(e) => e.stopPropagation()}
-        className="border-[#333] data-[state=checked]:bg-[#7f77dd] data-[state=checked]:border-[#7f77dd]"
-      />
-      {/* Artwork */}
+      {/* Artwork + play overlay */}
       <div
         style={{
           width: '40px',
@@ -120,63 +131,132 @@ export function TrackRow({
           </button>
         )}
       </div>
-      <div style={{ fontWeight: 500, fontSize: '13px' }}>
-        {track.title ?? track.filename ?? 'Untitled'}
-        <span style={{ color: '#555', fontWeight: 400 }}> — {track.artist ?? 'Unknown'}</span>
-      </div>
-      <div
-        style={{
-          color: '#555',
+      {/* Title + artist */}
+      <div style={{ flex: 1, minWidth: 0 }}>
+        <div style={{
+          fontSize: '13px',
+          fontWeight: 500,
+          color: '#e0e0f0',
+          whiteSpace: 'nowrap',
+          overflow: 'hidden',
+          textOverflow: 'ellipsis',
+          marginBottom: '2px',
+        }}>
+          {track.title ?? track.filename ?? 'Untitled'}
+          {isMissing && (
+            <span style={{
+              marginLeft: '6px',
+              fontSize: '9px',
+              background: '#e08a8022',
+              color: '#e08a80',
+              border: '0.5px solid #e08a8044',
+              borderRadius: '3px',
+              padding: '1px 5px',
+              fontWeight: 500,
+            }}>
+              ⚠ Missing
+            </span>
+          )}
+        </div>
+        <div style={{
           fontSize: '11px',
-          marginTop: '3px',
-          display: 'flex',
-          gap: '8px'
-        }}
-      >
+          color: '#555',
+          whiteSpace: 'nowrap',
+          overflow: 'hidden',
+          textOverflow: 'ellipsis',
+        }}>
+          {track.artist ?? 'Unknown'}
+        </div>
+      </div>
+      {/* Badges — BPM, key, energy, genre, tags */}
+      <div style={{
+        display: 'flex',
+        alignItems: 'center',
+        gap: '4px',
+        flexWrap: 'nowrap',
+        flexShrink: 0,
+      }}>
         {track.bpm && (
-          <Badge
-            variant="outline"
-            className="text-[10px] h-5 px-1.5 bg-[#1a2535] text-[#5d9fd8] border-[#1a2535] font-mono"
-          >
-            {track.bpm} BPM
+          <Badge variant="outline" className="text-[10px] h-5 px-1.5 bg-[#1a2535] text-[#5d9fd8] border-[#1a2535] font-mono">
+            {track.bpm}
           </Badge>
         )}
         {track.key_camelot && (
-          <Badge
-            variant="outline"
-            className="text-[10px] h-5 px-1.5 bg-[#1a2830] text-[#3db88a] border-[#1a2830] font-mono"
-          >
+          <Badge variant="outline" className="text-[10px] h-5 px-1.5 bg-[#1a2830] text-[#3db88a] border-[#1a2830] font-mono">
             {track.key_camelot}
           </Badge>
         )}
-        {track.duration_str && <span>{track.duration_str}</span>}
-        {track.genre && (
-          <Badge
-            variant="outline"
-            className="text-[10px] h-5 px-1.5 bg-[#261f3a] text-[#9b8ed4] border-[#261f3a] font-mono"
-          >
-            {track.genre}
+        {track.energy && (
+          <Badge variant="outline" style={{
+            fontSize: '10px', height: '20px', padding: '0 6px',
+            background: '#261a1a', color: '#d4537e', borderColor: '#261a1a',
+          }}>
+            E{track.energy}
           </Badge>
         )}
-        {/* Applied tag badges */}
-        {appliedTags.map((tag) => (
-          <Badge
-            key={tag.id}
-            variant="outline"
-            style={{
-              fontSize: '10px',
-              background: tag.color + '22',
-              color: tag.color,
-              borderColor: tag.color + '44',
-              fontWeight: 500,
-              height: '18px',
-              padding: '0 6px'
-            }}
-          >
+        {appliedTags.slice(0, 3).map(tag => (
+          <Badge key={tag.id} variant="outline" style={{
+            fontSize: '10px',
+            height: '20px',
+            padding: '0 6px',
+            background: tag.color + '22',
+            color: tag.color,
+            borderColor: tag.color + '44',
+            fontWeight: 500,
+          }}>
             {tag.value}
           </Badge>
         ))}
       </div>
+
+      {/* Board pill */}
+      {board && (
+        <div style={{
+          display: 'flex',
+          alignItems: 'center',
+          gap: '4px',
+          flexShrink: 0,
+          background: board.color + '22',
+          border: `0.5px solid ${board.color}44`,
+          borderRadius: '4px',
+          padding: '2px 7px',
+        }}>
+          <span style={{
+            width: '5px',
+            height: '5px',
+            borderRadius: '50%',
+            background: board.color,
+            flexShrink: 0,
+          }} />
+          <span style={{ fontSize: '10px', color: board.color, fontWeight: 500 }}>
+            {board.name}
+          </span>
+        </div>
+      )}
+
+      {/* Duration + format */}
+      <div style={{
+        flexShrink: 0,
+        textAlign: 'right',
+        minWidth: '60px',
+      }}>
+        {track.duration_str && (
+          <div style={{ fontSize: '11px', color: '#555', fontVariantNumeric: 'tabular-nums' }}>
+            {track.duration_str}
+          </div>
+        )}
+        {track.format && (
+          <div style={{ fontSize: '9px', color: '#333', textTransform: 'uppercase', marginTop: '1px' }}>
+            {track.format}
+          </div>
+        )}
+      </div>
+
+      {/* ⋯ Menu */}
+      <div onClick={e => e.stopPropagation()} style={{ flexShrink: 0 }}>
+        <TrackRowMenu track={track} crateId={crateId} />
+      </div>
+
     </div>
   )
 }
