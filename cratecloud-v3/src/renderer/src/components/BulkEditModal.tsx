@@ -1,4 +1,5 @@
 import React, { useState, useEffect } from 'react'
+import { toast } from 'sonner'
 import {
   Dialog,
   DialogContent,
@@ -8,6 +9,7 @@ import { Badge } from '@renderer/components/ui/badge'
 import { TagInput } from './TagInput'
 import { useLibraryStore } from '../store/useLibraryStore'
 import { useArtworkUrl } from '../hooks/useArtworkUrl'
+import { fieldToMetaKey, withTrackIdentity } from '../lib/tagMeta'
 
 // ─── Types ───────────────────────────────────────────────
 
@@ -113,86 +115,89 @@ export function BulkEditModal({ trackIds, open, onClose }: BulkEditModalProps): 
     return () => window.removeEventListener('keydown', handleKey)
   }, [open, currentIndex, trackIds.length])
 
+  // A bulk edit has to reach the file, not just the database. Everything
+  // written below is accumulated here first and sent as one batch job at
+  // the end: one sidecar process for the whole selection instead of one per
+  // track, with progress surfacing through the background jobs panel.
+  type FileWrite = { filepath: string; meta: EditTagsMeta }
+
+  function collectFileWrite(
+    writes: Map<number, FileWrite>,
+    track: Track,
+    meta: EditTagsMeta
+  ): void {
+    const existing = writes.get(track.id)
+    writes.set(track.id, {
+      filepath: track.filepath,
+      meta: withTrackIdentity(track, { ...(existing?.meta ?? {}), ...meta })
+    })
+  }
+
+  // textValues holds raw input strings; bpm has to become a number before
+  // it goes anywhere near a REAL column or edit_tags.py.
+  function columnValue(field: string, raw: string): string | number | null {
+    if (field === 'bpm') return parseFloat(raw) || null
+    return raw || null
+  }
+
   // Save text fields for current track + bulk apply checked fields
   async function handleSave(): Promise<void> {
     if (!currentTrack) return
     setSaving(true)
 
-    // Build the changes for this track
-    const changes: Partial<Track> = {}
-    for (const { field } of TEXT_FIELDS) {
-      if (textValues[field] !== undefined) {
-        changes[field as keyof Track] = textValues[field] as any
+    const fileWrites = new Map<number, FileWrite>()
+    const pendingDbWrites: (Partial<Track> & { id: number })[] = []
+
+    function applyToTrack(track: Track, fields: string[]): void {
+      const columns: Record<string, unknown> = {}
+      const meta: EditTagsMeta = {}
+      for (const field of fields) {
+        const value = columnValue(field, textValues[field])
+        columns[field] = value
+        meta[fieldToMetaKey(field)] = (value ?? '') as never
       }
+      updateTrack(track.id, columns as Partial<Track>)
+      collectFileWrite(fileWrites, track, meta)
+      pendingDbWrites.push({ id: track.id, ...columns } as Partial<Track> & { id: number })
     }
 
-    // Update this track
-    if (Object.keys(changes).length > 0) {
-      updateTrack(currentTrack.id, changes)
-      await window.api.db.updateTrackMeta({
-        id: currentTrack.id,
-        title: currentTrack.title,
-        artist: currentTrack.artist,
-        genre: currentTrack.genre,
-        bpm: currentTrack.bpm,
-        key_camelot: currentTrack.key_camelot,
-        energy: currentTrack.energy,
-        comment: currentTrack.comment,
-        artwork_path: currentTrack.artwork_path,
-        needs_sync: currentTrack.needs_sync,
-        pending_changes: currentTrack.pending_changes,
-        ...changes,
-      })
-    }
+    // This track: every text field that was actually typed into.
+    const editedFields = TEXT_FIELDS.map(({ field }) => field).filter(
+      (field) => textValues[field] !== undefined
+    )
+    if (editedFields.length > 0) applyToTrack(currentTrack, editedFields)
 
-    // Bulk apply checked text fields to all other selected tracks
-    if (checkedFields.size > 0) {
-      const bulkChanges: Partial<Track> = {}
-      for (const { field } of TEXT_FIELDS) {
-        if (checkedFields.has(field) && textValues[field] !== undefined) {
-          bulkChanges[field as keyof Track] = textValues[field] as any
-        }
-      }
-
-      if (Object.keys(bulkChanges).length > 0) {
-        for (const trackId of trackIds) {
-          if (trackId === currentTrack.id) continue
-          const t = tracks.find(t => t.id === trackId)
-          if (!t) continue
-
-          updateTrack(trackId, bulkChanges)
-          await window.api.db.updateTrackMeta({
-            id: trackId,
-            title: t.title,
-            artist: t.artist,
-            genre: t.genre,
-            bpm: t.bpm,
-            key_camelot: t.key_camelot,
-            energy: t.energy,
-            comment: t.comment,
-            artwork_path: t.artwork_path,
-            needs_sync: t.needs_sync,
-            pending_changes: t.pending_changes,
-            ...bulkChanges,
-          })
-        }
+    // Every other selected track: only the text fields whose checkbox is on.
+    const bulkFields = editedFields.filter((field) => checkedFields.has(field))
+    if (bulkFields.length > 0) {
+      for (const trackId of trackIds) {
+        if (trackId === currentTrack.id) continue
+        const track = tracks.find((t) => t.id === trackId)
+        if (track) applyToTrack(track, bulkFields)
       }
     }
 
     // Bulk apply checked tag fields (genre/comment/grouping/remixer/label):
     // copy the current track's tags for that field onto every other
-    // selected track. TagInput saves tags per-track immediately on its
-    // own, so this only needs to replicate them, not save the current one.
+    // selected track. TagInput already saved the current track's own tags —
+    // to its row and to its file — when the badge was added, so this only
+    // has to replicate them onto the rest.
     const checkedTagFields = TAG_FIELDS.filter(({ field }) => checkedFields.has(field))
     if (checkedTagFields.length > 0) {
       const currentTags = await window.api.tags.forTrack(currentTrack.id)
 
       for (const { field } of checkedTagFields) {
-        const tagsForField = currentTags.filter(t => t.field === field)
+        const tagsForField = currentTags.filter((t) => t.field === field)
         if (tagsForField.length === 0) continue
+
+        // Same separator TagInput uses, so a field written here and a field
+        // written there read back identically.
+        const joined = tagsForField.map((t) => t.value).join(' / ')
 
         for (const trackId of trackIds) {
           if (trackId === currentTrack.id) continue
+          const track = tracks.find((t) => t.id === trackId)
+          if (!track) continue
 
           for (const tag of tagsForField) {
             await window.api.tags.apply(trackId, tag.id)
@@ -200,7 +205,28 @@ export function BulkEditModal({ trackIds, open, onClose }: BulkEditModalProps): 
 
           const existingTags = await window.api.tags.forTrack(trackId)
           useLibraryStore.getState().setTrackTags(trackId, existingTags)
+
+          updateTrack(trackId, { [field]: joined } as Partial<Track>)
+          pendingDbWrites.push({ id: trackId, [field]: joined })
+          collectFileWrite(fileWrites, track, { [fieldToMetaKey(field)]: joined })
         }
+      }
+    }
+
+    for (const write of pendingDbWrites) {
+      const result = await window.api.db.updateTrackMeta(write)
+      if (!result.ok) {
+        toast.error('Could not save changes', { description: result.error ?? 'Unknown error' })
+        break
+      }
+    }
+
+    if (fileWrites.size > 0) {
+      try {
+        await window.api.editTagsBatch(Array.from(fileWrites.values()))
+      } catch (err) {
+        console.error('[BulkEditModal] editTagsBatch failed:', err)
+        toast.error('Could not save to files', { description: (err as Error).message })
       }
     }
 
@@ -228,12 +254,13 @@ export function BulkEditModal({ trackIds, open, onClose }: BulkEditModalProps): 
 
         {/* ── Header ────────────────────────────────── */}
         <div style={{
-          display: 'flex',
+          display: 'inline-flex',
           alignItems: 'center',
           justifyContent: 'space-between',
           padding: '14px 16px',
           borderBottom: '0.5px solid #1e1e2a',
           flexShrink: 0,
+          width: "29vw"
         }}>
           {/* Prev */}
           <button
@@ -245,7 +272,7 @@ export function BulkEditModal({ trackIds, open, onClose }: BulkEditModalProps): 
               color: currentIndex === 0 ? '#333' : '#7f77dd',
               cursor: currentIndex === 0 ? 'default' : 'pointer',
               fontSize: '18px',
-              padding: '0 8px',
+              padding: '0 8px'
             }}
           >
             ←
@@ -281,14 +308,14 @@ export function BulkEditModal({ trackIds, open, onClose }: BulkEditModalProps): 
         <div style={{
           display: 'flex',
           gap: '12px',
-          padding: '14px 16px',
+          padding: '10px 16px',
           borderBottom: '0.5px solid #1e1e2a',
           flexShrink: 0,
         }}>
           {/* Artwork */}
           <div style={{
-            width: '56px',
-            height: '56px',
+            width: '100px',
+            height: '100px',
             borderRadius: '6px',
             overflow: 'hidden',
             background: '#1e1e2a',

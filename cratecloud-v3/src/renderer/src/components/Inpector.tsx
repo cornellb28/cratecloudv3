@@ -8,6 +8,8 @@ import { MoveFileButton } from './MoveFileButton'
 import { Input } from '@renderer/components/ui/input'
 import { getYearOptions } from '../utils/years'
 import { useArtworkUrl } from '../hooks/useArtworkUrl'
+import dclogo from '@renderer/assets/crateIcon.png'
+import { fullTrackMeta } from '../lib/tagMeta'
 
 const CAMELOT_KEYS = [
   '1A', '2A', '3A', '4A', '5A', '6A', '7A', '8A', '9A', '10A', '11A', '12A',
@@ -44,17 +46,17 @@ export function Inspector(): React.JSX.Element {
         updateTrack(track.id, { bpm, key_camelot, key_full, duration_sec, duration_str })
         await window.api.db.updateTrackMeta({
           id: track.id,
-          title: track.title,
-          artist: track.artist,
-          genre: track.genre,
           bpm,
           key_camelot,
-          energy: track.energy,
-          comment: track.comment,
-          needs_sync: track.needs_sync,
-          pending_changes: track.pending_changes,
+          key_full,
         })
         await window.api.db.markAnalyzed(track.id)
+
+        // The detected tempo and key have to reach the file as well, or they
+        // only ever exist inside CrateCloud — Serato reads BPM off the file's
+        // own tags, and off the Serato Autotags block a bpm write also lands.
+        const updated = currentTrack()
+        if (updated) writeMetaToFile(updated.filepath, fullTrackMeta(updated))
       }
     } catch (err) {
       console.error('Auto-analyze failed:', err)
@@ -128,54 +130,61 @@ export function Inspector(): React.JSX.Element {
     return () => window.removeEventListener('keydown', handleKey)
   }, [isOpen, prevTrack, nextTrack, setActiveTrack])
 
+  // The render-time `track` is a snapshot: a save that runs after another
+  // field has already been edited would otherwise write that field's old
+  // value back to the file. Reading the row out of the store at write time
+  // picks up everything updateTrack has applied since.
+  function currentTrack(): Track | null {
+    if (!track) return null
+    return useLibraryStore.getState().tracks.find((t) => t.id === track.id) ?? track
+  }
+
+  // Fire and forget: the database write has already landed and the UI has
+  // already moved on, so a file write only ever needs to report a failure.
+  function writeMetaToFile(filepath: string, meta: EditTagsMeta): void {
+    window.api
+      .writeTags(filepath, meta)
+      .then((result) => {
+        if (!result.ok) {
+          toast.error('Could not save to file', { description: result.error ?? 'Unknown error' })
+          return
+        }
+        const fileResult = result.results?.[0] as { success?: boolean; error?: string } | undefined
+        if (fileResult && fileResult.success === false) {
+          toast.error('Could not save to file', {
+            description: fileResult.error ?? 'Unknown error',
+          })
+        }
+      })
+      .catch((err) => {
+        console.error('[Inspector] writeTags failed:', err)
+        toast.error('Could not save to file', { description: (err as Error).message })
+      })
+  }
+
   async function saveField(field: string, value: string): Promise<void> {
     if (!track) return
 
     const newValue = field === 'bpm' ? parseFloat(value) || null : value || null
     updateTrack(track.id, { [field]: newValue })
 
-    await window.api.db.updateTrackMeta({
-      id: track.id,
-      title: track.title,
-      artist: track.artist,
-      genre: track.genre,
-      bpm: track.bpm,
-      key_camelot: track.key_camelot,
-      energy: track.energy,
-      comment: track.comment,
-      needs_sync: track.needs_sync,
-      pending_changes: track.pending_changes,
-      [field]: newValue,
-    })
-
-    const meta = {
-      title: field === 'title' ? value : track.title,
-      artist: field === 'artist' ? value : track.artist,
-      album: field === 'album' ? value : track.album,
-      genre: field === 'genre' ? value : track.genre,
-      bpm: field === 'bpm' ? parseFloat(value) || undefined : track.bpm,
-      key: field === 'key_camelot' ? value : track.key_camelot,
-      year: field === 'year' ? value : track.year,
-      remixer: field === 'remixer' ? value : track.remixer,
-      grouping: field === 'grouping' ? value : track.grouping,
-      composer: field === 'composer' ? value : track.composer,
-      comment: field === 'comment' ? value : track.comment,
-      label: field === 'label' ? value : track.label,
+    // Only the field that changed — updateTrackMeta merges onto the row, so
+    // restating the rest would just risk writing a stale snapshot back.
+    const result = await window.api.db.updateTrackMeta({ id: track.id, [field]: newValue })
+    if (!result.ok) {
+      toast.error('Could not save', { description: result.error ?? 'Unknown error' })
+      return
     }
 
-    window.api.writeTags(track.filepath, meta).then((result) => {
-      if (!result.ok) {
-        toast.error('Could not save to file', { description: result.error ?? 'Unknown error' })
-        return
-      }
-      const fileResult = result.results?.[0] as { success?: boolean; error?: string } | undefined
-      if (fileResult && fileResult.success === false) {
-        toast.error('Could not save to file', { description: fileResult.error ?? 'Unknown error' })
-      }
-    }).catch((err) => {
-      console.error('[Inspector] writeTags failed:', err)
-      toast.error('Could not save to file', { description: (err as Error).message })
-    })
+    // energy is CrateCloud-only — no tag carries it, so there is nothing to
+    // write to the file for it.
+    if (field === 'energy') return
+
+    // Every field goes to the file, not just the one that changed: a track
+    // whose tags CrateCloud has never written catches up in one save rather
+    // than only ever gaining the field that happened to be typed into.
+    const updated = currentTrack()
+    if (updated) writeMetaToFile(updated.filepath, fullTrackMeta(updated))
   }
 
   function onKeyDown(e: React.KeyboardEvent<HTMLInputElement>, field: string): void {
@@ -276,7 +285,7 @@ export function Inspector(): React.JSX.Element {
                   fontSize: '16px',
                   padding: '2px 4px',
                   lineHeight: 1,
-                  borderRadius: '4px',
+                  borderRadius: '4px'
                 }}
               >
                 ✕
@@ -305,7 +314,11 @@ export function Inspector(): React.JSX.Element {
                   style={{ width: '100%', height: '100%', objectFit: 'cover' }}
                 />
               ) : (
-                <span style={{ fontSize: '48px', color: '#333' }}>♪</span>
+                <img
+                  src={dclogo}
+                  alt="DeepCrate"
+                  style={{ width: '100%', height: '100%', objectFit: 'contain' }}
+                />
               )}
 
               {/* Analyzing overlay */}

@@ -1,4 +1,4 @@
-import Database, { RunResult } from 'better-sqlite3'
+import Database, { RunResult, Statement } from 'better-sqlite3'
 import { app } from 'electron'
 import { join, basename, dirname, relative, isAbsolute } from 'path'
 import { mkdirSync } from 'fs'
@@ -611,22 +611,6 @@ const stmts = {
   getTrackByFilepath: db.prepare(`
       SELECT * FROM tracks WHERE filepath = ?
     `),
-  updateTrackMeta: db.prepare(`
-    UPDATE tracks SET
-      title           = @title,
-      artist          = @artist,
-      genre           = @genre,
-      year            = @year,
-      bpm             = @bpm,
-      key_camelot     = @key_camelot,
-      energy          = @energy,
-      comment         = @comment,
-      updated_at      = datetime('now'),
-      needs_sync      = @needs_sync,
-      pending_changes = @pending_changes,
-      artwork_path    = @artwork_path
-    WHERE id = @id
-  `),
   getUnanalyzedTracks: db.prepare(`
   SELECT id, filepath FROM tracks
   WHERE analyzed_at IS NULL
@@ -1037,12 +1021,71 @@ export function getTrackByFilepath(filepath: string): Track | undefined {
   return stmts.getTrackByFilepath.get(filepath) as Track | undefined
 }
 
+// Every column a metadata edit is allowed to change. The statement is built
+// from whichever of these the caller actually supplied, rather than being a
+// fixed list of `column = @column` clauses: better-sqlite3 silently ignores
+// a named parameter its statement doesn't bind, so a fixed list means any
+// column missing from it is dropped without an error and without the caller
+// ever finding out. Adding an editable column to the schema now only
+// requires adding it here.
+const UPDATABLE_TRACK_FIELDS = [
+  'title',
+  'artist',
+  'album',
+  'genre',
+  'year',
+  'comment',
+  'label',
+  'remixer',
+  'grouping',
+  'composer',
+  'bpm',
+  'key_camelot',
+  'key_full',
+  'key_val',
+  'camelot',
+  'openkey',
+  'energy',
+  'needs_sync',
+  'pending_changes',
+  'artwork_path',
+  'artwork_hash'
+] as const
+
+// One prepared statement per distinct set of columns — a handful in
+// practice, since the callers are a fixed set of UI save paths.
+const updateTrackMetaStatements = new Map<string, Statement>()
+
+function updateTrackMetaStatement(fields: readonly string[]): Statement {
+  const key = fields.join(',')
+  let statement = updateTrackMetaStatements.get(key)
+  if (!statement) {
+    const setClause = fields.map((field) => `${field} = @${field}`).join(', ')
+    statement = db.prepare(
+      `UPDATE tracks SET ${setClause}, updated_at = datetime('now') WHERE id = @id`
+    )
+    updateTrackMetaStatements.set(key, statement)
+  }
+  return statement
+}
+
+// Only the fields the caller supplied are written; anything omitted keeps
+// its current value, so a caller that touches one field (re-analysis
+// setting bpm/key, a tag badge setting comment) doesn't need to know or
+// restate the rest of the row. `undefined` means "not supplied"; an
+// explicit `null` clears the column.
 export function updateTrackMeta(data: Record<string, unknown>): RunResult {
-  // Merge onto the existing row so callers that only touch a subset of
-  // fields (e.g. re-analysis only updating bpm/key) don't need to know
-  // every column the statement binds, and don't clear ones they omit.
-  const existing = stmts.getTrackById.get(data.id as number) as Record<string, unknown> | undefined
-  return stmts.updateTrackMeta.run({ ...existing, ...data })
+  if (data.id === undefined || data.id === null) {
+    throw new Error('updateTrackMeta requires an id')
+  }
+
+  const fields = UPDATABLE_TRACK_FIELDS.filter((field) => data[field] !== undefined)
+  if (fields.length === 0) return { changes: 0, lastInsertRowid: 0 }
+
+  const params: Record<string, unknown> = { id: data.id }
+  for (const field of fields) params[field] = data[field]
+
+  return updateTrackMetaStatement(fields).run(params)
 }
 
 export function markTrackMissing(filepath: string): RunResult {

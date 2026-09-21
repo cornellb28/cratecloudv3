@@ -78,10 +78,10 @@ import {
 import {
   analyzeFile,
   readTagsFast,
-  editTagsBatch,
   type EditTagsBatchItem,
   type EditTagsResult
 } from './sidecar'
+import { editTagsResolvingIdConflicts, queueTagWrites, writeTagsForFile } from './tagWrites'
 import {
   exportCrateToSerato,
   isSeratoRunning,
@@ -321,29 +321,6 @@ interface SeratoImportJob {
   stage: SeratoImportStage
   tally: SeratoImportTally
   error?: string
-}
-
-// ── Per-file write-tags serialization ─────────────────────────────────────
-// Each sidecar:write-tags call spawns its own edit_tags.py process (copy ->
-// edit copy -> atomic replace). Two calls for the same filepath racing in
-// parallel can otherwise interleave and silently drop one write — see the
-// comment on the sidecar:write-tags handler. Chaining onto the prior
-// promise for that filepath forces same-file writes to run one at a time;
-// unrelated files are unaffected and still write concurrently.
-const writeTagsQueues = new Map<string, Promise<unknown>>()
-
-function queueTagWrite<T>(filepath: string, task: () => Promise<T>): Promise<T> {
-  const prior = writeTagsQueues.get(filepath) ?? Promise.resolve()
-  const run = prior.then(task, task)
-  const tracked = run.then(
-    () => undefined,
-    () => undefined
-  )
-  writeTagsQueues.set(filepath, tracked)
-  tracked.finally(() => {
-    if (writeTagsQueues.get(filepath) === tracked) writeTagsQueues.delete(filepath)
-  })
-  return run
 }
 
 // ── Batch tag-edit job state (in-memory only) ─────────────────────────────
@@ -1039,20 +1016,24 @@ async function runEditTagsJob(
   writeSerato: boolean
 ): Promise<void> {
   try {
-    await editTagsBatch(
-      items,
-      (result: EditTagsResult) => {
-        job.doneCount++
-        job.currentFile = result.filepath ?? job.currentFile
-        if (!result.success) {
-          job.failed.push({
-            filepath: result.filepath ?? '(unknown)',
-            error: result.error ?? 'Unknown error'
-          })
-        }
-        event.sender.send('edit-tags:progress', buildEditTagsProgressPayload(job))
-      },
-      { writeSerato }
+    await queueTagWrites(
+      items.map((item) => item.filepath),
+      () =>
+        editTagsResolvingIdConflicts(
+          items,
+          (result: EditTagsResult) => {
+            job.doneCount++
+            job.currentFile = result.filepath ?? job.currentFile
+            if (!result.success) {
+              job.failed.push({
+                filepath: result.filepath ?? '(unknown)',
+                error: result.error ?? 'Unknown error'
+              })
+            }
+            event.sender.send('edit-tags:progress', buildEditTagsProgressPayload(job))
+          },
+          { writeSerato }
+        )
     )
     job.status = 'done'
   } catch (err) {
@@ -2244,13 +2225,7 @@ app.whenReady().then(() => {
     'sidecar:write-tags',
     async (_e, filepath: string, meta: Record<string, unknown>) => {
       try {
-        const results = await queueTagWrite(filepath, async () => {
-          const items: unknown[] = []
-          await editTagsBatch([{ filepath, meta }], (result) => items.push(result), {
-            writeSerato: true
-          })
-          return items
-        })
+        const results = await writeTagsForFile(filepath, meta)
         return { ok: true, results }
       } catch (err) {
         return { ok: false, error: (err as Error).message }

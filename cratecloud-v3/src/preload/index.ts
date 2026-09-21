@@ -115,7 +115,7 @@ const api = {
   importFile: (filepath: string) => ipcRenderer.invoke('library:import-file', filepath),
   importFiles: (filepaths: string[]) => ipcRenderer.invoke('library:import-files', filepaths),
   analyzeFile: (filepath: string) => ipcRenderer.invoke('sidecar:analyze', filepath),
-  writeTags: (filepath: string, meta: Record<string, unknown>) =>
+  writeTags: (filepath: string, meta: EditTagsMeta) =>
     ipcRenderer.invoke('sidecar:write-tags', filepath, meta),
   // Job-based, like fs.moveFiles/crates.export — resolves immediately with
   // a jobId; progress comes over onEditTagsProgress. See runEditTagsJob in

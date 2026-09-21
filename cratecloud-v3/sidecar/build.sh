@@ -4,8 +4,9 @@
 # cross-compile. Run this before `npm run build:<platform>` on every
 # platform; electron-builder's extraResources picks up sidecar/dist/*.
 #
-# Requires sidecar/.venv to already exist with requirements.txt installed
-# (including pyinstaller, per requirements.txt) — this script does not
+# Requires sidecar/.venv to already exist with requirements.txt installed,
+# plus pyinstaller itself, which requirements.txt deliberately does not pin
+# (it is a build tool, not a runtime dependency) — this script does not
 # create the venv itself.
 set -euo pipefail
 cd "$(dirname "$0")"
@@ -33,8 +34,12 @@ rm -rf dist build
   --distpath dist --workpath build --specpath . \
   analyze.py
 
+# serato_tools must be collected explicitly: edit_tags.py imports it inside
+# a try/except that degrades to HAS_SERATO = False, so a build that misses it
+# still runs and still reports success — it just silently stops writing the
+# Serato Autotags block, which is the whole reason Serato ever sees a BPM.
 "$PYINSTALLER" --onefile --name edit_tags \
-  --collect-all mutagen \
+  --collect-all mutagen --collect-all serato_tools \
   --distpath dist --workpath build --specpath . \
   edit_tags.py
 

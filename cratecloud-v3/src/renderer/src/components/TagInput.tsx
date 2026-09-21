@@ -2,6 +2,7 @@ import React, { useState, useRef, useEffect } from 'react'
 import { toast } from 'sonner'
 import { useLibraryStore } from '../store/useLibraryStore'
 import { Badge } from './ui/badge'
+import { fieldToMetaKey, withTrackIdentity } from '../lib/tagMeta'
 
 interface TagInputProps {
   trackId: number
@@ -65,7 +66,11 @@ export function TagInput({ trackId, field, label, color = '#7f77dd' }: TagInputP
     return () => document.removeEventListener('mousedown', handleClick)
   }, [])
 
-  // Write all current tags for this field back to the file on disk
+  // Write all current tags for this field back to the track row AND to the
+  // file on disk. Both are needed: the tags/track_tags tables drive the
+  // badges, the tracks column drives the library list and everything that
+  // reads a track's metadata, and the file's own tags are the only thing
+  // Serato or Finder will ever see.
   async function writeFieldToDisk(currentTags: Tag[]): Promise<void> {
     const store = useLibraryStore.getState()
     const track = store.tracks.find((t) => t.id === trackId)
@@ -75,19 +80,18 @@ export function TagInput({ trackId, field, label, color = '#7f77dd' }: TagInputP
     // e.g. comment field: "FTW / CLASSIC / HEADZ"
     const value = currentTags.length > 0 ? currentTags.map((t) => t.value).join(' / ') : null
 
-    console.log('[TagInput] writeFieldToDisk:', {
-      filepath: track.filepath,
-      field,
-      metaKey: fieldToMetaKey(field),
-      value,
-      tagCount: currentTags.length
-    })
+    // The badge fields all map onto a real tracks column of the same name,
+    // so the row can be kept in step with the file without a lookup table.
+    store.updateTrack(trackId, { [field]: value } as Partial<Track>)
+    const dbResult = await window.api.db.updateTrackMeta({ id: trackId, [field]: value })
+    if (!dbResult.ok) {
+      toast.error('Could not save tag', { description: dbResult.error ?? 'Unknown error' })
+    }
 
-    // Fire and forget — don't block the UI
-    const result = await window.api.writeTags(track.filepath, {
-      [fieldToMetaKey(field)]: value ?? ''
-    })
-    console.log('[TagInput] writeTags result:', result)
+    const result = await window.api.writeTags(
+      track.filepath,
+      withTrackIdentity(track, { [fieldToMetaKey(field)]: value ?? '' })
+    )
 
     if (!result.ok) {
       toast.error('Could not save tag to file', { description: result.error ?? 'Unknown error' })
@@ -97,21 +101,6 @@ export function TagInput({ trackId, field, label, color = '#7f77dd' }: TagInputP
     if (fileResult && fileResult.success === false) {
       toast.error('Could not save tag to file', { description: fileResult.error ?? 'Unknown error' })
     }
-  }
-
-  // Map tag field names to edit_tags.py meta keys
-  function fieldToMetaKey(f: string): string {
-    const map: Record<string, string> = {
-      comment: 'comment',
-      grouping: 'grouping',
-      remixer: 'remixer',
-      genre: 'genre',
-      label: 'label',
-      composer: 'composer',
-      artist: 'artist',
-      album: 'album',
-    }
-    return map[f] ?? f
   }
 
   // Apply an existing tag to the track
@@ -209,7 +198,7 @@ export function TagInput({ trackId, field, label, color = '#7f77dd' }: TagInputP
         letterSpacing: '0.8px',
         textTransform: 'uppercase',
         color: '#444',
-        marginBottom: '6px',
+        marginBottom: '6px'
       }}>
         {label}
       </div>
@@ -222,7 +211,7 @@ export function TagInput({ trackId, field, label, color = '#7f77dd' }: TagInputP
           gap: '4px',
           marginBottom: '6px',
         }}>
-          {appliedTags.map(tag => (
+          {appliedTags.map((tag) => (
             <Badge
               key={tag.id}
               variant="outline"
@@ -235,7 +224,7 @@ export function TagInput({ trackId, field, label, color = '#7f77dd' }: TagInputP
                 display: 'inline-flex',
                 alignItems: 'center',
                 gap: '4px',
-                paddingRight: '4px',
+                paddingRight: '4px'
               }}
             >
               {tag.value}
@@ -250,10 +239,10 @@ export function TagInput({ trackId, field, label, color = '#7f77dd' }: TagInputP
                   fontSize: '12px',
                   lineHeight: 1,
                   opacity: 0.7,
-                  fontFamily: 'inherit',
+                  fontFamily: 'inherit'
                 }}
-                onMouseEnter={e => e.currentTarget.style.opacity = '1'}
-                onMouseLeave={e => e.currentTarget.style.opacity = '0.7'}
+                onMouseEnter={(e) => e.currentTarget.style.opacity = '1'}
+                onMouseLeave={(e) => e.currentTarget.style.opacity = '0.7'}
               >
                 ×
               </button>
@@ -288,8 +277,8 @@ export function TagInput({ trackId, field, label, color = '#7f77dd' }: TagInputP
             fontFamily: 'monospace',
             outline: 'none',
           }}
-          onFocusCapture={e => e.target.style.borderColor = color}
-          onBlurCapture={e => e.target.style.borderColor = '#252535'}
+          onFocusCapture={(e) => e.target.style.borderColor = color}
+          onBlurCapture={(e) => e.target.style.borderColor = '#252535'}
         />
 
         {/* Dropdown */}
@@ -308,7 +297,7 @@ export function TagInput({ trackId, field, label, color = '#7f77dd' }: TagInputP
             overflowY: 'auto',
           }}>
             {/* Existing tag suggestions */}
-            {suggestions.map(tag => (
+            {suggestions.map((tag) => (
               <div
                 key={tag.id}
                 onClick={() => applyTag(tag)}
@@ -321,8 +310,8 @@ export function TagInput({ trackId, field, label, color = '#7f77dd' }: TagInputP
                   alignItems: 'center',
                   gap: '8px',
                 }}
-                onMouseEnter={e => e.currentTarget.style.background = '#252535'}
-                onMouseLeave={e => e.currentTarget.style.background = 'transparent'}
+                onMouseEnter={(e) => e.currentTarget.style.background = '#252535'}
+                onMouseLeave={(e) => e.currentTarget.style.background = 'transparent'}
               >
                 <span style={{
                   width: '8px',

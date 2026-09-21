@@ -5,3 +5,6 @@ out
 .eslintcache
 *.log*
 sidecar/.venv/
+tests/.probe
+test-results
+playwright-report

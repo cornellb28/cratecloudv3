@@ -18,7 +18,7 @@ declare global {
       }>
       writeTags: (
         filepath: string,
-        meta: Record<string, unknown>
+        meta: EditTagsMeta
       ) => Promise<{ ok: boolean; results?: unknown[]; error?: string }>
       // Job-based, like fs.moveFiles/crates.export — resolves immediately
       // with a jobId; progress comes over onEditTagsProgress. No DB update
