@@ -50,6 +50,7 @@ import {
   updateBoardId,
   getSetting,
   setSetting,
+  deleteSetting,
   getTracksByBoardId,
   findOrCreateTag,
   getUnanalyzedTracks,
@@ -78,6 +79,7 @@ import {
 import {
   analyzeFile,
   readTagsFast,
+  type AnalysisStage,
   type EditTagsBatchItem,
   type EditTagsResult
 } from './sidecar'
@@ -2051,9 +2053,23 @@ app.whenReady().then(() => {
     }
   })
 
-  ipcMain.handle('sidecar:analyze', async (_e, filepath: string) => {
+  // trackId is optional and only used to address the progress events: with
+  // one, the renderer can show the analysis running on that track's card (see
+  // TrackCard's progress bar); without one, this behaves exactly as before and
+  // emits nothing. The final 'done' stage comes from analyze.py itself, and
+  // the renderer clears the bar when the invoke resolves, so a failed or
+  // crashed analysis cannot leave a bar stuck on a card.
+  ipcMain.handle('sidecar:analyze', async (event, filepath: string, trackId?: number) => {
+    const onProgress =
+      trackId === undefined
+        ? undefined
+        : (stage: AnalysisStage): void => {
+            if (event.sender.isDestroyed()) return
+            event.sender.send('analysis:file-progress', { trackId, filepath, ...stage })
+          }
+
     try {
-      const result = await analyzeFile(filepath)
+      const result = await analyzeFile(filepath, onProgress)
       return { ok: true, data: result }
     } catch (err) {
       console.error('sidecar:analyze failed:', err)
@@ -2593,6 +2609,17 @@ app.whenReady().then(() => {
   ipcMain.handle('settings:set', (_e, key: string, value: string) => {
     try {
       setSetting(key, value)
+      return { ok: true }
+    } catch (err) {
+      return { ok: false, error: (err as Error).message }
+    }
+  })
+
+  // Deleting a key that was never there is a no-op, not an error — a caller
+  // tidying up after itself should not have to check first.
+  ipcMain.handle('settings:delete', (_e, key: string) => {
+    try {
+      deleteSetting(key)
       return { ok: true }
     } catch (err) {
       return { ok: false, error: (err as Error).message }

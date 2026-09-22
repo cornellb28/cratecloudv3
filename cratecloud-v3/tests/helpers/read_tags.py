@@ -107,8 +107,10 @@ def read(filepath):
             'year': _first(tags, '\xa9day'),
             'bpm': str(bpm[0]) if bpm else None,
             'key': freeform('initialkey'),
-            'remixer': None,
-            'label': None,
+            'remixer': freeform('REMIXER'),
+            # LABEL is what edit_tags.py writes; PUBLISHER is accepted as a
+            # fallback because files tagged elsewhere carry the label there.
+            'label': freeform('LABEL') or freeform('PUBLISHER'),
             'grouping': _first(tags, '\xa9grp'),
             'composer': _first(tags, '\xa9wrt'),
             'comment': _first(tags, '\xa9cmt'),

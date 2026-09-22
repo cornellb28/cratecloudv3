@@ -2,8 +2,6 @@ import React from 'react'
 import { useLibraryStore } from '../store/useLibraryStore'
 import { ImportDropzone } from './ImportDropzone'
 import { Input } from '@renderer/components/ui/input'
-import { ViewModeToggle } from './ViewModeToggle'
-import { useViewMode } from '../hooks/useViewMode'
 import type { View } from './Sidebar'
 
 interface ToolbarProps {
@@ -24,7 +22,8 @@ const BPM_RANGES: { label: string; range: [number, number] }[] = [
 
 export function Toolbar({ onImportFolder, activeView, onImportFiles }: ToolbarProps): React.JSX.Element {
   const { isAnalyzing, tracks, searchQuery, setSearchQuery, bpmRange, setBpmRange } = useLibraryStore()
-  const [viewMode, setViewMode] = useViewMode('all_tracks', 'list')
+  // The list/grid toggle used to live here, on a single 'all_tracks' key.
+  // It now sits in TrackTabBar instead, because the choice is per tab.
 
   const showSearch = activeView !== 'board'
   const showFilters = activeView !== 'board'
@@ -141,10 +140,6 @@ export function Toolbar({ onImportFolder, activeView, onImportFiles }: ToolbarPr
           )}
         </div>
       )}
-      <div className="flex justify-end">
-        {activeView === 'library' && <ViewModeToggle mode={viewMode} onChange={setViewMode} />}
-      </div>
-
       {/* Board view label instead of search */}
       {activeView === 'board' && (
         <span className="text-xs text-muted-foreground flex-1">

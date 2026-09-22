@@ -189,8 +189,14 @@ def _extract_tags(filepath):
         tags['genre']       = get(['TCON', 'genre',     '\xa9gen'])
         tags['year']        = get(['TDRC', 'date',      '\xa9day'])
         tags['comment']     = get(['COMM::', 'comment', '\xa9cmt'])
-        tags['label']       = get(['TPUB', 'organization'])
-        tags['remixer']     = get(['TPE4', 'remixer'])
+        # MP4 carries these two as iTunes freeform atoms — see edit_tags.py's
+        # MP4_LABEL_KEY/MP4_REMIXER_KEY for why those names. PUBLISHER is read
+        # as a label fallback for files tagged by other software.
+        tags['label']       = get(['TPUB', 'organization',
+                                    '----:com.apple.iTunes:LABEL',
+                                    '----:com.apple.iTunes:PUBLISHER'])
+        tags['remixer']     = get(['TPE4', 'remixer',
+                                    '----:com.apple.iTunes:REMIXER'])
         tags['composer']    = get(['TCOM', 'composer',  '\xa9wrt'])
         tags['grouping']    = get(['TIT1', 'grouping',  '\xa9grp'])
         tags['bpm_tag']     = get(['TBPM', 'bpm'])
@@ -254,6 +260,30 @@ def extract_artwork(filepath: str) -> str | None:
         pass
     return None
 
+# ── Stage progress ────────────────────────────────────────────────────────
+# analyze() is one blocking call that takes seconds on a long track, so it
+# reports which stage it is in. This goes to STDERR on purpose: stdout carries
+# the single JSON result every caller parses as a whole, and adding lines to it
+# would break all of them. sidecar.ts picks these out of the stderr stream by
+# the sentinel and leaves the rest (librosa warnings) alone.
+#
+# `step` counts stages FINISHED, so it is 0 while the first one runs and
+# reaches PROGRESS_STEPS when analyze() returns — i.e. step/PROGRESS_STEPS is
+# the fraction genuinely complete. The stages are not equal in wall-clock
+# time (decode dominates), so the bar advances in uneven jumps rather than
+# pretending to be a linear timer.
+PROGRESS_SENTINEL = '@@CC_PROGRESS '
+PROGRESS_STEPS = 5
+
+
+def _emit_progress(stage, step):
+    print(
+        PROGRESS_SENTINEL + json.dumps({'stage': stage, 'step': step, 'steps': PROGRESS_STEPS}),
+        file=sys.stderr,
+        flush=True,
+    )
+
+
 def analyze(filepath):
     """
     Full analysis pipeline:
@@ -272,10 +302,12 @@ def analyze(filepath):
         }
 
     # Step 1 — read tags (no audio load needed)
+    _emit_progress('tags', 0)
     tags = _extract_tags(filepath)
 
     # Step 2 — load audio at 22050 Hz mono
     # Lower sample rate = faster load, still accurate for BPM/key
+    _emit_progress('decode', 1)
     try:
         y, sr = load_audio(filepath, sr=22050)
     except Exception as e:
@@ -286,6 +318,7 @@ def analyze(filepath):
         }
 
     # Step 3 — BPM
+    _emit_progress('bpm', 2)
     try:
         bpm = detect_bpm(y, sr)
     except Exception as e:
@@ -293,6 +326,7 @@ def analyze(filepath):
         print(f'BPM detection failed: {e}', file=sys.stderr)
 
     # Step 4 — Key
+    _emit_progress('key', 3)
     try:
         key = detect_key(y, sr)
     except Exception as e:
@@ -306,7 +340,9 @@ def analyze(filepath):
     duration_str = f'{minutes}:{seconds:02d}'
 
     # Add artwork extraction
+    _emit_progress('artwork', 4)
     artwork_base64 = extract_artwork(filepath)
+    _emit_progress('done', PROGRESS_STEPS)
 
     # Step 6 — Return everything
     # Tags from the file take priority for title/artist/etc.

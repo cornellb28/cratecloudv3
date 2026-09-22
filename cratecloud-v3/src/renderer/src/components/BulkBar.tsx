@@ -1,14 +1,16 @@
 import { BulkEditModal } from './BulkEditModal'
-import React, { useState, useRef } from 'react'
+import React, { useRef, useState } from 'react'
 import { toast } from 'sonner'
 import { useLibraryStore } from '../store/useLibraryStore'
 import { Button } from './ui/button'
-import { FolderTreeDropdown } from './FolderTreeDropdown'
-import { CrossDeviceMoveDialog } from './CrossDeviceMoveDialog'
-import { CratePicker } from './CratePicker'
+import { MoveToModal } from './MoveToModal'
+import { CratePickerModal } from './CratePickerModal'
+import { reanalyzeSummary, reanalyzeTracks, type ReanalyzeTally } from '../lib/reanalyze'
 
 interface BulkBarProps {
-  selectedIds: Set<number>
+  // ReadonlySet, not Set: nothing here mutates the selection, and the
+  // callers build a fresh set for every change.
+  selectedIds: ReadonlySet<number>
   onClearSelect: () => void
   onSelectAll: () => void
   totalCount: number
@@ -18,6 +20,9 @@ interface BulkBarProps {
   crateId?: number
 }
 
+// Every action here is available to everyone: the desktop app is free, so
+// there is no tier to gate on and none is planned. One implementation,
+// shared by list and grid.
 export function BulkBar({
   selectedIds,
   onClearSelect,
@@ -25,69 +30,45 @@ export function BulkBar({
   onSelectAll,
   crateId
 }: BulkBarProps): React.JSX.Element | null {
-  const { tracks, upsertJob, removeTracksFromCrateLocally } = useLibraryStore()
+  const { removeTracksFromCrateLocally } = useLibraryStore()
   const [editModalOpen, setEditModalOpen] = useState(false)
-  const [dropdownOpen, setDropdownOpen] = useState(false)
+  const [moveModalOpen, setMoveModalOpen] = useState(false)
   const [cratePickerOpen, setCratePickerOpen] = useState(false)
-  const [anchor, setAnchor] = useState({ top: 0, left: 0, width: 0 })
-  const [pendingMove, setPendingMove] = useState<{
-    path: string
-    fileCount: number
-    totalMB: number
-  } | null>(null)
-  const moveButtonRef = useRef<HTMLButtonElement>(null)
-  const crateButtonRef = useRef<HTMLButtonElement>(null)
+
+  // Non-null only while a bulk re-analysis is running. The stop flag is a ref,
+  // not state: the pool reads it between tracks, and a re-render is neither
+  // needed nor wanted at that moment.
+  const [analysis, setAnalysis] = useState<{ tally: ReanalyzeTally; total: number } | null>(null)
+  const stopRequested = useRef(false)
 
   // Hide when nothing is selected
   if (selectedIds.size === 0) return null
 
   const selectedArray = Array.from(selectedIds)
+  const busy = analysis !== null
+  const settled = analysis ? analysis.tally.ok + analysis.tally.failed + analysis.tally.skipped : 0
 
-  function openMoveDropdown(): void {
-    if (moveButtonRef.current) {
-      const rect = moveButtonRef.current.getBoundingClientRect()
-      setAnchor({ top: rect.bottom + 4, left: rect.left, width: rect.width })
-    }
-    setDropdownOpen(true)
-  }
+  // Runs the same per-track routine the ⋮ menu's Re-analyze uses, four at a
+  // time, so each card shows its own progress bar as its turn comes up. The
+  // selection is deliberately left alone: the bar's counter is the only place
+  // the overall progress is shown, and it disappears with the selection.
+  async function handleReanalyze(): Promise<void> {
+    if (analysis) return
+    stopRequested.current = false
+    const ids = selectedArray
+    setAnalysis({ tally: { ok: 0, failed: 0, skipped: 0, stopped: false }, total: ids.length })
 
-  function startMoveJob(destAbsolutePath: string): void {
-    window.api.fs.moveFiles({ trackIds: selectedArray, destAbsolutePath }).then(({ jobId }) => {
-      upsertJob({
-        type: 'move',
-        jobId,
-        trackIds: selectedArray,
-        phase: 'running',
-        done: 0,
-        total: selectedArray.length,
-        currentFile: '',
-        bytesCopied: 0,
-        totalBytes: 0,
-        crossDevice: false,
-        failed: []
+    try {
+      const tally = await reanalyzeTracks(ids, {
+        onSettled: (progress) => setAnalysis({ tally: progress, total: ids.length }),
+        shouldStop: () => stopRequested.current
       })
-      onClearSelect()
-    })
-  }
-
-  async function handleSelectDestination(destAbsolutePath: string): Promise<void> {
-    setDropdownOpen(false)
-
-    const filepaths = tracks.filter((t) => selectedIds.has(t.id)).map((t) => t.filepath)
-    const precheck = await window.api.fs.isCrossDevice(filepaths, destAbsolutePath)
-
-    if (precheck.ok && precheck.crossDevice) {
-      setPendingMove({
-        path: destAbsolutePath,
-        fileCount: filepaths.length,
-        totalMB: (precheck.totalBytes ?? 0) / (1024 * 1024)
-      })
-      return
+      const summary = reanalyzeSummary(tally)
+      if (tally.failed > 0) toast.error('Re-analyze finished with errors', { description: summary })
+      else toast.success(summary)
+    } finally {
+      setAnalysis(null)
     }
-
-    // Same device, or the precheck itself failed — let the move job surface
-    // any real error per-file rather than blocking on a failed precheck.
-    startMoveJob(destAbsolutePath)
   }
 
   async function handleRemoveFromCrate(): Promise<void> {
@@ -113,28 +94,14 @@ export function BulkBar({
         onClose={() => setEditModalOpen(false)}
       />
 
-      {/* Folder tree dropdown for bulk move */}
-      {dropdownOpen && (
-        <FolderTreeDropdown
-          anchor={anchor}
-          onSelect={(path) => void handleSelectDestination(path)}
-          onClose={() => setDropdownOpen(false)}
-        />
-      )}
-
-      {/* Cross-device confirmation */}
-      {pendingMove && (
-        <CrossDeviceMoveDialog
-          open
-          fileCount={pendingMove.fileCount}
-          totalMB={pendingMove.totalMB}
-          onConfirm={() => {
-            startMoveJob(pendingMove.path)
-            setPendingMove(null)
-          }}
-          onCancel={() => setPendingMove(null)}
-        />
-      )}
+      {/* Destination picker — owns the cross-device warning, the job
+          dispatch and the recent-destinations list. */}
+      <MoveToModal
+        trackIds={selectedArray}
+        open={moveModalOpen}
+        onClose={() => setMoveModalOpen(false)}
+        onMoveStarted={onClearSelect}
+      />
 
       <div
         style={{
@@ -163,6 +130,7 @@ export function BulkBar({
         {/* Select all */}
         <button
           onClick={onSelectAll}
+          disabled={busy}
           style={{
             background: 'none',
             border: '0.5px solid #3a3060',
@@ -170,7 +138,8 @@ export function BulkBar({
             color: '#a09be8',
             fontSize: '11px',
             padding: '3px 10px',
-            cursor: 'pointer',
+            cursor: busy ? 'default' : 'pointer',
+            opacity: busy ? 0.5 : 1,
             fontFamily: 'inherit'
           }}
         >
@@ -181,6 +150,7 @@ export function BulkBar({
         <Button
           variant="outline"
           size="sm"
+          disabled={busy}
           onClick={() => setEditModalOpen(true)}
           className="text-xs"
           style={{ borderColor: '#7f77dd', color: '#a09be8' }}
@@ -188,30 +158,69 @@ export function BulkBar({
           Edit labels
         </Button>
 
+        {/* Re-analyze — BPM and key for every selected track. While it runs
+            this turns into a live count plus a way out of it, since a full
+            selection can take minutes: each track is a separate librosa pass
+            over the whole file. */}
+        {busy ? (
+          <>
+            <span
+              style={{
+                fontSize: '11px',
+                color: '#3db88a',
+                flexShrink: 0,
+                fontVariantNumeric: 'tabular-nums'
+              }}
+            >
+              ⟳ Re-analyzing {settled} / {analysis.total}
+            </span>
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={() => {
+                stopRequested.current = true
+              }}
+              className="text-xs"
+              style={{ borderColor: '#3a3060', color: '#a09be8' }}
+            >
+              Stop
+            </Button>
+          </>
+        ) : (
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={() => void handleReanalyze()}
+            className="text-xs"
+            style={{ borderColor: '#7f77dd', color: '#a09be8' }}
+          >
+            Re-analyze
+          </Button>
+        )}
+
         {/* Add to crate button */}
         <Button
-          ref={crateButtonRef}
           variant="outline"
           size="sm"
-          onClick={() => setCratePickerOpen((v) => !v)}
+          disabled={busy}
+          onClick={() => setCratePickerOpen(true)}
           className="text-xs"
           style={{ borderColor: '#7f77dd', color: '#a09be8' }}
         >
           Add to crate
         </Button>
-        {cratePickerOpen && (
-          <CratePicker
-            trackIds={selectedArray}
-            anchorRef={crateButtonRef}
-            onClose={() => setCratePickerOpen(false)}
-          />
-        )}
+        <CratePickerModal
+          trackIds={selectedArray}
+          open={cratePickerOpen}
+          onClose={() => setCratePickerOpen(false)}
+        />
 
         {/* Remove from crate — only when BulkBar is scoped to one crate's view */}
         {crateId !== undefined && (
           <Button
             variant="outline"
             size="sm"
+            disabled={busy}
             onClick={() => void handleRemoveFromCrate()}
             className="text-xs"
             style={{ borderColor: '#3a3060', color: '#a09be8' }}
@@ -222,10 +231,10 @@ export function BulkBar({
 
         {/* Move to... button */}
         <Button
-          ref={moveButtonRef}
           variant="outline"
           size="sm"
-          onClick={openMoveDropdown}
+          disabled={busy}
+          onClick={() => setMoveModalOpen(true)}
           className="text-xs"
           style={{ borderColor: '#7f77dd', color: '#a09be8' }}
         >
@@ -236,6 +245,7 @@ export function BulkBar({
         <Button
           variant="ghost"
           size="sm"
+          disabled={busy}
           onClick={onClearSelect}
           className="text-xs ml-auto"
           style={{ color: '#555' }}

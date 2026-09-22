@@ -5,6 +5,7 @@ import { FolderCard } from '../components/FolderCard'
 import { MosaicArtwork } from '../components/MosaicArtwork'
 import { TrackRow } from '../components/TrackRow'
 import { TrackCard } from '../components/TrackCard'
+import { TRACK_GRID_GAP, trackGridColumns } from '../lib/trackCard'
 import { BulkBar } from '../components/BulkBar'
 import { Button } from '@renderer/components/ui/button'
 import { useFileDrop } from '../hooks/useFileDrop'
@@ -820,8 +821,8 @@ export function FolderView({ libraryRoots }: FolderViewProps): React.JSX.Element
               <div
                 style={{
                   display: 'grid',
-                  gridTemplateColumns: 'repeat(auto-fill, minmax(160px, 1fr))',
-                  gap: '10px'
+                  gridTemplateColumns: trackGridColumns,
+                  gap: `${TRACK_GRID_GAP}px`
                 }}
               >
                 {folderTracks.map((track) => (

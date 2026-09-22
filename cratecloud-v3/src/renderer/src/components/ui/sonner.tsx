@@ -1,7 +1,7 @@
 import React from 'react'
 import { Toaster as Sonner, type ToasterProps } from 'sonner'
 
-// Matches the app's existing dark palette (see MoveConfirmDialog, FolderTreeDropdown)
+// Matches the app's existing dark palette (see MoveConfirmDialog, MoveToModal)
 // rather than shadcn's CSS-variable convention, since the rest of the UI is
 // styled with inline hex values, not theme tokens.
 export function Toaster(props: ToasterProps): React.JSX.Element {

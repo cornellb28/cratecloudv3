@@ -4,6 +4,7 @@ import { GripVertical, ChevronUp, ChevronDown, UploadCloud } from 'lucide-react'
 import { useLibraryStore } from '../store/useLibraryStore'
 import { TrackRow } from '../components/TrackRow'
 import { TrackCard } from '../components/TrackCard'
+import { TRACK_GRID_GAP, trackGridColumns } from '../lib/trackCard'
 import { BulkBar } from '../components/BulkBar'
 import { SeratoRunningConfirmDialog } from '../components/SeratoRunningConfirmDialog'
 import { useViewMode } from '../hooks/useViewMode'
@@ -488,8 +489,8 @@ export function CrateView({ crateId }: CrateViewProps): React.JSX.Element {
             overflowY: 'auto',
             padding: '12px 16px',
             display: 'grid',
-            gridTemplateColumns: 'repeat(auto-fill, minmax(160px, 1fr))',
-            gap: '10px',
+            gridTemplateColumns: trackGridColumns,
+            gap: `${TRACK_GRID_GAP}px`,
             alignContent: 'start'
           }}
         >

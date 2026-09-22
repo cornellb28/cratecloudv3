@@ -11,7 +11,12 @@ declare global {
         count: number
         results: { ok: boolean; trackId?: number; error?: string }[]
       }>
-      analyzeFile: (filepath: string) => Promise<{
+      // Pass trackId to receive analysis:file-progress events for that track
+      // (onAnalyzeFileProgress); omit it for a silent analysis.
+      analyzeFile: (
+        filepath: string,
+        trackId?: number
+      ) => Promise<{
         ok: boolean
         data?: AnalysisResult
         error?: string
@@ -81,6 +86,8 @@ declare global {
       ) => void
 
       onAnalysisComplete: (cb: (data: { analyzed: number; total: number }) => void) => void
+
+      onAnalyzeFileProgress: (cb: (p: AnalyzeFileProgressPayload) => void) => void
 
       offAnalysisListeners: () => void
 
@@ -205,6 +212,8 @@ declare global {
       settings: {
         get: (key: string) => Promise<string | null>
         set: (key: string, value: string) => Promise<{ ok: boolean; error?: string }>
+        // Removes the row. Deleting an absent key succeeds.
+        delete: (key: string) => Promise<{ ok: boolean; error?: string }>
       }
 
       fs: {
@@ -505,6 +514,27 @@ declare global {
     playsImported: number
     playsUnresolvedPaths: number
     unresolvedPathSamples: string[]
+  }
+
+  // What useLibraryStore.trackAnalysis holds for a track being analysed. Same
+  // shape as the IPC payload minus the addressing fields, plus 'queued': the
+  // renderer sets that the moment the user asks for a re-analysis, so the bar
+  // appears on the card immediately instead of only once Python has started
+  // and reported its first stage.
+  interface TrackAnalysisProgress {
+    stage: 'queued' | AnalyzeFileProgressPayload['stage']
+    step: number
+    steps: number
+  }
+
+  interface AnalyzeFileProgressPayload {
+    trackId: number
+    filepath: string
+    // Which of analyze.py's stages is running now, and how many are finished —
+    // step / steps is the fraction complete. 'done' arrives with step === steps.
+    stage: 'tags' | 'decode' | 'bpm' | 'key' | 'artwork' | 'done'
+    step: number
+    steps: number
   }
 
   interface SeratoImportProgressPayload {

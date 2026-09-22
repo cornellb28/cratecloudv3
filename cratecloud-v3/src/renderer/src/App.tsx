@@ -356,6 +356,16 @@ function App(): React.JSX.Element {
       })
     })
 
+    // Per-track re-analysis — drives the bar on that track's card. Only the
+    // stage moves here; the entry is added and removed by whoever started the
+    // analysis (TrackRowMenu), so an event for a track that has already
+    // finished cannot resurrect a bar.
+    window.api.onAnalyzeFileProgress((p) => {
+      const { trackAnalysis, setTrackAnalysis } = useLibraryStore.getState()
+      if (!trackAnalysis.has(p.trackId)) return
+      setTrackAnalysis(p.trackId, { stage: p.stage, step: p.step, steps: p.steps })
+    })
+
     // Phase 2 complete — hide the analysis bar
     window.api.onAnalysisComplete(() => {
       setTimeout(() => setAnalysisProgress(null), 3000)

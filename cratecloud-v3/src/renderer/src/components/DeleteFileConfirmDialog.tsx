@@ -13,7 +13,7 @@ interface DeleteFileConfirmDialogProps {
 // Confirms before touching the file on disk — the same "about to affect a
 // file on disk, confirm first" convention as MoveConfirmDialog, kept as its
 // own component (rather than a shared shell) since the codebase already
-// treats each of these dialogs as standalone (see CrossDeviceMoveDialog).
+// treats each of these dialogs as standalone.
 export function DeleteFileConfirmDialog({
   open,
   trackTitle,

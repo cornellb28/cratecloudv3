@@ -31,9 +31,55 @@ function getEditTagsSidecarPath(): string {
   return join(projectRoot, 'sidecar', 'edit_tags.py')
 }
 
+// ─── Stage progress ───────────────────────────────────────
+// analyze.py reports which stage it is in on stderr, one sentinel-prefixed
+// JSON line per stage — see its _emit_progress for why stderr and not stdout.
+// `step` counts stages finished, so step / steps is the fraction complete.
+const PROGRESS_SENTINEL = '@@CC_PROGRESS '
+
+export interface AnalysisStage {
+  stage: 'tags' | 'decode' | 'bpm' | 'key' | 'artwork' | 'done'
+  step: number
+  steps: number
+}
+
+// Splits a stderr chunk stream into lines, hands the progress ones to
+// onProgress and returns the rest, so librosa's warnings still reach the
+// existing console.warn untouched. Returns the trailing partial line for the
+// caller to carry into the next chunk — a sentinel line can arrive split
+// across two chunks, and half a line parses as nothing.
+function consumeProgress(
+  buffered: string,
+  onProgress: ((stage: AnalysisStage) => void) | undefined
+): { rest: string; passthrough: string } {
+  const lines = buffered.split('\n')
+  const rest = lines.pop() ?? ''
+  const passthrough: string[] = []
+
+  for (const line of lines) {
+    if (!line.startsWith(PROGRESS_SENTINEL)) {
+      passthrough.push(line)
+      continue
+    }
+    if (!onProgress) continue
+    try {
+      onProgress(JSON.parse(line.slice(PROGRESS_SENTINEL.length)) as AnalysisStage)
+    } catch {
+      // A malformed progress line is cosmetic — never fail the analysis over
+      // one. It is dropped rather than logged as a warning, since the caller
+      // would have nothing to do about it either.
+    }
+  }
+
+  return { rest, passthrough: passthrough.join('\n') }
+}
+
 // ─── Core bridge function ─────────────────────────────────
 
-export function analyzeFile(filepath: string): Promise<AnalysisResult> {
+export function analyzeFile(
+  filepath: string,
+  onProgress?: (stage: AnalysisStage) => void
+): Promise<AnalysisResult> {
   return new Promise((resolve, reject) => {
     const python = getPython()
     const script = getSidecarPath()
@@ -55,13 +101,24 @@ export function analyzeFile(filepath: string): Promise<AnalysisResult> {
       stdout += chunk.toString()
     })
 
-    // Collect stderr — librosa warnings go here
+    // Collect stderr — librosa warnings go here, and so do the progress
+    // lines, which are peeled off as they arrive rather than at close: the
+    // whole point of them is to be seen while the analysis is still running.
+    let stderrPending = ''
     child.stderr.on('data', (chunk: Buffer) => {
-      stderr += chunk.toString()
+      stderrPending += chunk.toString()
+      const { rest, passthrough } = consumeProgress(stderrPending, onProgress)
+      stderrPending = rest
+      if (passthrough) stderr += passthrough + '\n'
     })
 
     // Python has finished — parse the result
     child.on('close', (code) => {
+      // A final line with no trailing newline is still a real warning.
+      if (stderrPending && !stderrPending.startsWith(PROGRESS_SENTINEL)) {
+        stderr += stderrPending
+      }
+
       if (stderr) {
         // Log warnings but do not fail — they are usually
         // librosa deprecation notices, not real errors

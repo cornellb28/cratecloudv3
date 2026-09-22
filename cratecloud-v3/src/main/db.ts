@@ -880,6 +880,10 @@ const stmts = {
       value      = excluded.value,
       updated_at = strftime('%s','now')
   `),
+
+  deleteSetting: db.prepare(`
+    DELETE FROM app_settings WHERE key = ?
+  `),
   insertPendingChange: db.prepare(`
     INSERT INTO pending_changes
       (root_id, change_type, old_path, new_path, track_id)
@@ -1980,6 +1984,15 @@ export function getSetting(key: string): string | null {
 
 export function setSetting(key: string, value: string): RunResult {
   return stmts.setSetting.run({ key, value })
+}
+
+// Removes the row outright, rather than blanking it. getSetting already
+// returns null for a key that was never written, so a deleted key and an
+// absent one are indistinguishable to every caller — which is the point:
+// settings that go out of scope (a deleted crate's remembered view mode, a
+// preference a feature no longer has) should leave nothing behind.
+export function deleteSetting(key: string): RunResult {
+  return stmts.deleteSetting.run(key)
 }
 
 export function getArtworkPath(trackId: number): string | null {

@@ -11,11 +11,13 @@ interface MoveConfirmDialogProps {
   onCancel: () => void
 }
 
-// Shared shell for "this is about to move a file on disk, confirm first" —
-// used by MoveFileButton (single-track "Move to...") and FolderView's
-// Finder-drop-into-folder. Both persist the same skip_move_confirmation
-// setting, so dismissing one dismisses both — they're the same underlying
-// concern (moving files, not copying) from the DJ's point of view.
+// "This is about to move a file on disk, confirm first" — now only for
+// FolderView's Finder-drop-into-folder, where the drop itself is the whole
+// interaction and there is nowhere else to show the destination. The
+// "Move to..." button no longer uses this: MoveToModal shows the resolved
+// destination path and a cross-drive warning before its own Move button,
+// so it is already the confirmation step. skip_move_confirmation therefore
+// governs the drop path alone.
 export function MoveConfirmDialog({
   open,
   title,

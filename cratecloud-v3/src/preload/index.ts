@@ -90,6 +90,16 @@ interface SeratoImportProgressPayload {
   error?: string
 }
 
+interface AnalyzeFileProgressPayload {
+  trackId: number
+  filepath: string
+  // Which of analyze.py's stages is running now, and how many are finished —
+  // step / steps is the fraction complete. 'done' arrives with step === steps.
+  stage: 'tags' | 'decode' | 'bpm' | 'key' | 'artwork' | 'done'
+  step: number
+  steps: number
+}
+
 interface EditTagsMeta {
   title?: string
   artist?: string
@@ -114,7 +124,10 @@ const api = {
   openFiles: (): Promise<string[]> => ipcRenderer.invoke('dialog:open-files'),
   importFile: (filepath: string) => ipcRenderer.invoke('library:import-file', filepath),
   importFiles: (filepaths: string[]) => ipcRenderer.invoke('library:import-files', filepaths),
-  analyzeFile: (filepath: string) => ipcRenderer.invoke('sidecar:analyze', filepath),
+  // trackId is optional — pass it to get analysis:file-progress events for
+  // that track (onAnalyzeFileProgress), omit it for a silent analysis.
+  analyzeFile: (filepath: string, trackId?: number) =>
+    ipcRenderer.invoke('sidecar:analyze', filepath, trackId),
   writeTags: (filepath: string, meta: EditTagsMeta) =>
     ipcRenderer.invoke('sidecar:write-tags', filepath, meta),
   // Job-based, like fs.moveFiles/crates.export — resolves immediately with
@@ -162,6 +175,10 @@ const api = {
   ) => ipcRenderer.on('library:track-analyzed', (_e, d) => cb(d)),
   onAnalysisComplete: (cb: (data: { analyzed: number; total: number }) => void) =>
     ipcRenderer.on('library:analysis-complete', (_e, d) => cb(d)),
+  // Per-track stage progress for a single analyzeFile call that was given a
+  // trackId — one event per analyze.py stage.
+  onAnalyzeFileProgress: (cb: (p: AnalyzeFileProgressPayload) => void) =>
+    ipcRenderer.on('analysis:file-progress', (_e, p) => cb(p)),
 
   onTrackAdded: (cb: (data: { trackId: number; filepath: string }) => void) =>
     ipcRenderer.on('watcher:track-added', (_e, d) => cb(d)),
@@ -184,6 +201,7 @@ const api = {
   offAnalysisListeners: () => {
     ipcRenderer.removeAllListeners('library:track-analyzed')
     ipcRenderer.removeAllListeners('library:analysis-complete')
+    ipcRenderer.removeAllListeners('analysis:file-progress')
   },
   // Tracks
   db: {
@@ -271,7 +289,8 @@ const api = {
   // Settings
   settings: {
     get: (key: string) => ipcRenderer.invoke('settings:get', key),
-    set: (key: string, value: string) => ipcRenderer.invoke('settings:set', key, value)
+    set: (key: string, value: string) => ipcRenderer.invoke('settings:set', key, value),
+    delete: (key: string) => ipcRenderer.invoke('settings:delete', key)
   },
 
   // Artwork — the renderer never builds artwork paths itself, only asks for

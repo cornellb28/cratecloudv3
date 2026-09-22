@@ -55,6 +55,27 @@ SUPPORTED = {'.mp3', '.flac', '.aiff', '.aif', '.m4a', '.wav'}
 
 MP4_CRATECLOUD_KEY = '----:com.apple.iTunes:CRATECLOUD_ID'
 
+# MP4 has no standard atom for key, label or remixer, so these three travel as
+# iTunes freeform atoms. The names are not arbitrary:
+#
+#   initialkey — verified against this project's reference library: of 848 .m4a
+#     files present in Serato's `database V2`, 815 carry this atom and Serato's
+#     cached `tkey` equals it in every one. Where a file has both `initialkey`
+#     and `KEY` (20 files) Serato shows `initialkey`, so that is the one to
+#     write. Key IS therefore visible in Serato for M4A.
+#   LABEL / REMIXER — the MusicBrainz Picard mapping, so other taggers read
+#     them back. Serato does NOT read either one from an MP4: the same library
+#     has four .m4a files carrying a PUBLISHER atom whose Serato entries are
+#     fresh (cached mtime == file mtime, i.e. Serato has read their tags) and
+#     whose `tlbl` is still empty, and across all 232 labelled .m4a entries not
+#     one label originates from a file tag. Serato keeps a label for an MP4 in
+#     its own database only. These are written so the value survives in the
+#     file and round-trips through analyze.py and other tools — not because
+#     Serato will display them.
+MP4_KEY_KEY = '----:com.apple.iTunes:initialkey'
+MP4_LABEL_KEY = '----:com.apple.iTunes:LABEL'
+MP4_REMIXER_KEY = '----:com.apple.iTunes:REMIXER'
+
 
 def _try_serato_autotags(target, meta, write_serato, supported):
     """
@@ -207,6 +228,12 @@ def edit_m4a(filepath, meta, write_serato):
         t['\xa9grp'] = [meta['grouping']]
     if meta.get('comment') is not None:
         t['\xa9cmt'] = [meta['comment']]
+    if meta.get('key') is not None:
+        t[MP4_KEY_KEY] = [MP4FreeForm(str(meta['key']).encode('utf-8'))]
+    if meta.get('label') is not None:
+        t[MP4_LABEL_KEY] = [MP4FreeForm(str(meta['label']).encode('utf-8'))]
+    if meta.get('remixer') is not None:
+        t[MP4_REMIXER_KEY] = [MP4FreeForm(str(meta['remixer']).encode('utf-8'))]
     if meta.get('cratecloud_id') is not None:
         t[MP4_CRATECLOUD_KEY] = [MP4FreeForm(str(meta['cratecloud_id']).encode('utf-8'))]
     audio.save()

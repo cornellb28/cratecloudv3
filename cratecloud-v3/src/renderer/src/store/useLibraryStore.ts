@@ -44,10 +44,18 @@ interface LibraryState {
   quickTags: Tag[]
   trackTags: Map<number, Tag[]>
 
+  // Analysis in flight, per track — what drives the progress bar along the
+  // bottom of a TrackCard. Keyed by track id and only ever holding the few
+  // tracks actually being analysed right now, not one entry per library row.
+  // Owned here rather than in TrackRowMenu (which starts the analysis) because
+  // the menu unmounts as soon as it closes, while the card has to keep showing
+  // the bar for the seconds the sidecar takes.
+  trackAnalysis: Map<number, TrackAnalysisProgress>
+
   // `folders` mirrors the real directory tree (populated at import time);
   // `folderCounts` is one GROUP BY query. Owned here (not per-view local
   // state) so App.tsx's single onFoldersChanged subscription can refresh
-  // it once and every consumer (FolderView, FolderTreeDropdown callers,
+  // it once and every consumer (FolderView, MoveToModal,
   // etc.) sees the same data without each mounting its own fetch.
   folders: FolderRow[]
   folderCounts: { folder_id: number; count: number }[]
@@ -94,6 +102,8 @@ interface LibraryState {
   addTag: (tag: Tag) => void
   removeTag: (id: number) => void
   setTrackTags: (trackId: number, tags: Tag[]) => void
+  setTrackAnalysis: (trackId: number, progress: TrackAnalysisProgress) => void
+  clearTrackAnalysis: (trackId: number) => void
   // Bulk version of setTrackTags — one Map build for many tracks instead of
   // one set() per track (each set() rebuilds the whole Map, O(n) per call).
   setAllTrackTags: (tagsByTrack: Record<number, Tag[]>) => void
@@ -127,6 +137,7 @@ export const useLibraryStore = create<LibraryState>((set) => ({
   tags: [],
   quickTags: [],
   trackTags: new Map(),
+  trackAnalysis: new Map(),
   folders: [],
   folderCounts: [],
   crates: [],
@@ -212,6 +223,21 @@ export const useLibraryStore = create<LibraryState>((set) => ({
     set((state) => ({
       trackTags: new Map(state.trackTags).set(trackId, tags)
     })),
+
+  setTrackAnalysis: (trackId, progress) =>
+    set((state) => ({
+      trackAnalysis: new Map(state.trackAnalysis).set(trackId, progress)
+    })),
+
+  // Called when the analyze call settles, whatever the outcome — a failure or
+  // a crashed sidecar must not leave a bar stuck on the card.
+  clearTrackAnalysis: (trackId) =>
+    set((state) => {
+      if (!state.trackAnalysis.has(trackId)) return {}
+      const next = new Map(state.trackAnalysis)
+      next.delete(trackId)
+      return { trackAnalysis: next }
+    }),
 
   setAllTrackTags: (tagsByTrack) =>
     set((state) => {

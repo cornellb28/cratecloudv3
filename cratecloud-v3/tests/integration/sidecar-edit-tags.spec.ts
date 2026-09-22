@@ -112,18 +112,23 @@ const EXPECTED_FIELDS: Record<AudioExt, string[]> = {
     'remixer',
     'cratecloud_id'
   ],
-  // MP4 has no standard frame for key, publisher or remixer, and
-  // edit_tags.py's edit_m4a writes none of them.
+  // MP4 has no standard frame for key, label or remixer — edit_m4a writes all
+  // three as iTunes freeform atoms instead (see edit_tags.py). Serato reads
+  // `initialkey` back but ignores an MP4's label and remixer, so those two
+  // survive in the file and in CrateCloud without ever showing up in Serato.
   m4a: [
     'title',
     'artist',
     'album',
     'genre',
     'bpm',
+    'key',
     'year',
     'comment',
+    'label',
     'grouping',
     'composer',
+    'remixer',
     'cratecloud_id'
   ]
 }

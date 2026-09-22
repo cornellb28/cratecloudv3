@@ -8,15 +8,15 @@ import {
 } from 'react'
 import { useVirtualizer } from '@tanstack/react-virtual'
 import { TrackCard } from './TrackCard'
+import { TRACK_CARD_HEIGHT, TRACK_CARD_MIN_WIDTH, TRACK_GRID_GAP } from '../lib/trackCard'
+import type { SelectModifiers } from '../lib/selection'
 
-const CARD_MIN_WIDTH = 160
-const GAP = 10
-// TrackCard's own-height content below the (square) artwork — title line,
-// artist line, BPM/key badges, optional comment-tag row. Not exact for
-// every card (a wrapped comment-tag row can run taller), same tradeoff
-// FolderView/BoardView's own non-virtualized grids already accept; fixed
-// row height is what virtualization needs to avoid measuring every card.
-const INFO_HEIGHT = 84
+const CARD_MIN_WIDTH = TRACK_CARD_MIN_WIDTH
+const GAP = TRACK_GRID_GAP
+// The index card is a fixed height regardless of column width, so the row
+// height virtualization needs is a constant rather than something derived
+// from the (square) artwork the old tile used.
+const ROW_HEIGHT = TRACK_CARD_HEIGHT + GAP
 
 export interface VirtualizedTrackGridHandle {
   scrollToTrackIndex: (index: number) => void
@@ -24,8 +24,11 @@ export interface VirtualizedTrackGridHandle {
 
 interface VirtualizedTrackGridProps {
   tracks: Track[]
-  selectedIds: Set<number>
-  onSelect: (id: number) => void
+  selectedIds: ReadonlySet<number>
+  // Forwarded straight to each card. The modifiers are what let a
+  // shift-click mean a range here as it does in list mode — the grid lays
+  // the same ordered array out in rows, so the span is the same span.
+  onSelect: (id: number, modifiers?: SelectModifiers) => void
   // Fires (via effect, so at most one render behind scroll) with the track
   // index at the top of the viewport — the caller keeps this in a ref so
   // it has somewhere to scroll list mode to if the DJ switches away from
@@ -58,8 +61,7 @@ export const VirtualizedTrackGrid = forwardRef<
   }, [])
 
   const columns = width > 0 ? Math.max(1, Math.floor((width + GAP) / (CARD_MIN_WIDTH + GAP))) : 1
-  const columnWidth = columns > 0 ? (width - GAP * (columns - 1)) / columns : CARD_MIN_WIDTH
-  const rowHeight = Math.max(columnWidth, 1) + INFO_HEIGHT + GAP
+  const rowHeight = ROW_HEIGHT
   const rowCount = Math.ceil(tracks.length / columns)
 
   const rowVirtualizer = useVirtualizer({
@@ -114,7 +116,7 @@ export const VirtualizedTrackGrid = forwardRef<
                 display: 'grid',
                 gridTemplateColumns: `repeat(${columns}, 1fr)`,
                 gap: `${GAP}px`,
-                paddingBottom: '1rem'
+                alignContent: 'start'
               }}
             >
               {rowTracks.map((track) => (

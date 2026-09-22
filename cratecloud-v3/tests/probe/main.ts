@@ -81,6 +81,17 @@ async function run(): Promise<void> {
       )) as unknown as (...args: never[]) => unknown,
 
     analyzeFile: sidecar.analyzeFile as unknown as (...args: never[]) => unknown,
+
+    // analyzeFile's stage callback is what drives the progress bar on a track
+    // card. Collecting the stages here is the only way to assert the real
+    // path: the stages are parsed out of the sidecar's live stderr stream, so
+    // a spec that only looked at the return value would never touch that code.
+    analyzeFileWithStages: (async (filepath: string) => {
+      const stages: unknown[] = []
+      const result = await sidecar.analyzeFile(filepath, (stage) => stages.push(stage))
+      return { stages, success: result.success, bpm: result.bpm ?? null }
+    }) as unknown as (...args: never[]) => unknown,
+
     readTagsFast: sidecar.readTagsFast as unknown as (...args: never[]) => unknown,
 
     // runSeratoImport takes a Set and a progress callback, neither of which

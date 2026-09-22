@@ -3,6 +3,7 @@ import { useLibraryStore, useFilteredTracks } from '../store/useLibraryStore'
 import { Badge } from '@renderer/components/ui/badge'
 import { TrackRow } from '../components/TrackRow'
 import { TrackCard } from '../components/TrackCard'
+import { TRACK_GRID_GAP, trackGridColumns } from '../lib/trackCard'
 import { BulkBar } from '../components/BulkBar'
 
 interface TagPageViewProps {
@@ -54,7 +55,7 @@ export function TagPageView({ tag, onBack }: TagPageViewProps): React.JSX.Elemen
           gap: '12px',
           flexShrink: 0
         }}
-      >
+      >help
         {/* Back button */}
         <button
           onClick={onBack}
@@ -75,6 +76,9 @@ export function TagPageView({ tag, onBack }: TagPageViewProps): React.JSX.Elemen
           ← Back
         </button>
 
+        {/* Field label */}
+        <span style={{ fontSize: '12px', color: '#444' }}>{tag.field.toUpperCase()}:</span>
+
         {/* Tag badge */}
         <Badge
           variant="outline"
@@ -89,9 +93,6 @@ export function TagPageView({ tag, onBack }: TagPageViewProps): React.JSX.Elemen
         >
           {tag.value}
         </Badge>
-
-        {/* Field label */}
-        <span style={{ fontSize: '12px', color: '#444' }}>{tag.field}</span>
 
         {/* Track count */}
         <span
@@ -152,8 +153,8 @@ export function TagPageView({ tag, onBack }: TagPageViewProps): React.JSX.Elemen
             overflowY: 'auto',
             padding: '12px 16px',
             display: 'grid',
-            gridTemplateColumns: 'repeat(auto-fill, minmax(160px, 1fr))',
-            gap: '10px',
+            gridTemplateColumns: trackGridColumns,
+            gap: `${TRACK_GRID_GAP}px`,
             alignContent: 'start'
           }}
         >

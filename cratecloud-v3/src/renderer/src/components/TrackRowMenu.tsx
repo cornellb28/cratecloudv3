@@ -5,7 +5,8 @@ import { MoreVertical, Library, Trash2, FolderPlus, FolderMinus } from 'lucide-r
 import { useLibraryStore } from '../store/useLibraryStore'
 import { usePlayerStore } from '../store/usePlayerStore'
 import { DeleteFileConfirmDialog } from './DeleteFileConfirmDialog'
-import { CratePicker } from './CratePicker'
+import { CratePickerModal } from './CratePickerModal'
+import { reanalyzeTrack } from '../lib/reanalyze'
 
 interface TrackRowMenuProps {
   track: Track
@@ -80,25 +81,14 @@ export function TrackRowMenu({ track, crateId }: TrackRowMenuProps): React.JSX.E
   const handleShowInFinder = act(() => { if (track.filepath) window.api.fs.showInFolder?.(track.filepath) })
   const handleCopyFilepath = act(() => { if (track.filepath) navigator.clipboard.writeText(track.filepath) })
 
+  // The bar on this track's card, the store write and the DB write all live
+  // in reanalyzeTrack — the bulk bar runs the identical routine.
   async function handleReanalyze(): Promise<void> {
     closeMenu()
-    if (!track.filepath) return
-    try {
-      const result = await window.api.analyzeFile(track.filepath)
-      if (!result.ok || !result.data) { toast.error('Re-analyze failed'); return }
-      const { bpm, key_camelot, key_full, duration_sec, duration_str } = result.data
-      updateTrack(track.id, { bpm, key_camelot, key_full, duration_sec, duration_str })
-      await window.api.db.updateTrackMeta({
-        id: track.id, title: track.title, artist: track.artist,
-        genre: track.genre, bpm, key_camelot, energy: track.energy,
-        comment: track.comment, needs_sync: track.needs_sync,
-        pending_changes: track.pending_changes,
-      })
-      await window.api.db.markAnalyzed(track.id)
-      toast.success('Re-analyzed successfully')
-    } catch (err) {
-      toast.error('Re-analyze failed', { description: (err as Error).message })
-    }
+    const outcome = await reanalyzeTrack(track.id)
+    if (outcome === 'ok') toast.success('Re-analyzed successfully')
+    else if (outcome === 'failed') toast.error('Re-analyze failed')
+    else toast.error('Nothing to analyze', { description: 'The file is missing.' })
   }
 
   async function handleMoveToBoard(boardId: number): Promise<void> {
@@ -265,13 +255,11 @@ export function TrackRowMenu({ track, crateId }: TrackRowMenuProps): React.JSX.E
       {/* Portal — renders on document.body, escapes all overflow/z-index */}
       {menuOpen && menuContent && ReactDOM.createPortal(menuContent, document.body)}
 
-      {cratePickerOpen && (
-        <CratePicker
-          trackIds={[track.id]}
-          anchorRef={triggerRef}
-          onClose={() => setCratePickerOpen(false)}
-        />
-      )}
+      <CratePickerModal
+        trackIds={[track.id]}
+        open={cratePickerOpen}
+        onClose={() => setCratePickerOpen(false)}
+      />
 
       <DeleteFileConfirmDialog
         open={confirmOpen}

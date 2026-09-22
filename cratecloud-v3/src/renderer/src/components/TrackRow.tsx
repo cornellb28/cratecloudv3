@@ -1,15 +1,19 @@
-import React from 'react'
+import React, { useRef } from 'react'
 import { useLibraryStore } from '../store/useLibraryStore'
 import { usePlayerStore } from '../store/usePlayerStore'
 import { Badge } from '@renderer/components/ui/badge'
 import { Checkbox } from '@renderer/components/ui/checkbox'
 import { useArtworkUrl } from '../hooks/useArtworkUrl'
 import { TrackRowMenu } from './TrackRowMenu'
+import type { SelectModifiers } from '../lib/selection'
 
 interface TrackRowProps {
   track: Track
   isSelected?: boolean
-  onSelected?: (id: number) => void
+  // `modifiers` is optional on purpose: views that do not implement range
+  // selection (crates, folders, tags) keep passing a one-argument handler
+  // and are unaffected.
+  onSelected?: (id: number, modifiers?: SelectModifiers) => void
   // Set when this row is rendered inside that crate's own track list — adds
   // a "Remove from crate" action to the row's "…" menu.
   crateId?: number
@@ -32,6 +36,12 @@ export function TrackRow({
   const isMissing = !!track.missing
 
   const board = boards.find((b) => b.id === track.board_id)
+
+  // Radix turns a click on the checkbox into onCheckedChange, which carries
+  // no mouse event — so the modifier keys are read in the capture phase on
+  // the way down, before that happens. By the time the click bubbles back
+  // out to the wrapper below, the selection has already been made.
+  const modifiersRef = useRef<SelectModifiers>({ shift: false })
 
   function handlePlayToggle(e: React.MouseEvent): void {
     e.stopPropagation()
@@ -67,11 +77,20 @@ export function TrackRow({
         alignItems: 'center'
       }}
     >
-      {/* Checkbox */}
-      <div onClick={(e) => { e.stopPropagation(); onSelected?.(track.id) }} style={{ flexShrink: 0 }}>
+      {/* Checkbox — the wrapper only stops the click reaching the row (which
+          would open the inspector). It must NOT also call onSelected: the
+          click bubbles up from the Checkbox, so doing both toggled the
+          selection twice and left it exactly as it was. */}
+      <div
+        onClickCapture={(e) => {
+          modifiersRef.current = { shift: e.shiftKey }
+        }}
+        onClick={(e) => e.stopPropagation()}
+        style={{ flexShrink: 0 }}
+      >
         <Checkbox
           checked={isSelected}
-          onCheckedChange={() => onSelected?.(track.id)}
+          onCheckedChange={() => onSelected?.(track.id, modifiersRef.current)}
           className="border-[#333] data-[state=checked]:bg-[#7f77dd] data-[state=checked]:border-[#7f77dd]"
         />
       </div>
