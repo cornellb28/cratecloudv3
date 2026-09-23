@@ -473,6 +473,9 @@ declare global {
   interface AuthUser {
     id: string
     email: string | null
+    // 'email' or 'google' — shown on the Account page, never used to gate.
+    provider: string | null
+    created_at: string | null
   }
 
   interface AuthState {

@@ -23,6 +23,11 @@ export type { ParsedCallback } from './authCallback'
 export interface AuthUser {
   id: string
   email: string | null
+  // Both are for the Account page to show a profile rather than a bare
+  // email address. 'email' when the DJ signed up with a password, 'google'
+  // after the OAuth round trip.
+  provider: string | null
+  created_at: string | null
 }
 
 // Mirrors public.entitlements. 'sync' is the cloud sync / mobile
@@ -101,7 +106,12 @@ export function setAuthStateListener(listener: (state: AuthState) => void): void
 
 function userFrom(session: Session | null): AuthUser | null {
   if (!session?.user) return null
-  return { id: session.user.id, email: session.user.email ?? null }
+  return {
+    id: session.user.id,
+    email: session.user.email ?? null,
+    provider: session.user.app_metadata?.provider ?? null,
+    created_at: session.user.created_at ?? null
+  }
 }
 
 export function getAuthState(): AuthState {

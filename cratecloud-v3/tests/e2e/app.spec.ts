@@ -68,36 +68,9 @@ test('search input is visible in library view', async () => {
   await expect(searchInput).toBeVisible()
 })
 
-test('switching to board view shows all four columns', async () => {
-  await page.getByText('Board view').click()
-  await page.waitForTimeout(300)
-
-  await expect(page.getByText('Untagged', { exact: true })).toBeVisible()
-  await expect(page.getByText('Tagged', { exact: true })).toBeVisible()
-  await expect(page.getByText('Crate ready', { exact: true })).toBeVisible()
-  await expect(page.getByText('Gig ready', { exact: true })).toBeVisible()
-})
-
-test('switching back to library view shows search bar', async () => {
-  // Go to board first
-  await page.getByText('Board view').click()
-  await page.waitForTimeout(300)
-
-  // Then back to library
-  await page.getByText('All tracks').click()
-  await page.waitForTimeout(300)
-
-  const searchInput = page.getByTestId('search-input')
-  await expect(searchInput).toBeVisible()
-})
-
-test('search input does not appear in board view', async () => {
-  await page.getByText('Board view').click()
-  await page.waitForTimeout(300)
-
-  const searchInput = page.getByTestId('search-input')
-  await expect(searchInput).not.toBeVisible()
-})
+// The board-view tests that stood here were removed with the kanban view.
+// The status columns they covered are now tabs in the track tab bar, which
+// is covered by tests/unit/tabs.spec.ts.
 
 // ─── Level 3 — Data ───────────────────────────────────────
 
@@ -169,20 +142,6 @@ test('inspector title field is editable', async () => {
   await expect(titleField).toHaveValue('Test Title from Playwright')
 })
 
-test('board view columns render without errors', async () => {
-  await page.getByText('Board view').click()
-  await page.waitForTimeout(500)
-
-  const untaggedCol = page.getByTestId('board-column-1')
-  await expect(untaggedCol).toBeVisible()
-
-  const cards = untaggedCol.locator('[draggable="true"]')
-  const count = await cards.count()
-
-  console.log(`Untagged column has ${count} tracks`)
-  expect(count).toBeGreaterThanOrEqual(0)
-})
-
 // test('search filters track list', async () => {
 //   // Make sure we are in library view
 //   await page.getByText('All tracks').click()
@@ -227,7 +186,6 @@ test('search filters track list', async () => {
 })
 
 // Things worth testing next:
-// test('dragging a track to a new column updates its board_id')
 // test('editing BPM in inspector persists after app restart')
 // test('search filters correctly by key signature')
 // test('artwork appears on track rows')

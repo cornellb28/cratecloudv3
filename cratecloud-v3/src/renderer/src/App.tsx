@@ -1,13 +1,12 @@
-import React, { useEffect, useRef, useState } from 'react'
+import React, { useCallback, useEffect, useRef, useState } from 'react'
 import { toast } from 'sonner'
 import { useLibraryStore } from './store/useLibraryStore'
 import { Sidebar } from './components/Sidebar'
 import { Toolbar } from './components/Toolbar'
 import { LibraryView } from './components/LibraryView'
-import { BoardView } from './components/BoardView'
 import { Inspector } from './components/Inpector'
 import { FolderView } from './views/FolderView'
-import { SettingsModal } from './components/SettingsModal'
+import { SettingsView, SETTINGS_TAB_KEY } from './views/SettingsView'
 import { EmptyState } from './views/EmptyState'
 import { DashboardView } from '@renderer/views/DashboardView'
 import type { View } from './components/Sidebar'
@@ -21,8 +20,7 @@ import { TagsCloudView } from './views/TagsCloudView'
 import { TagPageView } from './views/TagPageView'
 import { CrateView } from './views/CrateView'
 import { PasswordResetDialog } from './components/PasswordResetDialog'
-
-// type View = 'dashboard' | 'library' | 'board' | 'genre' | 'artist' | 'folders' | 'crates' | 'settings'
+import { LAST_VIEW_KEY, restoreView, isRestorable } from './lib/lastView'
 
 const COLLAPSE_THRESHOLD = 900 // px
 const FOLDERS_REFETCH_DEBOUNCE_MS = 300
@@ -48,7 +46,17 @@ function App(): React.JSX.Element {
     setCrates,
     setCrateTrackIds
   } = useLibraryStore()
-  const [activeView, setActiveView] = useState<View>('dashboard')
+  const [activeView, setActiveViewState] = useState<View>('dashboard')
+  // Restored from app_settings on mount (below), so a reload puts the DJ
+  // back where they were. Same mechanism useViewMode uses for list/grid.
+  const setActiveView = useCallback((next: View): void => {
+    setActiveViewState(next)
+    // Only persist what can actually be restored. Writing 'tags' here would
+    // store a view that restoreView then discards on the way back — the DJ
+    // would land on the dashboard having been told nothing, instead of on
+    // the last view that genuinely survives.
+    if (isRestorable(next)) void window.api.settings.set(LAST_VIEW_KEY, next)
+  }, [])
   // null = still checking. Main restores any stored session off the critical
   // path of window creation and pushes the answer over auth:changed, so
   // there is a real moment where we do not yet know — rendering the login
@@ -58,7 +66,6 @@ function App(): React.JSX.Element {
   const [resetOpen, setResetOpen] = useState(false)
   // Add library roots to app state
   const [libraryRoots, setLibraryRoots] = useState<LibraryRoot[]>([])
-  const [settingsOpen, setSettingsOpen] = useState(false)
   const [reconcileOpen, setReconcileOpen] = useState(false)
   const [selectedTag, setSelectedTag] = useState<Tag | null>(null)
   const [selectedCrateId, setSelectedCrateId] = useState<number | null>(null)
@@ -105,6 +112,20 @@ function App(): React.JSX.Element {
     return () => {
       window.removeEventListener('dragover', preventDefault)
       window.removeEventListener('drop', preventDefault)
+    }
+  }, [])
+
+  // Restore the last view. Written straight to the state setter rather than
+  // through setActiveView, so restoring does not immediately re-persist what
+  // it just read.
+  useEffect(() => {
+    let cancelled = false
+    window.api.settings.get(LAST_VIEW_KEY).then((stored) => {
+      if (cancelled) return
+      setActiveViewState(restoreView(stored))
+    })
+    return () => {
+      cancelled = true
     }
   }, [])
 
@@ -575,6 +596,16 @@ function App(): React.JSX.Element {
     setPendingFolderNav(folder.id)
   }
 
+  // Where every "Sign in" control in the app leads: Settings, on the
+  // Account tab. The tab is written through the same app_settings key
+  // SettingsView reads on mount, rather than a new prop — that keeps one
+  // mechanism for "which settings tab is open", and it is written before
+  // navigating so the page cannot mount and read the old value first.
+  const openAccount = useCallback(async (): Promise<void> => {
+    await window.api.settings.set(SETTINGS_TAB_KEY, 'account')
+    setActiveView('settings')
+  }, [setActiveView])
+
   // No auth gate. The desktop app is free and entirely local, so it opens
   // straight into the library whether or not anyone is signed in — signing
   // in is reached from Settings and only matters for the paid cloud surface.
@@ -658,7 +689,7 @@ function App(): React.JSX.Element {
           onViewChange={handleViewChange}
           collapsed={sidebarCollapsed}
           onToggleCollapsed={() => setSidebarCollapsed(!sidebarCollapsed)}
-          onOpenSettings={() => setSettingsOpen(true)}
+          onOpenSettings={() => setActiveView('settings')}
           selectedCrateId={selectedCrateId}
           onSelectCrate={setSelectedCrateId}
         />
@@ -670,12 +701,16 @@ function App(): React.JSX.Element {
           {/* Views */}
           {activeView === 'dashboard' &&
             (tracks.length === 0 ? (
-              <EmptyState onImport={handleImport} onImportPaths={handleImportPaths} />
+              <EmptyState
+                onImport={handleImport}
+                onImportPaths={handleImportPaths}
+                auth={auth}
+                onOpenAccount={() => void openAccount()}
+              />
             ) : (
-              <DashboardView />
+              <DashboardView auth={auth} onOpenAccount={() => void openAccount()} />
             ))}
           {activeView === 'library' && <LibraryView />}
-          {activeView === 'board' && <BoardView />}
           {activeView === 'folders' &&
             (libraryRoots.length > 0 ? (
               <FolderView libraryRoots={libraryRoots} />
@@ -694,7 +729,7 @@ function App(): React.JSX.Element {
                 <span style={{ fontSize: '48px' }}>⊟</span>
                 <div style={{ fontSize: '14px' }}>No library folders registered</div>
                 <button
-                  onClick={() => setSettingsOpen(true)}
+                  onClick={() => setActiveView('settings')}
                   style={{
                     fontSize: '12px',
                     color: '#7f77dd',
@@ -715,6 +750,16 @@ function App(): React.JSX.Element {
 
           {activeView === 'tags' && selectedTag && (
             <TagPageView tag={selectedTag} onBack={() => setSelectedTag(null)} />
+          )}
+
+          {activeView === 'settings' && (
+            <SettingsView
+              libraryRoots={libraryRoots}
+              onRootsChanged={reloadRoots}
+              auth={auth}
+              onAuthChanged={setAuth}
+              onBack={() => setActiveView('dashboard')}
+            />
           )}
 
           {activeView === 'crates' &&
@@ -745,14 +790,6 @@ function App(): React.JSX.Element {
 
       <PlayerBar />
 
-      <SettingsModal
-        open={settingsOpen}
-        onClose={() => setSettingsOpen(false)}
-        libraryRoots={libraryRoots}
-        onRootsChanged={reloadRoots}
-        auth={auth}
-        onAuthChanged={setAuth}
-      />
       <PasswordResetDialog open={resetOpen} onClose={() => setResetOpen(false)} />
       <ReconciliationModal open={reconcileOpen} onClose={() => setReconcileOpen(false)} />
       <SeratoImportConfirmDialog

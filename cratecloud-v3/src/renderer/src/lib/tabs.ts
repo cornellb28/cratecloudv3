@@ -309,7 +309,7 @@ export function buildTabs(
       filter: { type: 'status', boardId: board.id },
       sort: DEFAULT_SORT,
       // Grid by default, matching how the board columns these replace
-      // already default (see BoardView's useViewMode call).
+      // used to default.
       defaultViewMode: 'grid',
       color: board.color
     }))

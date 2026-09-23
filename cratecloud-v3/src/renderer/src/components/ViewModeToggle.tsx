@@ -5,7 +5,7 @@ interface ViewModeToggleProps {
   onChange: (mode: 'list' | 'grid') => void
 }
 
-// Extracted from BoardView's per-column list/grid buttons — same look, same
+// Extracted from the old BoardView's per-column list/grid buttons — same look, same
 // two-button shape, now shared with anything using useViewMode.
 export function ViewModeToggle({ mode, onChange }: ViewModeToggleProps): React.JSX.Element {
   return (

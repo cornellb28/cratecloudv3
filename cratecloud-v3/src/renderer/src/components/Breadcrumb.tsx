@@ -9,7 +9,6 @@ interface BreadcrumbProps {
 const VIEW_LABELS: Record<View, string> = {
   dashboard: 'Home',
   library: 'All Tracks',
-  board: 'Board',
   tags: 'Tags',
   folders: 'Folders',
   crates: 'Crates',

@@ -5,8 +5,10 @@ import { useLibraryStore } from '../store/useLibraryStore'
 import { DeleteCrateConfirmDialog } from './DeleteCrateConfirmDialog'
 import { SeratoRunningConfirmDialog } from './SeratoRunningConfirmDialog'
 
-// Updated View type — add dashboard, genre, artist, crates
-type View = 'dashboard' | 'library' | 'board' | 'tags' | 'folders' | 'crates' | 'settings'
+// The kanban board view is gone — the status columns it showed are now
+// tabs in the track tab bar (see lib/tabs.ts), built from the same boards
+// rows. Boards remain the status system; only the view was removed.
+type View = 'dashboard' | 'library' | 'tags' | 'folders' | 'crates' | 'settings'
 
 interface SidebarProps {
   activeView: View
@@ -94,16 +96,6 @@ export function Sidebar({
       </button>
     )
   }
-
-  const separator = (): React.JSX.Element => (
-    <div
-      style={{
-        height: '0.5px',
-        background: '#1e1e2a',
-        margin: '6px 4px'
-      }}
-    />
-  )
 
   const sectionLabel = (label: string): React.JSX.Element | null =>
     collapsed ? null : (
@@ -196,12 +188,6 @@ export function Sidebar({
         }}
       />
 
-      {/* ── Workflow section ─────────────────────── */}
-      {separator()}
-      {sectionLabel('Workflow')}
-
-      {navItem('board', 'Board view', '▤')}
-
       {/* Push settings to bottom */}
       <div style={{ flex: 1 }} />
 
@@ -235,11 +221,10 @@ export function Sidebar({
 // ── Crates section ────────────────────────────────────────────────────────
 // Nesting is via drag-and-drop only (dropping a crate row onto another one)
 // — the spec allows drag OR a "move into" picker, and drag alone keeps this
-// self-contained. Reuses the same native-HTML5-DnD approach BoardView uses
+// self-contained. Reuses the native-HTML5-DnD approach the old BoardView used
 // for its cross-column card drag (draggable + onDragStart/onDragOver/onDrop
 // state), just applied to nesting instead of board reassignment — there's
-// no shared drag-and-drop library to reuse here since BoardView's drag never
-// reorders or nests anything, it only reassigns board_id.
+// no shared drag-and-drop library to reuse here.
 function CratesSection({
   collapsed,
   active,

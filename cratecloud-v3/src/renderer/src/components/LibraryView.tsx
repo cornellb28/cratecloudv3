@@ -42,7 +42,7 @@ export function LibraryView(): React.JSX.Element {
   const activeTab = tabs.find((t) => t.id === activeTabId) ?? tabs[0]
 
   // Each tab remembers its own mode, under view_mode:tab:<id> in
-  // app_settings — the same mechanism BoardView uses per column, so no
+  // app_settings — the same mechanism the board columns used, so no
   // schema change and no new IPC. The id is stable across a board rename.
   const [mode, setMode] = useViewMode(`tab:${activeTab.id}`, activeTab.defaultViewMode)
 

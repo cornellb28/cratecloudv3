@@ -1,6 +1,7 @@
 import React from 'react'
 import { useLibraryStore } from '../store/useLibraryStore'
 import { Badge } from '@renderer/components/ui/badge'
+import { AccountButton } from '@renderer/components/AccountButton'
 import { useArtworkUrl } from '../hooks/useArtworkUrl'
 
 interface DashboardStats {
@@ -56,7 +57,7 @@ function computeStats(tracks: Track[], trackTags: Map<number, Tag[]>): Dashboard
   // Recently added
   const recentTracks = [...tracks]
     .sort((a, b) => b.added_at.localeCompare(a.added_at))
-    .slice(0, 8)
+    .slice(0, 50)
 
   return {
     total: tracks.length,
@@ -69,11 +70,20 @@ function computeStats(tracks: Track[], trackTags: Map<number, Tag[]>): Dashboard
     totalDurationHr,
     topTags,
     topGenres,
-    recentTracks,
+    recentTracks
   }
 }
 
-export function DashboardView(): React.JSX.Element {
+interface DashboardViewProps {
+  // Null until main has finished restoring any stored session. The header
+  // control renders nothing during that moment rather than flashing a
+  // "Sign in" button at someone who is already signed in.
+  auth: AuthState | null
+  // Opens Settings > Account, the one place sign-in lives.
+  onOpenAccount: () => void
+}
+
+export function DashboardView({ auth, onOpenAccount }: DashboardViewProps): React.JSX.Element {
   const { tracks, trackTags } = useLibraryStore()
   const stats = computeStats(tracks, trackTags)
 
@@ -87,14 +97,27 @@ export function DashboardView(): React.JSX.Element {
       margin: '0 auto',
     }}>
 
-      <h1 style={{
-        fontSize: '20px',
-        fontWeight: 500,
-        color: '#e8e8f0',
+      {/* Title left, account right — the same shape as the Settings
+          header, so switching between the two views doesn't shift the
+          furniture. */}
+      <div style={{
+        display: 'flex',
+        alignItems: 'center',
+        justifyContent: 'space-between',
+        gap: '16px',
         marginBottom: '24px',
       }}>
-        Library Overview
-      </h1>
+        <h1 style={{
+          fontSize: '20px',
+          fontWeight: 500,
+          color: '#e8e8f0',
+          margin: 0,
+        }}>
+          Library Overview
+        </h1>
+
+        <AccountButton auth={auth} onOpenAccount={onOpenAccount} />
+      </div>
 
       {/* ── Row 1 — Overview metrics ──────────────── */}
       <div style={{
@@ -187,14 +210,14 @@ export function DashboardView(): React.JSX.Element {
               padding: '14px',
               display: 'flex',
               alignItems: 'center',
-              gap: '12px',
+              gap: '12px'
             }}
           >
             <div style={{
               fontSize: '20px',
               fontWeight: 500,
               color: item.value > 0 ? item.color : '#1d9e75',
-              minWidth: '40px',
+              minWidth: '40px'
             }}>
               {item.value > 0 ? item.value.toLocaleString() : '✓'}
             </div>
@@ -328,7 +351,7 @@ export function DashboardView(): React.JSX.Element {
         background: '#13131b',
         border: '0.5px solid #1e1e2a',
         borderRadius: '10px',
-        overflow: 'hidden',
+        overflow: 'hidden'
       }}>
         {stats.recentTracks.map((track, i) => (
           <RecentTrackRow
@@ -466,11 +489,11 @@ function RecentTrackRow({
       <span style={{
         fontSize: '11px',
         color: '#333',
-        flexShrink: 0,
+        flexShrink: 0
       }}>
         {new Date(track.added_at).toLocaleDateString('en-US', {
           month: 'short',
-          day: 'numeric',
+          day: 'numeric'
         })}
       </span>
     </div>
