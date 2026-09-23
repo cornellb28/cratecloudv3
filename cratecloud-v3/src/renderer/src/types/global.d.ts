@@ -452,9 +452,12 @@ declare global {
   interface Entitlement {
     // TODO(stripe-webhook): only ever 'free' until the payments website's
     // Stripe webhook exists — it is the sole writer. Nothing in the desktop
-    // UI gates on this; the desktop app is free. 'sync' is the cloud sync /
-    // mobile subscription sold on the web.
-    plan: 'free' | 'sync'
+    // UI gates on this; the desktop app is free. The paid values are the
+    // cloud/mobile subscription sold on the web.
+    //
+    // PROVISIONAL names (2026-09-23): the tier lineup is not finalised.
+    // Branch on "not 'free'", never on a specific paid value.
+    plan: 'free' | 'cloud_mobile' | 'cloud_mobile_plus'
     status:
       | 'active'
       | 'trialing'

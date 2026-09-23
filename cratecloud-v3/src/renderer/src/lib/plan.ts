@@ -9,7 +9,7 @@
 // one place on the website's server.
 
 export interface PlanSummary {
-  // The tier name as the DJ should read it: 'Free' or 'Cloud Sync'.
+  // The tier name as the DJ should read it, e.g. 'Free' or 'Cloud + Mobile'.
   name: string
   // One supporting line under the name.
   tagline: string
@@ -30,11 +30,31 @@ const FREE_INCLUDES = [
   'Serato import and .crate export'
 ]
 
-const SYNC_INCLUDES = [
+const PAID_INCLUDES = [
   ...FREE_INCLUDES,
   'Tags, crates and boards synced across your machines',
   'Browse and tag from the mobile app'
 ]
+
+// ⚠ PROVISIONAL (2026-09-23). These names are placeholders while the tier
+// lineup is decided, and the DB check constraint carries the same warning.
+// Nothing here branches on a specific paid value — the only test made
+// anywhere is `plan === 'free'`, so a renamed or added tier changes this
+// table and nothing else.
+//
+// TODO(tiers): what Plus adds over Cloud + Mobile is not decided, so both
+// list the same things. Advertising a difference that does not exist yet
+// would be worse than listing none.
+const PAID_NAMES: Record<string, string> = {
+  cloud_mobile: 'Cloud + Mobile',
+  cloud_mobile_plus: 'Cloud + Mobile Plus'
+}
+
+// A value the website added after this desktop build shipped still has to
+// render as something: its own name, rather than a blank or a crash.
+function paidName(plan: string): string {
+  return PAID_NAMES[plan] ?? plan.replace(/_/g, ' ')
+}
 
 function formatDate(iso: string | null): string | null {
   if (!iso) return null
@@ -45,7 +65,7 @@ function formatDate(iso: string | null): string | null {
 
 // A subscription's health, in a DJ's words rather than Stripe's. Returns
 // null when there is nothing worth saying.
-function syncNote(e: Entitlement): string | null {
+function subscriptionNote(e: Entitlement): string | null {
   const end = formatDate(e.current_period_end)
 
   switch (e.status) {
@@ -88,10 +108,10 @@ export function describePlan(entitlement: Entitlement | null): PlanSummary {
   }
 
   return {
-    name: 'Cloud Sync',
+    name: paidName(entitlement.plan),
     tagline: 'Your library follows you between machines.',
-    note: syncNote(entitlement),
-    includes: SYNC_INCLUDES,
+    note: subscriptionNote(entitlement),
+    includes: PAID_INCLUDES,
     paid: true
   }
 }

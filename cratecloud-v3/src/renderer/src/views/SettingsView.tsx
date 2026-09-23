@@ -145,7 +145,9 @@ function UpgradeSection({
 }: {
   entitlement: Entitlement | null
 }): React.JSX.Element | null {
-  if (entitlement?.plan === 'sync') return null
+  // Any paid tier hides the pitch — deliberately not a list of paid plan
+  // names, which would need editing every time the lineup changes.
+  if (entitlement && entitlement.plan !== 'free') return null
 
   return (
     <div

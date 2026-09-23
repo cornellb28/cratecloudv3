@@ -40,9 +40,9 @@ test('free lists what the desktop app already includes', () => {
 
 test('a healthy subscription shows its renewal date', () => {
   const plan = describePlan(
-    entitlement({ plan: 'sync', current_period_end: '2027-03-01T00:00:00Z' })
+    entitlement({ plan: 'cloud_mobile', current_period_end: '2027-03-01T00:00:00Z' })
   )
-  expect(plan.name).toBe('Cloud Sync')
+  expect(plan.name).toBe('Cloud + Mobile')
   expect(plan.paid).toBe(true)
   expect(plan.note?.startsWith('Renews')).toBe(true)
 })
@@ -50,7 +50,7 @@ test('a healthy subscription shows its renewal date', () => {
 test('a subscription set to cancel says it ends, not that it renews', () => {
   const plan = describePlan(
     entitlement({
-      plan: 'sync',
+      plan: 'cloud_mobile',
       cancel_at_period_end: true,
       current_period_end: '2027-03-01T00:00:00Z'
     })
@@ -62,7 +62,11 @@ test('a subscription set to cancel says it ends, not that it renews', () => {
 // "you have been cut off" — the website keeps access to the period end.
 test('a failed payment says so and gives the deadline', () => {
   const plan = describePlan(
-    entitlement({ plan: 'sync', status: 'past_due', current_period_end: '2027-03-01T00:00:00Z' })
+    entitlement({
+      plan: 'cloud_mobile',
+      status: 'past_due',
+      current_period_end: '2027-03-01T00:00:00Z'
+    })
   )
   expect(plan.note).toContain('Payment failed')
   expect(plan.note).toContain('access until')
@@ -80,7 +84,7 @@ test('every other Stripe status gets plain words', () => {
   ]
   for (const [status, expected] of cases) {
     const plan = describePlan(
-      entitlement({ plan: 'sync', status, current_period_end: '2027-03-01T00:00:00Z' })
+      entitlement({ plan: 'cloud_mobile', status, current_period_end: '2027-03-01T00:00:00Z' })
     )
     expect(plan.note).toContain(expected)
   }
@@ -89,17 +93,35 @@ test('every other Stripe status gets plain words', () => {
 // A row with a junk timestamp should lose the date, not print "Invalid Date"
 // at a DJ.
 test('an unreadable period end degrades instead of leaking Invalid Date', () => {
-  const plan = describePlan(entitlement({ plan: 'sync', current_period_end: 'not-a-date' }))
+  const plan = describePlan(entitlement({ plan: 'cloud_mobile', current_period_end: 'not-a-date' }))
   expect(plan.note).toBeNull()
   const failed = describePlan(
-    entitlement({ plan: 'sync', status: 'past_due', current_period_end: 'not-a-date' })
+    entitlement({ plan: 'cloud_mobile', status: 'past_due', current_period_end: 'not-a-date' })
   )
   expect(failed.note).toBe('Payment failed')
 })
 
-test('sync includes everything free includes', () => {
+test('a paid tier includes everything free includes', () => {
   const free = describePlan(null)
-  const sync = describePlan(entitlement({ plan: 'sync' }))
-  for (const item of free.includes) expect(sync.includes).toContain(item)
-  expect(sync.includes.length).toBeGreaterThan(free.includes.length)
+  const paid = describePlan(entitlement({ plan: 'cloud_mobile' }))
+  for (const item of free.includes) expect(paid.includes).toContain(item)
+  expect(paid.includes.length).toBeGreaterThan(free.includes.length)
+})
+
+// The tier names are provisional and the website can start writing a new
+// one before a desktop build knows about it. An unknown paid plan has to
+// render as itself rather than blank — nothing gates on it, so showing it
+// is strictly better than hiding it.
+test('both provisional paid tiers have their own name', () => {
+  expect(describePlan(entitlement({ plan: 'cloud_mobile' })).name).toBe('Cloud + Mobile')
+  expect(describePlan(entitlement({ plan: 'cloud_mobile_plus' })).name).toBe('Cloud + Mobile Plus')
+})
+
+test('a paid plan this build has never heard of still renders', () => {
+  // Cast: the point is a value outside the union arriving at runtime from
+  // a DB row the website wrote.
+  const future = describePlan(entitlement({ plan: 'cloud_studio' as Entitlement['plan'] }))
+  expect(future.paid).toBe(true)
+  expect(future.name).toBe('cloud studio')
+  expect(future.includes.length).toBeGreaterThan(0)
 })

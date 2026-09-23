@@ -4,7 +4,15 @@ import { electronAPI } from '@electron-toolkit/preload'
 interface AuthStatePayload {
   configured: boolean
   user: { id: string; email: string | null } | null
-  entitlement: { plan: 'free' | 'sync'; status: string; seats: number } | null
+  // A hand-kept mirror of main/auth.ts's Entitlement, narrowed to what
+  // this payload's consumers read. It cannot import that type — preload
+  // compiles under tsconfig.node.json, which does not see the renderer's
+  // ambient globals — so a plan value added there has to be added here too.
+  entitlement: {
+    plan: 'free' | 'cloud_mobile' | 'cloud_mobile_plus'
+    status: string
+    seats: number
+  } | null
   persistent: boolean
   error?: string
   // Set only when the session arrived from a password-reset link.

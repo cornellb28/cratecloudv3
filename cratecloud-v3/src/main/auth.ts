@@ -30,11 +30,14 @@ export interface AuthUser {
   created_at: string | null
 }
 
-// Mirrors public.entitlements. 'sync' is the cloud sync / mobile
+// Mirrors public.entitlements. The paid values are the cloud/mobile
 // subscription sold from the payments website; the retired desktop tiers
 // are deliberately absent.
 export interface Entitlement {
-  plan: 'free' | 'sync'
+  // PROVISIONAL names (2026-09-23) — the tier lineup is not finalised and
+  // these will change. Nothing may branch on a specific paid value; "not
+  // 'free'" is the only durable test, and the name is for display.
+  plan: 'free' | 'cloud_mobile' | 'cloud_mobile_plus'
   // Every status Stripe can set, plus 'revoked' for a manual revocation.
   status:
     | 'active'
@@ -133,7 +136,8 @@ export function getAuthState(): AuthState {
 // cancel_at_period_end and the stripe_* columns are written only by the
 // payments website's Stripe webhook, running under the service role. Until
 // that exists every account reads plan 'free', which is correct — the
-// desktop app is free, and 'sync' is the cloud subscription sold on the web.
+// desktop app is free, and the paid tiers are the cloud/mobile subscription
+// sold on the web.
 export async function fetchEntitlement(): Promise<Entitlement> {
   if (!currentSession) return FALLBACK_ENTITLEMENT
   try {

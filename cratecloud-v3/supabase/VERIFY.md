@@ -97,6 +97,88 @@ UPDATE policy** — that is deliberate; only the service role writes.
 
 </details>
 
+## 1b. Apply the tier migration — **not yet applied**
+
+`supabase/migrations/20260923000000_entitlements_tiers.sql`, written
+2026-09-23. Additive and re-runnable; it changes exactly two things.
+
+```bash
+supabase db push    # or paste the file into the dashboard SQL editor,
+                    # the way 20260922000000 went in
+```
+
+**What it does**
+
+1. Adds `stripe_price_id text` — which price, not just which product, the
+   subscription is on. The webhook writes it; nothing reads it yet and it is
+   deliberately un-indexed (Stripe events carry the customer or subscription
+   id, never the price).
+2. Replaces the `plan` check with `('free', 'cloud_mobile',
+   'cloud_mobile_plus')`, remapping any `'sync'` row first so the constraint
+   cannot fail. No row can actually hold `'sync'` — the only writer of
+   `plan` is the future webhook — but the remap makes that assumption
+   harmless if it is ever wrong.
+
+**⚠ The two paid names are placeholders** and will change once the tier
+lineup is settled. Nothing branches on a specific paid value anywhere: the
+app tests `plan === 'free'` and reads the name for display only, so renaming
+a tier later is a constraint change plus one lookup table in
+`src/renderer/src/lib/plan.ts`.
+
+**Deliberately NOT changed**, though an earlier brief asked for them:
+
+- `status` keeps all nine Stripe values and `not null default 'active'`.
+  Narrowing it to five would make the webhook throw on a live event —
+  `unpaid`, `incomplete_expired` and `paused` are all real — and the event
+  most likely to trigger that is a card declining.
+- `purchased_at` and `stripe_checkout_session_id` stay. Unused, zero app-code
+  references, kept as the hook for a one-time desktop purchase.
+- RLS is untouched.
+
+**Check** in the SQL editor:
+
+```sql
+-- the new column exists, the constraint has the new vocabulary
+select column_name from information_schema.columns
+where table_schema = 'public' and table_name = 'entitlements'
+  and column_name = 'stripe_price_id';
+
+select pg_get_constraintdef(oid) from pg_constraint
+where conname = 'entitlements_plan_check';
+
+-- no row was left on a value the new constraint forbids
+select plan, count(*) from public.entitlements group by plan;
+```
+
+Expected: one row for `stripe_price_id`; a constraint reading
+`CHECK (plan = ANY (ARRAY['free'::text, 'cloud_mobile'::text,
+'cloud_mobile_plus'::text]))`; and every row on `free`.
+
+**Then check the app against it** — this is the step that cannot be done
+from a coding session, because it needs a real sign-in:
+
+1. `npm run dev`, sign in.
+2. Settings > Account. The profile card should read **Free**, with the
+   library list under it and no error.
+3. Click **Refresh** on the plan card. A toast should say *"Still on Free"* —
+   that round trip is `fetchEntitlement` reading the altered table, which is
+   what proves the new shape and the app agree.
+
+To see a paid tier render without a webhook, set one row by hand in the SQL
+editor (service role, via the dashboard) and hit Refresh again:
+
+```sql
+update public.entitlements set plan = 'cloud_mobile',
+  current_period_end = now() + interval '30 days'
+where user_id = '<your uuid>';
+-- put it back afterwards:
+-- update public.entitlements set plan = 'free', current_period_end = null
+-- where user_id = '<your uuid>';
+```
+
+Expected: the card reads **Cloud + Mobile**, with *"Renews <date>"* under it,
+and the Cloud Sync upgrade pitch disappears.
+
 ## 2. Email/password signup auto-provisions a free row
 
 1. `npm run dev`, enter an email + password, click **Create account**.
