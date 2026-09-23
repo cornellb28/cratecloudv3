@@ -1,4 +1,6 @@
 import React, { useEffect, useState } from 'react'
+import { toast } from 'sonner'
+import { AuthPanel } from './AuthPanel'
 import { Dialog, DialogContent } from '@renderer/components/ui/dialog'
 import { Button } from '@renderer/components/ui/button'
 import { ReconciliationModal } from './ReconciliationModal'
@@ -9,18 +11,89 @@ interface SettingsModalProps {
   onClose: () => void
   libraryRoots: LibraryRoot[]
   onRootsChanged: () => void
+  // Passed down rather than fetched here so there is one source of auth
+  // truth in the app (App.tsx's auth:changed subscription) instead of two
+  // that can disagree.
+  // Nullable: there is no auth gate, so Settings can be opened before the
+  // stored session has finished restoring, and stays open when signed out.
+  auth: AuthState | null
+  onAuthChanged: (state: AuthState) => void
 }
 
 const SERATO_OVERRIDE_KEY = 'serato_library_override'
 const SERATO_OVERWRITE_KEY = 'serato_overwrite_existing'
 
+// Surfaces `status` whenever it is not a plain 'active', so a subscription
+// that has gone past_due or been cancelled says so here rather than reading
+// as a healthy plan. Nothing in the desktop app gates on any of this — the
+// desktop app is free — but a DJ paying for cloud sync should be able to see
+// that their card needs attention without opening the website.
+// Where "Upgrade" points. Unset (the default today) renders the section as
+// "coming soon" with the button disabled, rather than opening a dead link —
+// the payments website does not exist yet. Set RENDERER_VITE_UPGRADE_URL in
+// .env to turn it into a real link; see .env.example.
+const UPGRADE_URL = import.meta.env.RENDERER_VITE_UPGRADE_URL
+
+// Advertising, not gating. Nothing in the desktop app is locked — this
+// describes the paid cloud surface, which is sold on the web and does not
+// exist yet. There is deliberately no LockedView/LockBadge anywhere.
+function UpgradeSection({
+  entitlement
+}: {
+  entitlement: Entitlement | null
+}): React.JSX.Element | null {
+  // Already subscribed — nothing to sell.
+  if (entitlement?.plan === 'sync') return null
+
+  return (
+    <div
+      style={{
+        marginTop: '14px',
+        padding: '12px',
+        background: '#16161f',
+        border: '0.5px solid #252535',
+        borderRadius: '6px'
+      }}
+    >
+      <div style={{ fontSize: '12px', color: '#c0c0d8', marginBottom: '4px' }}>Cloud Sync</div>
+      <div style={{ fontSize: '11px', color: '#555', lineHeight: 1.6, marginBottom: '10px' }}>
+        Keep your tags, crates and play history in sync across every machine — and browse them on
+        your phone when mobile lands. Your audio files stay where they are.
+      </div>
+
+      <Button
+        onClick={() => UPGRADE_URL && void window.api.openExternal(UPGRADE_URL)}
+        disabled={!UPGRADE_URL}
+        variant="outline"
+        size="sm"
+      >
+        {UPGRADE_URL ? 'See plans' : 'Coming soon'}
+      </Button>
+    </div>
+  )
+}
+
+function formatPlan(e: Entitlement): string {
+  const seats = e.seats > 1 ? ` · ${e.seats} seats` : ''
+  const trailing =
+    e.cancel_at_period_end && e.current_period_end
+      ? ` · ends ${new Date(e.current_period_end).toLocaleDateString()}`
+      : ''
+  const health = e.status === 'active' ? '' : ` · ${e.status.replace(/_/g, ' ')}`
+  return `${e.plan} plan${seats}${health}${trailing}`
+}
+
 export function SettingsModal({
   open,
   onClose,
   libraryRoots,
-  onRootsChanged
+  onRootsChanged,
+  auth,
+  onAuthChanged
 }: SettingsModalProps): React.JSX.Element {
   const [adding, setAdding] = useState(false)
+  const [rescanning, setRescanning] = useState(false)
+  const [signingOut, setSigningOut] = useState(false)
   const [reconcileOpen, setReconcileOpen] = useState(false)
   const [seratoImportPrompt, setSeratoImportPrompt] = useState<{
     folderPath: string
@@ -85,6 +158,50 @@ export function SettingsModal({
     await addRoot(folderPath, false)
   }
 
+  // Closes the modal on the way out: App.tsx swaps the whole shell for the
+  // login view, and leaving a dialog mounted over it would strand it there.
+  async function handleSignOut(): Promise<void> {
+    setSigningOut(true)
+    try {
+      const result = await window.api.auth.signOut()
+      onClose()
+      onAuthChanged(result.state)
+    } finally {
+      setSigningOut(false)
+    }
+  }
+
+  // Walks every registered root and reconciles the DB against what is
+  // actually on disk. Per-root progress rides the normal import:progress
+  // channel, so the BackgroundJobsPanel already shows it — this only needs
+  // to summarise the outcome once the whole pass is done.
+  async function handleRescan(): Promise<void> {
+    setRescanning(true)
+    try {
+      const result = await window.api.rescanLibrary()
+      if (!result.ok) {
+        toast.error('Rescan failed', { description: result.error })
+        return
+      }
+
+      const parts: string[] = []
+      if (result.imported) parts.push(`${result.imported} checked`)
+      if (result.relinked) parts.push(`${result.relinked} relinked`)
+      // Deliberately worded "missing", not "removed" — nothing was deleted.
+      if (result.swept) parts.push(`${result.swept} now missing`)
+      if (result.skippedRoots?.length) {
+        parts.push(`${result.skippedRoots.join(', ')} offline \u2014 skipped`)
+      }
+
+      toast.success(`Rescanned ${result.roots} folder${result.roots === 1 ? '' : 's'}`, {
+        description: parts.length > 0 ? parts.join(' \u00b7 ') : 'Nothing changed.'
+      })
+      onRootsChanged()
+    } finally {
+      setRescanning(false)
+    }
+  }
+
   async function handleRemove(id: number): Promise<void> {
     await window.api.roots.remove(id)
     onRootsChanged()
@@ -106,6 +223,79 @@ export function SettingsModal({
       >
         <div style={{ padding: '16px', borderBottom: '0.5px solid #1e1e2a' }}>
           <div style={{ fontSize: '15px', fontWeight: 500 }}>Settings</div>
+        </div>
+
+        <div style={{ padding: '16px', borderBottom: '0.5px solid #1e1e2a' }}>
+          <div
+            style={{
+              fontSize: '10px',
+              fontWeight: 500,
+              letterSpacing: '0.8px',
+              textTransform: 'uppercase',
+              color: '#444',
+              marginBottom: '10px'
+            }}
+          >
+            Account
+          </div>
+
+          {auth === null || auth.user === null ? (
+            <>
+              <div
+                style={{ fontSize: '11px', color: '#555', marginBottom: '12px', lineHeight: 1.5 }}
+              >
+                CrateCloud is free and works without an account. Sign in only if you want Cloud Sync
+                across your machines.
+              </div>
+              <AuthPanel
+                configured={auth?.configured ?? false}
+                persistent={auth?.persistent ?? false}
+                onSignedIn={onAuthChanged}
+              />
+            </>
+          ) : (
+            <>
+              <div
+                style={{
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'space-between',
+                  gap: '8px'
+                }}
+              >
+                <div style={{ minWidth: 0 }}>
+                  <div
+                    style={{
+                      fontSize: '12px',
+                      color: '#c0c0d8',
+                      whiteSpace: 'nowrap',
+                      overflow: 'hidden',
+                      textOverflow: 'ellipsis'
+                    }}
+                  >
+                    {auth.user.email ?? 'Signed in'}
+                  </div>
+                  {/* Shown for transparency, not to gate anything: the
+                      desktop app is free. Once the Stripe webhook exists
+                      this is where a purchased plan will show up. */}
+                  <div style={{ fontSize: '10px', color: '#444' }}>
+                    {auth.entitlement ? formatPlan(auth.entitlement) : 'plan unknown'}
+                  </div>
+                </div>
+
+                <Button
+                  onClick={() => void handleSignOut()}
+                  disabled={signingOut}
+                  variant="outline"
+                  size="sm"
+                >
+                  {signingOut ? 'Signing out…' : 'Sign out'}
+                </Button>
+              </div>
+
+              <UpgradeSection entitlement={auth.entitlement} />
+            </>
+          )}
         </div>
 
         <div style={{ padding: '16px' }}>
@@ -177,9 +367,21 @@ export function SettingsModal({
             </div>
           )}
 
-          <Button onClick={handleAddFolder} disabled={adding} variant="outline" size="sm">
-            {adding ? 'Adding...' : '+ Add library folder'}
-          </Button>
+          <div style={{ display: 'flex', gap: '8px', alignItems: 'center', flexWrap: 'wrap' }}>
+            <Button onClick={handleAddFolder} disabled={adding} variant="outline" size="sm">
+              {adding ? 'Adding...' : '+ Add library folder'}
+            </Button>
+
+            <Button
+              onClick={() => void handleRescan()}
+              disabled={rescanning || libraryRoots.length === 0}
+              variant="outline"
+              size="sm"
+              title="Check every library folder against what is on disk. Nothing is deleted — files that have gone are marked missing."
+            >
+              {rescanning ? 'Rescanning...' : '↺ Rescan Library'}
+            </Button>
+          </div>
         </div>
         <div style={{ padding: '16px', borderBottom: '0.5px solid #1e1e2a' }}>
           <Button

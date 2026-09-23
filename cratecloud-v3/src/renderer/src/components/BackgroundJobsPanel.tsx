@@ -12,23 +12,33 @@ function formatMB(bytes: number): string {
 }
 
 function importStatusLabel(p: ImportProgressPayload): string {
+  // A rescan and a first import run the same job, so the same row reports
+  // both — only the wording and the extra tallies differ.
+  const verb = p.rescan ? 'Rescanning' : 'Scanning'
   if (p.phase === 'counting') {
-    return `Scanning… ${p.found} tracks found — ${p.currentFolder}`
+    return `${verb}… ${p.found} tracks found — ${p.currentFolder}`
   }
   if (p.phase === 'parsing') {
-    const base = `${p.scanned} of ${p.total} · ${p.found} tracks found · Scanning ${p.currentFolder}`
+    const base = `${p.scanned} of ${p.total} · ${p.found} tracks found · ${verb} ${p.currentFolder}`
     return p.estimateSeconds !== undefined
       ? `${base} · ${formatEstimate(p.estimateSeconds)} left`
       : base
   }
+  if (p.phase === 'sweeping') {
+    return 'Checking for files that have gone…'
+  }
   const relinkedSuffix = p.relinked > 0 ? ` · ${p.relinked} relinked` : ''
+  // "missing", never "removed" — the sweep only ever sets a flag.
+  const sweptSuffix = p.swept > 0 ? ` · ${p.swept} now missing` : ''
+  const unchangedSuffix = p.rescan && p.unchanged > 0 ? ` · ${p.unchanged} unchanged` : ''
   if (p.phase === 'cancelled') {
     return `Cancelled — ${p.found} of ${p.total} imported${relinkedSuffix}`
   }
   if (p.phase === 'done') {
-    return `Done — ${p.found} of ${p.total} imported${relinkedSuffix}`
+    const settled = p.rescan ? 'checked' : 'imported'
+    return `Done — ${p.found} of ${p.total} ${settled}${unchangedSuffix}${relinkedSuffix}${sweptSuffix}`
   }
-  return 'Import error'
+  return p.rescan ? 'Rescan error' : 'Import error'
 }
 
 function moveStatusLabel(p: MoveProgressPayload): string {

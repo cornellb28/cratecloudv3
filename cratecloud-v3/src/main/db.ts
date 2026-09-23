@@ -567,14 +567,16 @@ const stmts = {
       year, remixer, composer, comment, label, grouping,
       bpm, key_camelot, key_full, camelot, openkey,
       duration_sec, duration_str, file_size_bytes, format,
-      artwork_path, analyzed_at, board_id, folder_id, client_uuid, partial_hash
+      artwork_path, analyzed_at, board_id, folder_id, client_uuid, partial_hash,
+      last_modified
      )
       VALUES (
        @filepath, @filename, @title, @artist, @album, @genre,
        @year, @remixer, @composer, @comment, @label, @grouping,
        @bpm, @key_camelot, @key_full, @camelot, @openkey,
        @duration_sec, @duration_str, @file_size_bytes, @format,
-       @artwork_path, @analyzed_at, @board_id, @folder_id, @client_uuid, @partial_hash
+       @artwork_path, @analyzed_at, @board_id, @folder_id, @client_uuid, @partial_hash,
+       @last_modified
       )
        ON CONFLICT(filepath) DO UPDATE SET
          title           = excluded.title,
@@ -589,6 +591,17 @@ const stmts = {
          last_seen_at    = datetime('now'),
          folder_id       = COALESCE(excluded.folder_id, folder_id),
          file_size_bytes = excluded.file_size_bytes,
+         -- Paired with file_size_bytes: together they are the "has this file
+         -- changed since we last read it" signal a rescan skips a tag read on.
+         -- Must be updated on the conflict path too, or a file edited in
+         -- place would keep its stale mtime and be skipped forever.
+         --
+         -- COALESCE so a caller with no stat to hand (db:insert-track takes
+         -- a caller-supplied row) cannot blank a value an earlier scan
+         -- established. Keeping the old mtime is safe: it only ever reads as
+         -- "unchanged" if the file on disk still carries that same mtime,
+         -- which is precisely when it IS unchanged.
+         last_modified   = COALESCE(excluded.last_modified, last_modified),
          -- Never clobber a stable id with a fresh mint — same COALESCE
          -- reasoning as folder_id just above.
          client_uuid     = COALESCE(client_uuid, excluded.client_uuid),
@@ -950,7 +963,8 @@ export function insertTrack(
     // means this mint is thrown away harmlessly on a re-scan of a file that
     // already has a row.
     client_uuid: track.client_uuid ?? randomUUID(),
-    partial_hash: track.partial_hash ?? null
+    partial_hash: track.partial_hash ?? null,
+    last_modified: track.last_modified ?? null
   }
   const result = stmts.insertTrack.run(safe)
 
@@ -1806,13 +1820,22 @@ export function getMissingTracks(rootId?: number): MissingTrackCandidate[] {
       )
       .all() as MissingTrackCandidate[]
   }
+  // LEFT JOIN, plus the folder_id IS NULL arm: a track can legitimately
+  // have no folder_id — importSingleFile always inserts with null (it
+  // doesn't resolve a root), and insertTrack's COALESCE deliberately lets
+  // that null persist until a folder import fills it in. An inner join
+  // dropped exactly those tracks from the reconcile pool, so a
+  // manually-imported track that went missing could never be relinked by
+  // the watcher's onFileAdded or by a folder import — it would insert as a
+  // duplicate instead. An unfiled missing track has no root to contradict,
+  // so offering it to every root's pool is the right call.
   return db
     .prepare(
       `SELECT t.id, t.filepath, t.filename, t.client_uuid, t.file_size_bytes, t.duration_sec,
               t.partial_hash
        FROM tracks t
-       JOIN folders f ON f.id = t.folder_id
-       WHERE t.missing = 1 AND f.root_folder_id = ?`
+       LEFT JOIN folders f ON f.id = t.folder_id
+       WHERE t.missing = 1 AND (f.root_folder_id = ? OR t.folder_id IS NULL)`
     )
     .all(rootId) as MissingTrackCandidate[]
 }
@@ -1848,6 +1871,134 @@ export function relinkTrack(trackId: number, newPath: string): RunResult {
     })
   folderEvents.emit('changed')
   return result
+}
+
+// ─── Rescan (mark-and-sweep) ───────────────────────────────
+// A rescan walks what is actually on disk and reconciles the DB against it.
+// The watcher only ever hears about changes made while the app was running,
+// so anything that happened with CrateCloud closed — a drive reorganised in
+// Finder, files deleted, a folder renamed — is invisible until a rescan
+// looks. This is the deliberate redundancy alongside the watcher, not a
+// legacy fallback.
+//
+// Nothing here deletes. The sweep's only verb is `missing = 1`, exactly as
+// the watcher's unlink path is, so a track that turns out to be gone keeps
+// its identity (client_uuid, partial_hash), its tags and its crate slots and
+// stays available to findReconcileMatch when the file resurfaces. Only the
+// explicit right-click action removes a track.
+
+export interface ScanIndexRow {
+  id: number
+  filepath: string
+  file_size_bytes: number | null
+  last_modified: number | null
+  missing: number
+}
+
+// Every track whose file lives under `pathPrefix`, which the caller passes
+// WITH its trailing separator ("/music/" not "/music") so a root named
+// "/music" cannot pick up "/music-archive/..." as well.
+//
+// substr(), not LIKE: a real library path is full of characters LIKE treats
+// as wildcards (% and _ both appear in track folders more often than you
+// would like), and getting the ESCAPE clause right for arbitrary user paths
+// is a worse trade than comparing a fixed-length prefix directly.
+//
+// Scoped by filepath rather than by folder_id on purpose — folder_id can be
+// null (importSingleFile never resolves one) and it mirrors where the track
+// is FILED, whereas the sweep needs to know where its bytes actually are.
+export function getTrackScanIndex(pathPrefix: string): ScanIndexRow[] {
+  return db
+    .prepare(
+      `SELECT id, filepath, file_size_bytes, last_modified, missing
+       FROM tracks
+       WHERE substr(filepath, 1, ?) = ?`
+    )
+    .all(pathPrefix.length, pathPrefix) as ScanIndexRow[]
+}
+
+// Chunked so a 50k-track sweep cannot blow SQLITE_MAX_VARIABLE_NUMBER, and
+// wrapped in one transaction so a rescan's sweep is all-or-nothing rather
+// than leaving the library half-marked if it throws partway.
+const ID_CHUNK = 500
+
+function runChunkedById(ids: number[], sql: (placeholders: string) => string): number {
+  if (ids.length === 0) return 0
+  let changed = 0
+  const run = db.transaction(() => {
+    for (let i = 0; i < ids.length; i += ID_CHUNK) {
+      const chunk = ids.slice(i, i + ID_CHUNK)
+      const stmt = db.prepare(sql(chunk.map(() => '?').join(',')))
+      changed += stmt.run(...chunk).changes
+    }
+  })
+  run()
+  return changed
+}
+
+// The sweep half of the rescan: these tracks were in the DB under the
+// scanned prefix but the walk never saw their files.
+export function markTracksMissingByIds(ids: number[]): number {
+  const changed = runChunkedById(
+    ids,
+    (placeholders) =>
+      `UPDATE tracks SET missing = 1, updated_at = datetime('now')
+       WHERE id IN (${placeholders}) AND missing = 0`
+  )
+  if (changed > 0) folderEvents.emit('changed')
+  return changed
+}
+
+// The mark half: the walk found these files exactly where the DB expected
+// them, unchanged. Stamping last_seen_at is what makes "when did CrateCloud
+// last lay eyes on this file" meaningful, and clearing `missing` is what
+// makes a rescan the recovery path for a track the watcher wrongly flagged
+// (a drive that was briefly unmounted, an unlink event with no matching add).
+export function markTracksSeenByIds(ids: number[]): number {
+  const changed = runChunkedById(
+    ids,
+    (placeholders) =>
+      `UPDATE tracks SET missing = 0, last_seen_at = datetime('now')
+       WHERE id IN (${placeholders})`
+  )
+  if (changed > 0) folderEvents.emit('changed')
+  return changed
+}
+
+// Folder rows under a root, for the folder half of the sweep. Includes
+// already-missing ones so a rescan can revive a directory that came back
+// (ensureFolderTree clears `missing` for every dir the walk did see).
+export function getFolderScanIndex(
+  rootId: number
+): { id: number; relative_path: string | null; missing: number }[] {
+  return db
+    .prepare(
+      `SELECT id, relative_path, missing FROM folders
+       WHERE root_folder_id = ? AND relative_path IS NOT NULL`
+    )
+    .all(rootId) as { id: number; relative_path: string | null; missing: number }[]
+}
+
+// Folders only — deliberately NOT markFolderMissing, which also sweeps every
+// track filed under the folder. During a rescan the tracks have already been
+// judged individually against what the walk actually found, and a file can
+// legitimately still be on disk inside a directory the DB has stale (a
+// case-only rename, say). Letting the folder sweep overrule the file sweep
+// would mark live tracks missing.
+export function markFoldersMissingByIds(ids: number[]): number {
+  const changed = runChunkedById(
+    ids,
+    (placeholders) => `UPDATE folders SET missing = 1 WHERE id IN (${placeholders}) AND missing = 0`
+  )
+  if (changed > 0) folderEvents.emit('changed')
+  return changed
+}
+
+// Epoch seconds, matching library_roots.created_at's strftime('%s','now').
+export function setRootLastScannedAt(rootId: number): void {
+  db.prepare(`UPDATE library_roots SET last_scanned_at = strftime('%s','now') WHERE id = ?`).run(
+    rootId
+  )
 }
 
 // ─── Serato import ─────────────────────────────────────────

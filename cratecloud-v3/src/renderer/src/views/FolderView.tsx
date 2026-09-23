@@ -188,9 +188,15 @@ export function FolderView({ libraryRoots }: FolderViewProps): React.JSX.Element
 
   // Import everything under the folder currently being browsed — recurses into
   // every subfolder, same scanner the Toolbar's "+ Import folder" button uses
+  // rescan = true: this button is a re-scan of a folder already in the
+  // library, so it sweeps as well as imports — tracks under this folder
+  // whose files are no longer on disk get marked missing (never deleted).
+  // The two genuine first-import paths (the folder dialog and the Finder
+  // drop in App.tsx) leave the flag off, since walking one folder says
+  // nothing about what should still exist outside it.
   async function handleImportThisFolder(folderPath: string): Promise<void> {
     setAnalyzing(true)
-    const result = await window.api.importFolder(folderPath)
+    const result = await window.api.importFolder(folderPath, undefined, true)
     if (result.ok) {
       const all = await window.api.db.allTracks()
       setTracks(all)

@@ -8,3 +8,9 @@ sidecar/.venv/
 tests/.probe
 test-results
 playwright-report
+
+# Local secrets. .env holds the Supabase URL + anon key; never commit it.
+# .env.example is the committed template — keep it in sync, values blank.
+.env
+.env.*
+!.env.example

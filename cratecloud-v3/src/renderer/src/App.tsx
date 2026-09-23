@@ -20,6 +20,7 @@ import { PlayerBar } from './components/PlayerBar'
 import { TagsCloudView } from './views/TagsCloudView'
 import { TagPageView } from './views/TagPageView'
 import { CrateView } from './views/CrateView'
+import { PasswordResetDialog } from './components/PasswordResetDialog'
 
 // type View = 'dashboard' | 'library' | 'board' | 'genre' | 'artist' | 'folders' | 'crates' | 'settings'
 
@@ -48,6 +49,13 @@ function App(): React.JSX.Element {
     setCrateTrackIds
   } = useLibraryStore()
   const [activeView, setActiveView] = useState<View>('dashboard')
+  // null = still checking. Main restores any stored session off the critical
+  // path of window creation and pushes the answer over auth:changed, so
+  // there is a real moment where we do not yet know — rendering the login
+  // form during it would flash a form at a DJ who is already signed in.
+  const [auth, setAuth] = useState<AuthState | null>(null)
+  // Opened when a cratecloud:// recovery link arrives from a reset email.
+  const [resetOpen, setResetOpen] = useState(false)
   // Add library roots to app state
   const [libraryRoots, setLibraryRoots] = useState<LibraryRoot[]>([])
   const [settingsOpen, setSettingsOpen] = useState(false)
@@ -97,6 +105,33 @@ function App(): React.JSX.Element {
     return () => {
       window.removeEventListener('dragover', preventDefault)
       window.removeEventListener('drop', preventDefault)
+    }
+  }, [])
+
+  // ── Auth ────────────────────────
+  // One initial pull (covers the case where main finished restoring before
+  // this effect ran and the push was missed) plus the subscription for
+  // everything after: launch restore, the Google callback, and sign-out.
+  useEffect(() => {
+    let cancelled = false
+    window.api.auth.state().then((state) => {
+      if (!cancelled) setAuth(state)
+    })
+
+    window.api.onAuthChanged((state) => {
+      setAuth(state)
+      // Only a failed OAuth round trip carries `error` — it has no invoke()
+      // call left waiting, so this is the only place it can be shown.
+      if (state.error) toast.error('Sign-in failed', { description: state.error })
+      // A password-reset link, as opposed to an ordinary sign-in. Without
+      // this the DJ lands back in the app signed in with the password they
+      // just said they had forgotten, and is never asked to change it.
+      if (state.recovery) setResetOpen(true)
+    })
+
+    return () => {
+      cancelled = true
+      window.api.offAuthChanged()
     }
   }, [])
 
@@ -540,6 +575,12 @@ function App(): React.JSX.Element {
     setPendingFolderNav(folder.id)
   }
 
+  // No auth gate. The desktop app is free and entirely local, so it opens
+  // straight into the library whether or not anyone is signed in — signing
+  // in is reached from Settings and only matters for the paid cloud surface.
+  // `auth` stays nullable while the stored session is being restored; every
+  // consumer below treats null as "not signed in yet", which is also what it
+  // means once that settles.
   return (
     <div
       style={{
@@ -709,7 +750,10 @@ function App(): React.JSX.Element {
         onClose={() => setSettingsOpen(false)}
         libraryRoots={libraryRoots}
         onRootsChanged={reloadRoots}
+        auth={auth}
+        onAuthChanged={setAuth}
       />
+      <PasswordResetDialog open={resetOpen} onClose={() => setResetOpen(false)} />
       <ReconciliationModal open={reconcileOpen} onClose={() => setReconcileOpen(false)} />
       <SeratoImportConfirmDialog
         open={seratoImportPrompt !== null}

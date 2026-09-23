@@ -37,7 +37,8 @@ declare global {
 
       importFolder: (
         folderPath: string,
-        importSeratoData?: boolean
+        importSeratoData?: boolean,
+        rescan?: boolean
       ) => Promise<{
         ok: boolean
         imported?: number
@@ -47,6 +48,42 @@ declare global {
         cancelled?: boolean
         message?: string
         error?: string
+        unchanged?: number
+        relinked?: number
+        swept?: number
+      }>
+
+      auth: {
+        state: () => Promise<AuthState>
+        signIn: (email: string, password: string) => Promise<AuthActionResult>
+        signUp: (email: string, password: string) => Promise<SignUpResult>
+        resendConfirmation: (email: string) => Promise<{ ok: boolean; error?: string }>
+        updatePassword: (password: string) => Promise<AuthActionResult>
+        signOut: () => Promise<{ ok: boolean; state: AuthState }>
+        resetPassword: (email: string) => Promise<{ ok: boolean; error?: string }>
+        google: () => Promise<{ ok: boolean; error?: string }>
+        refreshEntitlement: () => Promise<{ ok: boolean; entitlement: Entitlement | null }>
+      }
+
+      onAuthChanged: (
+        cb: (state: AuthState & { error?: string; recovery?: boolean }) => void
+      ) => void
+      offAuthChanged: () => void
+
+      openExternal: (url: string) => Promise<{ ok: boolean; error?: string }>
+
+      rescanLibrary: () => Promise<{
+        ok: boolean
+        error?: string
+        roots?: number
+        // Roots whose volume was not mounted — skipped, not failed.
+        skippedRoots?: string[]
+        imported?: number
+        unchanged?: number
+        relinked?: number
+        // Tracks marked missing. Never a deletion.
+        swept?: number
+        total?: number
       }>
 
       cancelImport: (jobId: string) => Promise<{ ok: boolean; error?: string }>
@@ -412,9 +449,55 @@ declare global {
     client_uuid?: string | null
   }
 
+  interface Entitlement {
+    // TODO(stripe-webhook): only ever 'free' until the payments website's
+    // Stripe webhook exists — it is the sole writer. Nothing in the desktop
+    // UI gates on this; the desktop app is free. 'sync' is the cloud sync /
+    // mobile subscription sold on the web.
+    plan: 'free' | 'sync'
+    status:
+      | 'active'
+      | 'trialing'
+      | 'past_due'
+      | 'canceled'
+      | 'unpaid'
+      | 'incomplete'
+      | 'incomplete_expired'
+      | 'paused'
+      | 'revoked'
+    current_period_end: string | null
+    cancel_at_period_end: boolean
+    seats: number
+  }
+
+  interface AuthUser {
+    id: string
+    email: string | null
+  }
+
+  interface AuthState {
+    // False when MAIN_VITE_SUPABASE_* are absent — the login view shows
+    // setup instructions instead of a form it knows will fail.
+    configured: boolean
+    user: AuthUser | null
+    entitlement: Entitlement | null
+    // False when safeStorage is unavailable (typically a Linux box with no
+    // keyring): this session will not survive a quit.
+    persistent: boolean
+  }
+
+  type AuthActionResult = { ok: true; state: AuthState } | { ok: false; error: string }
+
+  // Signup has three outcomes, not two: the middle one is "account created,
+  // now go confirm your email", which is neither a session nor a failure.
+  type SignUpResult =
+    | { ok: true; needsConfirmation: false; state: AuthState }
+    | { ok: true; needsConfirmation: true; email: string }
+    | { ok: false; error: string }
+
   interface ImportProgressPayload {
     jobId: string
-    phase: 'counting' | 'parsing' | 'done' | 'cancelled' | 'error'
+    phase: 'counting' | 'parsing' | 'sweeping' | 'done' | 'cancelled' | 'error'
     scanned: number
     total: number
     found: number
@@ -423,6 +506,9 @@ declare global {
     estimateSeconds?: number
     folderPath: string
     relinked: number
+    unchanged: number
+    swept: number
+    rescan: boolean
   }
 
   interface FolderItem {

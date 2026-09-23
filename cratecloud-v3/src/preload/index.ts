@@ -1,9 +1,19 @@
 import { contextBridge, ipcRenderer, webUtils } from 'electron'
 import { electronAPI } from '@electron-toolkit/preload'
 
+interface AuthStatePayload {
+  configured: boolean
+  user: { id: string; email: string | null } | null
+  entitlement: { plan: 'free' | 'sync'; status: string; seats: number } | null
+  persistent: boolean
+  error?: string
+  // Set only when the session arrived from a password-reset link.
+  recovery?: boolean
+}
+
 interface ImportProgressPayload {
   jobId: string
-  phase: 'counting' | 'parsing' | 'done' | 'cancelled' | 'error'
+  phase: 'counting' | 'parsing' | 'sweeping' | 'done' | 'cancelled' | 'error'
   scanned: number
   total: number
   found: number
@@ -140,8 +150,42 @@ const api = {
   onEditTagsProgress: (cb: (p: EditTagsProgressPayload) => void) =>
     ipcRenderer.on('edit-tags:progress', (_e, p) => cb(p)),
   offEditTagsProgress: () => ipcRenderer.removeAllListeners('edit-tags:progress'),
-  importFolder: (folderPath: string, importSeratoData?: boolean) =>
-    ipcRenderer.invoke('library:import-folder', folderPath, importSeratoData),
+  importFolder: (folderPath: string, importSeratoData?: boolean, rescan?: boolean) =>
+    ipcRenderer.invoke('library:import-folder', folderPath, importSeratoData, rescan),
+  // Library-wide rescan: walks every registered root and reconciles the DB
+  // against what is actually on disk. Reports on the same import:progress
+  // channel as a folder import, one job per root.
+  rescanLibrary: () => ipcRenderer.invoke('library:rescan'),
+
+  // Opens a web page in the system browser. Main validates the scheme.
+  openExternal: (url: string) => ipcRenderer.invoke('shell:open-external', url),
+
+  // ── Auth ────────────────────────────────────────────────────────────
+  // No token crosses this bridge. Main holds the session and makes every
+  // authenticated call; the renderer only ever learns who is signed in and
+  // what they are entitled to.
+  auth: {
+    state: () => ipcRenderer.invoke('auth:state'),
+    signIn: (email: string, password: string) =>
+      ipcRenderer.invoke('auth:sign-in', email, password),
+    signUp: (email: string, password: string) =>
+      ipcRenderer.invoke('auth:sign-up', email, password),
+    resendConfirmation: (email: string) => ipcRenderer.invoke('auth:resend-confirmation', email),
+    updatePassword: (password: string) => ipcRenderer.invoke('auth:update-password', password),
+    signOut: () => ipcRenderer.invoke('auth:sign-out'),
+    resetPassword: (email: string) => ipcRenderer.invoke('auth:reset-password', email),
+    // Resolves when the system browser opens, not when sign-in completes —
+    // the result arrives on onAuthChanged.
+    google: () => ipcRenderer.invoke('auth:google'),
+    refreshEntitlement: () => ipcRenderer.invoke('auth:refresh-entitlement')
+  },
+
+  // Pushed on launch-restore, on the OAuth callback, and on sign-out. The
+  // payload carries `error` only for a failed OAuth round trip, which has
+  // no invoke() call left waiting to receive it.
+  onAuthChanged: (cb: (state: AuthStatePayload) => void) =>
+    ipcRenderer.on('auth:changed', (_e, s) => cb(s)),
+  offAuthChanged: () => ipcRenderer.removeAllListeners('auth:changed'),
   cancelImport: (jobId: string) => ipcRenderer.invoke('import:cancel', jobId),
   resumeImport: (jobId: string) => ipcRenderer.invoke('import:resume', jobId),
   onImportProgress: (cb: (p: ImportProgressPayload) => void) =>

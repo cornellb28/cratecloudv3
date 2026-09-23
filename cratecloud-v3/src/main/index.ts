@@ -1,12 +1,30 @@
 import { app, shell, BrowserWindow, ipcMain, dialog, nativeImage, protocol } from 'electron'
-import { join, extname, basename, dirname, relative } from 'path'
+import { join, extname, basename, dirname, relative, resolve } from 'path'
 import { electronApp, optimizer, is } from '@electron-toolkit/utils'
 import icon from '../../resources/icon.png?asset'
 import { execSync } from 'child_process'
 import { randomUUID } from 'crypto'
 import { rename, stat, unlink, mkdir, readdir, readFile, open } from 'fs/promises'
-import { createReadStream, createWriteStream } from 'fs'
+import { createReadStream, createWriteStream, type Stats } from 'fs'
 import { startWatcher, stopWatcher, stopAllWatchers, setWatcherCallbacks } from './libraryWatcher'
+import { isUnchanged, normalizeMtime, withTrailingSep } from './rescan'
+import {
+  CALLBACK_PROTOCOL,
+  getAuthState,
+  signIn,
+  signUp,
+  signOut,
+  requestPasswordReset,
+  startGoogleSignIn,
+  completeOAuthCallback,
+  restoreSession,
+  refreshEntitlement,
+  resendConfirmation,
+  updatePassword,
+  setAuthStateListener,
+  stopSessionRefresh
+} from './auth'
+import { sweepTracks, sweepFolders } from './rescanSweep'
 import {
   storeArtwork,
   artworkPathFor,
@@ -21,6 +39,9 @@ import {
   getTracksByIds,
   updateTrackMeta,
   markTrackMissing,
+  getTrackScanIndex,
+  markTracksSeenByIds,
+  setRootLastScannedAt,
   deleteTrack,
   getAllTags,
   getMostUsedTags,
@@ -125,7 +146,7 @@ const AUDIO_MIME: Record<string, string> = {
 // cancelled/interrupted job can be resumed after an app restart. This was proposed and
 // explicitly deferred — needs a schema change and separate approval. As-is, resume only
 // works within the same running app session (job state lives in `jobs` below).
-type ImportPhase = 'counting' | 'parsing' | 'done' | 'cancelled' | 'error'
+type ImportPhase = 'counting' | 'parsing' | 'sweeping' | 'done' | 'cancelled' | 'error'
 
 interface ImportProgressPayload {
   jobId: string
@@ -144,6 +165,16 @@ interface ImportProgressPayload {
   // Of `found`, how many were relinked to an existing (missing) track row
   // instead of inserted as new — see findReconcileMatch.
   relinked: number
+  // Files the walk found exactly where the DB already had them, with an
+  // unchanged size and mtime — no tag read, just a last_seen_at stamp.
+  unchanged: number
+  // Rows the sweep marked missing because the walk never saw their file.
+  // Only ever non-zero on a rescan (job.rescan), and never a deletion.
+  swept: number
+  // True when this run is a rescan rather than a first import — the renderer
+  // words the progress line differently ("Rescanning" vs "Importing") and
+  // only a rescan can report a non-zero `swept`.
+  rescan: boolean
 }
 
 interface ImportJob {
@@ -158,7 +189,13 @@ interface ImportJob {
   found: number
   skipped: number
   relinked: number
+  unchanged: number
+  swept: number
   total: number
+  // Set by the rescan entry points only. Turns on the sweep at the end of
+  // Pass 2 — a plain import must never sweep, because it walks one folder
+  // and knows nothing about what is or isn't on disk outside it.
+  rescan: boolean
   cancelRequested: boolean
   status: ImportPhase
   batchThroughputs: number[] // files/sec, rolling window — used for the ETA
@@ -380,7 +417,10 @@ function buildProgressPayload(
     skipped: job.skipped,
     currentFolder,
     folderPath: job.folderPath,
-    relinked: job.relinked
+    relinked: job.relinked,
+    unchanged: job.unchanged,
+    swept: job.swept,
+    rescan: job.rescan
   }
 
   // Rolling-window throughput, not average-since-start — the first files are
@@ -446,7 +486,10 @@ async function scanFolderPaths(
         skipped: 0,
         currentFolder: dir,
         folderPath: job.folderPath,
-        relinked: job.relinked
+        relinked: job.relinked,
+        unchanged: job.unchanged,
+        swept: job.swept,
+        rescan: job.rescan
       })
     }
   }
@@ -483,7 +526,8 @@ async function countAudioFiles(folderPath: string): Promise<number> {
 function buildTrackData(
   filepath: string,
   result: AnalysisResult,
-  folderId: number | null = null
+  folderId: number | null = null,
+  lastModified: number | null = null
 ): {
   filepath: string
   filename: string
@@ -508,6 +552,7 @@ function buildTrackData(
   folder_id: number | null
   file_size_bytes: number | null
   client_uuid: string | null
+  last_modified: number | null
 } {
   return {
     filepath,
@@ -536,7 +581,12 @@ function buildTrackData(
     // wrote one, if present. insertTrack mints a fresh one when this is
     // null; reconcile matches on it first when it isn't (see
     // findReconcileMatch).
-    client_uuid: result.client_uuid ?? null
+    client_uuid: result.client_uuid ?? null,
+    // Paired with file_size_bytes as the rescan's "has this changed since we
+    // last read it" signal. Null when the caller had no stat to hand (the
+    // watcher's single-file paths) — a null simply means the next rescan
+    // re-reads this file once and fills it in.
+    last_modified: lastModified
   }
 }
 
@@ -1071,13 +1121,17 @@ async function runFolderImport(
   event: Electron.IpcMainInvokeEvent,
   folderPath: string,
   jobId?: string,
-  importSeratoData = false
+  importSeratoData = false,
+  rescan = false
 ): Promise<{
   imported: number
   failed: number
   total: number
   jobId: string
   cancelled?: boolean
+  unchanged?: number
+  relinked?: number
+  swept?: number
 }> {
   // Pause watcher for this root during import to avoid EMFILE
   const roots = getAllRoots()
@@ -1108,7 +1162,10 @@ async function runFolderImport(
           found: 0,
           skipped: 0,
           relinked: 0,
+          unchanged: 0,
+          swept: 0,
           total: 0,
+          rescan,
           cancelRequested: false,
           status: 'counting',
           batchThroughputs: [],
@@ -1154,6 +1211,11 @@ async function runFolderImport(
     job.total = job.filepaths.length
   }
 
+  // Doubles as the sweep's outermost safety guard: a walk that found no
+  // audio at all is far more likely to be an unmounted drive or a revoked
+  // folder permission than a library the DJ genuinely emptied, so a rescan
+  // that comes back with nothing changes nothing rather than marking every
+  // track under the root missing.
   if (job.total === 0) {
     job.status = 'done'
     emit(buildProgressPayload(job, 'done'))
@@ -1181,6 +1243,24 @@ async function runFolderImport(
   // scoped missing-pool match could mean here; skip reconcile entirely
   // rather than fall back to an unscoped, whole-library search.
   const reconcilePool = matchingRoot ? getMissingTracks(matchingRoot.id) : []
+
+  // Every track the DB already has under the subtree being walked, keyed by
+  // filepath. Serves both halves of the rescan:
+  //   mark  — a walked file whose row here has the same size and mtime is
+  //           unchanged, so Pass 2 skips the tag read entirely and just
+  //           stamps it seen.
+  //   sweep — whatever is left in `unseen` once the walk is done was in the
+  //           DB but not on disk, so it gets marked missing (never deleted).
+  // Fetched once per job rather than one lookup per file: a single indexed
+  // prefix scan beats N point queries, and Pass 2 is already the hot loop.
+  const scanPrefix = withTrailingSep(folderPath)
+  const scanIndex = new Map(getTrackScanIndex(scanPrefix).map((row) => [row.filepath, row]))
+  // Every path the walk actually laid eyes on. The sweep marks whatever is
+  // in the DB under this prefix but NOT in here.
+  const seen = new Set<string>()
+  // Rows confirmed present and unchanged, stamped in one batch at the end
+  // instead of one UPDATE per file.
+  const seenUnchangedIds: number[] = []
 
   // Pass 2 (parse) — fast tag read + insert, batched into ~200-row transactions
   job.status = 'parsing'
@@ -1237,6 +1317,32 @@ async function runFolderImport(
       await Promise.all(
         chunk.map(async (filepath) => {
           try {
+            seen.add(filepath)
+
+            // One stat is orders of magnitude cheaper than readTagsFast (a
+            // sidecar round trip per file), so it is worth paying on every
+            // file to skip the expensive read on the ones that have not
+            // changed. A stat failure is not fatal here: fall through to
+            // the normal read path and let that report the real problem.
+            let info: Stats | null = null
+            try {
+              info = await stat(filepath)
+            } catch {
+              info = null
+            }
+
+            const known = scanIndex.get(filepath)
+            if (isUnchanged(known, info)) {
+              // Same bytes, same mtime, same place — nothing to re-read.
+              // Still counts as scanned and found so the progress bar and
+              // the final tally stay honest about how much was covered.
+              seenUnchangedIds.push(known!.id)
+              job.scanned++
+              job.found++
+              job.unchanged++
+              return
+            }
+
             const result = await readTagsFast(filepath)
             job.scanned++
             if (!result.success) {
@@ -1244,7 +1350,12 @@ async function runFolderImport(
               return
             }
             parsedRows.push({
-              data: buildTrackData(filepath, result, resolveFolderId(filepath)),
+              data: buildTrackData(
+                filepath,
+                result,
+                resolveFolderId(filepath),
+                info ? normalizeMtime(info.mtimeMs) : null
+              ),
               artwork: result.artwork_base64
             })
           } catch {
@@ -1282,6 +1393,10 @@ async function runFolderImport(
       }
       relinkTrack(match.id, row.data.filepath)
       reconcilePool.splice(reconcilePool.indexOf(match), 1)
+      // The row now lives at the new path, which the walk did see, so it is
+      // already in `seen` and the sweep will leave it alone. Nothing to undo
+      // for the old path either: the sweep works off the scan index's
+      // filepaths, and relinkTrack has already moved this row off that one.
       job.found++
       job.relinked++
       // The existing row's artwork_hash survives untouched — a relink is
@@ -1334,6 +1449,53 @@ async function runFolderImport(
     await new Promise((resolve) => setImmediate(resolve))
   }
 
+  // Batched rather than one UPDATE per file — on a rescan where nothing has
+  // changed this is the only write the whole job makes.
+  if (seenUnchangedIds.length > 0) markTracksSeenByIds(seenUnchangedIds)
+
+  // ── Sweep ────────────────────────────────────────────────────────────
+  // Only on an explicit rescan. A plain import walks one folder and knows
+  // nothing about what is or isn't on disk elsewhere, so it has no standing
+  // to call anything missing.
+  if (job.rescan) {
+    job.status = 'sweeping'
+    emit(buildProgressPayload(job, 'sweeping'))
+
+    // Guard against the walk having been cut short by the volume going away
+    // mid-scan — an unplugged drive looks exactly like "every file was
+    // deleted" from the walk's point of view, and while marking missing is
+    // recoverable, flagging a whole library is a miserable thing to hand a
+    // DJ. A walk that found nothing at all never even gets here: the
+    // `job.total === 0` early return above fires first.
+    let rootStillThere = true
+    try {
+      await stat(folderPath)
+    } catch {
+      rootStillThere = false
+    }
+
+    if (!rootStillThere) {
+      console.warn(`[rescan] skipping sweep — ${folderPath} is no longer readable`)
+    } else {
+      // Re-read the index rather than reusing the one Pass 2 started with:
+      // relinks and inserts during this job have moved rows onto new paths,
+      // and the sweep must judge the library as it stands now.
+      job.swept = sweepTracks(scanPrefix, seen).swept
+
+      // job.relativeDirs is already root-relative (remapped in Pass 1),
+      // which is the frame sweepFolders compares in.
+      if (matchingRoot) {
+        sweepFolders(matchingRoot.id, matchingRoot.path, folderPath, new Set(job.relativeDirs))
+        setRootLastScannedAt(matchingRoot.id)
+      }
+
+      console.log(
+        `[rescan] ${folderPath}: ${job.unchanged} unchanged, ${job.relinked} relinked, ` +
+          `${job.swept} marked missing`
+      )
+    }
+  }
+
   job.status = 'done'
   emit(buildProgressPayload(job, 'done'))
   jobs.delete(id)
@@ -1355,7 +1517,15 @@ async function runFolderImport(
     }
   }
 
-  return { imported: job.found, failed: job.skipped, total: job.total, jobId: id }
+  return {
+    imported: job.found,
+    failed: job.skipped,
+    total: job.total,
+    jobId: id,
+    unchanged: job.unchanged,
+    relinked: job.relinked,
+    swept: job.swept
+  }
 }
 
 type RegisterRootResult =
@@ -1505,6 +1675,74 @@ function createWindow(): void {
   }
 }
 
+// ── Deep-link registration for the OAuth callback ────────────────────────
+// Must happen before whenReady: on Windows/Linux the second launch that the
+// browser triggers has to be able to hand its URL to the first instance,
+// and that only works if the lock is already held.
+//
+// requestSingleInstanceLock also fixes a real problem beyond auth — two
+// copies of the app would open two better-sqlite3 handles on the same
+// library.db and two chokidar watchers per root.
+const gotSingleInstanceLock = app.requestSingleInstanceLock()
+if (!gotSingleInstanceLock) {
+  app.quit()
+} else {
+  // Windows/Linux deliver the cratecloud:// URL as an argv entry on the
+  // second instance, not as an event — so it has to be dug out of the
+  // command line. macOS uses 'open-url' instead (registered below).
+  app.on('second-instance', (_event, argv) => {
+    const url = argv.find((arg) => arg.startsWith(`${CALLBACK_PROTOCOL}://`))
+    if (url) void handleAuthCallback(url)
+
+    // Whether or not it was a deep link, the DJ just tried to open the app:
+    // surface the window they already have.
+    if (mainWindow) {
+      if (mainWindow.isMinimized()) mainWindow.restore()
+      mainWindow.focus()
+    }
+  })
+}
+
+// macOS. Registered at module scope, not inside whenReady, because a cold
+// start triggered by clicking the callback link can fire this before the app
+// is ready — handleAuthCallback tolerates a not-yet-existing window.
+app.on('open-url', (event, url) => {
+  event.preventDefault()
+  void handleAuthCallback(url)
+})
+
+// In dev the executable is Electron itself, so the OS has to be told which
+// binary and which script to hand cratecloud:// back to; packaged builds
+// need neither argument. Without this branch, deep links silently never
+// arrive during development, which looks exactly like broken OAuth code.
+if (process.defaultApp) {
+  if (process.argv.length >= 2) {
+    app.setAsDefaultProtocolClient(CALLBACK_PROTOCOL, process.execPath, [resolve(process.argv[1])])
+  }
+} else {
+  app.setAsDefaultProtocolClient(CALLBACK_PROTOCOL)
+}
+
+// Completes the exchange and tells the renderer, which is waiting on a
+// spinner after having opened the browser. Both outcomes are pushed: a
+// cancelled consent screen must clear that spinner too.
+async function handleAuthCallback(url: string): Promise<void> {
+  const result = await completeOAuthCallback(url)
+  if (mainWindow) {
+    if (mainWindow.isMinimized()) mainWindow.restore()
+    mainWindow.focus()
+    // A recovery link is flagged so the renderer opens the set-a-new-password
+    // screen. Without it the DJ lands back in the app signed in with the
+    // password they just said they had forgotten, and never gets asked.
+    mainWindow.webContents.send(
+      'auth:changed',
+      result.ok
+        ? { ...result.state, recovery: result.recovery }
+        : { ...getAuthState(), error: result.error }
+    )
+  }
+}
+
 protocol.registerSchemesAsPrivileged([
   {
     scheme: 'artwork',
@@ -1646,7 +1884,7 @@ app.whenReady().then(() => {
   // ── Tracks ──────────────────────────────────────────────
   ipcMain.handle(
     'library:import-folder',
-    async (event, folderPath: string, importSeratoData?: boolean) => {
+    async (event, folderPath: string, importSeratoData?: boolean, rescan?: boolean) => {
       try {
         // Register as root if not already nested — done BEFORE the import
         // (not after) so runFolderImport has a library_root row to resolve
@@ -1664,7 +1902,13 @@ app.whenReady().then(() => {
           }
         }
 
-        const result = await runFolderImport(event, folderPath, undefined, importSeratoData)
+        const result = await runFolderImport(
+          event,
+          folderPath,
+          undefined,
+          importSeratoData,
+          rescan ?? false
+        )
 
         return { ok: true, ...result }
       } catch (err) {
@@ -1672,6 +1916,118 @@ app.whenReady().then(() => {
       }
     }
   )
+
+  // ── Auth ────────────────────────────────────────────────────────────
+  // Every handler returns the full AuthState rather than a partial update,
+  // so the renderer has exactly one shape to reduce over and cannot drift
+  // out of sync with main. Tokens are never in it — see AuthState.
+  ipcMain.handle('auth:state', () => getAuthState())
+
+  ipcMain.handle('auth:sign-in', async (_e, email: string, password: string) => {
+    const result = await signIn(email, password)
+    return result.ok ? { ok: true, state: result.state } : { ok: false, error: result.error }
+  })
+
+  // Passed through as-is: signup has three outcomes, not two, and flattening
+  // "account created, confirm your email" into either success or failure is
+  // what the old shape got wrong.
+  ipcMain.handle('auth:sign-up', async (_e, email: string, password: string) =>
+    signUp(email, password)
+  )
+
+  ipcMain.handle('auth:resend-confirmation', async (_e, email: string) => resendConfirmation(email))
+
+  // Scheme-guarded on purpose. The renderer is ours, but "open whatever URL
+  // you are handed" is a capability worth narrowing regardless — file:// and
+  // custom schemes can launch local handlers, and this only ever needs to
+  // open a web page.
+  ipcMain.handle('shell:open-external', async (_e, url: string) => {
+    try {
+      const parsed = new URL(url)
+      if (parsed.protocol !== 'https:' && parsed.protocol !== 'http:') {
+        return { ok: false, error: 'Only http(s) links can be opened.' }
+      }
+      await shell.openExternal(url)
+      return { ok: true }
+    } catch (err) {
+      return { ok: false, error: (err as Error).message }
+    }
+  })
+
+  ipcMain.handle('auth:update-password', async (_e, password: string) => {
+    const result = await updatePassword(password)
+    return result.ok ? { ok: true, state: result.state } : { ok: false, error: result.error }
+  })
+
+  ipcMain.handle('auth:sign-out', async () => ({ ok: true, state: await signOut() }))
+
+  ipcMain.handle('auth:reset-password', async (_e, email: string) => {
+    const result = await requestPasswordReset(email)
+    return result.ok ? { ok: true } : { ok: false, error: result.error }
+  })
+
+  // Resolves as soon as the browser has been opened, NOT when sign-in
+  // finishes — the session arrives later on the cratecloud:// callback and
+  // is pushed over 'auth:changed'. The renderer shows a "waiting for
+  // browser" state in between.
+  ipcMain.handle('auth:google', async () => startGoogleSignIn())
+
+  ipcMain.handle('auth:refresh-entitlement', async () => ({
+    ok: true,
+    entitlement: await refreshEntitlement()
+  }))
+
+  // Rescan every registered root, one after another. Sequential on purpose:
+  // each root's scan already saturates the disk and the sidecar pool, and
+  // runFolderImport stops that root's watcher for the duration — running
+  // them concurrently would just trade throughput for EMFILE risk.
+  //
+  // A root whose volume is not mounted is skipped rather than failed: a DJ
+  // with an external drive unplugged should still get a clean rescan of
+  // everything that IS attached, and the skipped roots are reported back so
+  // the renderer can say which were left out.
+  ipcMain.handle('library:rescan', async (event) => {
+    try {
+      const roots = getAllRoots()
+      if (roots.length === 0) return { ok: false, error: 'No library folders registered yet.' }
+
+      let imported = 0
+      let unchanged = 0
+      let relinked = 0
+      let swept = 0
+      let total = 0
+      const skippedRoots: string[] = []
+
+      for (const root of roots) {
+        try {
+          await stat(root.path)
+        } catch {
+          skippedRoots.push(root.name)
+          continue
+        }
+
+        const result = await runFolderImport(event, root.path, undefined, false, true)
+        imported += result.imported
+        total += result.total
+        unchanged += result.unchanged ?? 0
+        relinked += result.relinked ?? 0
+        swept += result.swept ?? 0
+      }
+
+      return {
+        ok: true,
+        roots: roots.length - skippedRoots.length,
+        skippedRoots,
+        imported,
+        unchanged,
+        relinked,
+        swept,
+        total
+      }
+    } catch (err) {
+      return { ok: false, error: (err as Error).message }
+    }
+  })
 
   // Read-only pre-check the renderer calls before showing the "Import
   // Serato data from this library" checkbox — never creates `_Serato_`,
@@ -1714,7 +2070,13 @@ app.whenReady().then(() => {
       // Phase 1
       const fastResult = await readTagsFast(filepath)
       // TODO: optionally resolve against a registered root if the file lives under one
-      const trackData = buildTrackData(filepath, fastResult)
+      const singleStat = await stat(filepath).catch(() => null)
+      const trackData = buildTrackData(
+        filepath,
+        fastResult,
+        null,
+        singleStat ? normalizeMtime(singleStat.mtimeMs) : null
+      )
 
       // Same reconcile chance runFolderImport's Pass 2 and the live
       // watcher's onFileAdded get. No root to scope the missing pool by
@@ -2650,7 +3012,16 @@ app.whenReady().then(() => {
           folderId = ensureFolderTree(rootId, [relDir]).get(relDir) ?? null
         }
 
-        const trackData = buildTrackData(filepath, result, folderId)
+        // Stat here too, not just on the import walk, so a file the watcher
+        // brought in participates in the rescan fast path immediately
+        // instead of costing one redundant tag read on the next rescan.
+        const info = await stat(filepath).catch(() => null)
+        const trackData = buildTrackData(
+          filepath,
+          result,
+          folderId,
+          info ? normalizeMtime(info.mtimeMs) : null
+        )
 
         // A single live add gets the same reconcile chance a batch import
         // would — findMoveCandidate (libraryWatcher.ts) already caught the
@@ -2754,10 +3125,26 @@ app.whenReady().then(() => {
       }
     },
 
-    // File deleted — queue for review
+    // File deleted — mark the row missing and queue for review. Never
+    // deletes: the row is the durable identity (client_uuid, partial_hash)
+    // and the anchor for tags, crates and board_id, none of which the file
+    // going away invalidates. Only the explicit right-click action
+    // (db:delete-track) ever removes a track.
+    //
+    // markTrackMissing is what puts this track into getMissingTracks' pool,
+    // so a file that comes back under a NEW name gets relinked by
+    // findReconcileMatch instead of inserted as a duplicate row that
+    // strands the original's tags and crates. The two cheaper cases are
+    // already covered elsewhere and never reach here: same filename within
+    // 2s is caught by findMoveCandidate (libraryWatcher.ts), and the same
+    // path reappearing is caught by insertTrack's ON CONFLICT(filepath)
+    // upsert — both of which clear `missing` themselves, as do relinkTrack
+    // and updateTrackFilepath. Nothing has to un-mark this by hand.
     onFileDeleted: async (filepath, rootId) => {
       try {
         const track = getTrackByFilepath(filepath)
+
+        if (track) markTrackMissing(filepath)
 
         insertPendingChange({
           root_id: rootId,
@@ -2885,6 +3272,21 @@ app.whenReady().then(() => {
     console.error('[folder backfill] unexpected failure:', err)
   }
 
+  // The scheduled token refresh can complete at any moment, including when
+  // no window exists, so auth.ts pushes through this listener rather than
+  // holding a window reference of its own.
+  setAuthStateListener((state) => mainWindow?.webContents.send('auth:changed', state))
+
+  // Restore a stored session, then tell the renderer. Deliberately not
+  // awaited before createWindow: this is one network round trip, and
+  // blocking the window on it would put a cold start behind Supabase's
+  // latency (or its timeout, when offline) for an app that is fully usable
+  // logged out. The renderer opens on its "checking" state and gets the
+  // answer over 'auth:changed' a moment later.
+  void restoreSession()
+    .then((state) => mainWindow?.webContents.send('auth:changed', state))
+    .catch((err) => console.error('[auth] restore failed:', err))
+
   app.on('activate', function () {
     // On macOS it's common to re-create a window in the app when the
     // dock icon is clicked and there are no other windows open.
@@ -2893,6 +3295,7 @@ app.whenReady().then(() => {
 })
 
 app.on('before-quit', async () => {
+  stopSessionRefresh()
   await stopAllWatchers()
 })
 

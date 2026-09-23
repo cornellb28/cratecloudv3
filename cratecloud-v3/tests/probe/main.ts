@@ -49,11 +49,29 @@ async function run(): Promise<void> {
   const serato = await import('../../src/main/serato')
   const seratoImport = await import('../../src/main/serato/seratoImport')
   const tagWrites = await import('../../src/main/tagWrites')
+  const rescanSweep = await import('../../src/main/rescanSweep')
+  const authStore = await import('../../src/main/authStore')
 
   const registry: Record<string, (...args: never[]) => unknown> = {
     ...(db as unknown as Record<string, (...args: never[]) => unknown>),
     ...(serato as unknown as Record<string, (...args: never[]) => unknown>),
     ...(seratoImport as unknown as Record<string, (...args: never[]) => unknown>),
+
+    // sweepTracks takes a Set, which does not survive JSON on the way in —
+    // a spec sends the plain array of walked paths instead.
+    sweepTracks: ((scanPrefix: string, seen: string[]) =>
+      rescanSweep.sweepTracks(scanPrefix, new Set(seen))) as unknown as (
+      ...args: never[]
+    ) => unknown,
+    sweepFolders: ((rootId: number, rootPath: string, scannedPath: string, visited: string[]) =>
+      rescanSweep.sweepFolders(rootId, rootPath, scannedPath, new Set(visited))) as unknown as (
+      ...args: never[]
+    ) => unknown,
+
+    // Session persistence runs against the real safeStorage + OS keychain
+    // under the probe's throwaway userData dir, which is the only way to
+    // find out whether the encrypted blob actually round-trips.
+    ...(authStore as unknown as Record<string, (...args: never[]) => unknown>),
 
     // editTagsBatch streams results through a callback; collect them so a
     // spec gets the same per-file outcomes the renderer sees over
@@ -73,9 +91,7 @@ async function run(): Promise<void> {
 
     // Starts N writes at once without awaiting them, the way two IPC calls
     // arriving together would, and resolves once all have settled.
-    writeTagsConcurrently: (async (
-      items: { filepath: string; meta: Record<string, unknown> }[]
-    ) =>
+    writeTagsConcurrently: (async (items: { filepath: string; meta: Record<string, unknown> }[]) =>
       Promise.all(
         items.map((item) => tagWrites.writeTagsForFile(item.filepath, item.meta))
       )) as unknown as (...args: never[]) => unknown,
