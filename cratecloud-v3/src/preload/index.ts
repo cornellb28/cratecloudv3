@@ -381,6 +381,12 @@ const api = {
     // sends the directory to the OS Trash and removes the track rows too.
     deleteFolder: (folderId: number, mode: 'library' | 'trash') =>
       ipcRenderer.invoke('fs:delete-folder', folderId, mode),
+    renameFolder: (folderId: number, newName: string) =>
+      ipcRenderer.invoke('fs:rename-folder', folderId, newName),
+    // apply:false is a dry run — returns exactly what WOULD happen so the
+    // modal can show it before a single file is touched.
+    renameFromTemplate: (payload: { trackIds: number[]; template: string; apply: boolean }) =>
+      ipcRenderer.invoke('fs:rename-from-template', payload),
     readFolder: (folderPath: string) => ipcRenderer.invoke('fs:read-folder', folderPath),
     // Drag-and-drop from Finder — classify what was dropped (never guess
     // from the filename in the renderer), and copy-then-import a drop into

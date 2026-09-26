@@ -122,6 +122,10 @@ import {
   type SeratoImportTally
 } from './serato/seratoImport'
 import { checkBuildStatus } from './staleBuild'
+import { applyFolderRename, planFolderRename } from './folderRename'
+import { expectMove, cancelExpectation } from './expectedChanges'
+import { buildFilename, type TemplateTrack } from './filenameTemplate'
+import { resolveCollisionName } from './movePaths'
 
 // Raise file handle limit for large libraries
 try {
@@ -2745,6 +2749,145 @@ app.whenReady().then(() => {
 
         const removed = deleteFolderCascade(folderId, { deleteTracks: mode === 'trash' })
         return { ok: true, ...removed }
+      } catch (err) {
+        return { ok: false, error: (err as Error).message }
+      }
+    }
+  )
+
+  // ── Rename a folder ────────────────────────────────────────────────────
+  // The disk-and-database half lives in folderRename.ts so it can be tested
+  // against real files. What stays here is the part a test has no use for:
+  // stopping and restarting chokidar around the move.
+  ipcMain.handle('fs:rename-folder', async (_e, folderId: number, newName: string) => {
+    const planned = planFolderRename(folderId, newName)
+    if (!planned.ok) return { ok: false, error: planned.error }
+    if (!planned.plan) return { ok: true, renamed: false }
+
+    const plan = planned.plan
+
+    // A watched folder's watcher is attached to the old directory. Left
+    // running through the rename it would fire unlinkDir for the whole tree
+    // as it disappears, and onDirRemoved marks every track under it missing.
+    if (plan.isRoot && plan.rootId != null) await stopWatcher(plan.rootId)
+
+    const result = await applyFolderRename(plan)
+
+    if (plan.isRoot && plan.rootId != null) {
+      // Back on the old path if it failed — a failed rename must not leave
+      // the library unwatched.
+      startWatcher(plan.rootId, result.ok ? plan.newPath : plan.oldPath)
+    }
+
+    return result.ok ? { ...result, renamed: true } : result
+  })
+
+  // ── Rename files from the template ─────────────────────────────────────
+  // Dry run by default: `apply: false` returns exactly what WOULD happen, so
+  // the modal can show it before anything is touched. Renaming is the one
+  // action in this app a DJ cannot undo from inside it.
+  ipcMain.handle(
+    'fs:rename-from-template',
+    async (
+      _e,
+      payload: { trackIds: number[]; template: string; apply: boolean }
+    ): Promise<{
+      ok: boolean
+      error?: string
+      results?: {
+        trackId: number
+        from: string
+        to?: string
+        status: 'renamed' | 'unchanged' | 'skipped' | 'failed'
+        reason?: string
+      }[]
+    }> => {
+      try {
+        const results: {
+          trackId: number
+          from: string
+          to?: string
+          status: 'renamed' | 'unchanged' | 'skipped' | 'failed'
+          reason?: string
+        }[] = []
+
+        // Names claimed earlier in THIS run, so two tracks resolving to the
+        // same name inside one batch do not collide with each other — the
+        // directory listing alone cannot see a rename that has not happened
+        // yet in a dry run.
+        const claimed = new Map<string, Set<string>>()
+
+        for (const trackId of payload.trackIds) {
+          const track = getTrackById(trackId)
+          if (!track?.filepath) {
+            results.push({ trackId, from: '', status: 'failed', reason: 'Track not found' })
+            continue
+          }
+
+          const from = track.filepath
+          const dir = dirname(from)
+          const ext = extname(from)
+
+          const built = buildFilename(payload.template, track as TemplateTrack)
+          if (!built.ok) {
+            results.push({ trackId, from, status: 'skipped', reason: built.reason })
+            continue
+          }
+
+          const wanted = `${built.name}${ext}`
+          if (wanted === basename(from)) {
+            results.push({ trackId, from, to: from, status: 'unchanged' })
+            continue
+          }
+
+          let existing: Set<string>
+          try {
+            existing = new Set(await readdir(dir))
+          } catch {
+            existing = new Set()
+          }
+          // The file's own current name is not a collision with itself.
+          existing.delete(basename(from))
+          for (const name of claimed.get(dir) ?? []) existing.add(name)
+
+          const finalName = resolveCollisionName(wanted, (c) => existing.has(c))
+          if (!finalName) {
+            results.push({
+              trackId,
+              from,
+              status: 'failed',
+              reason: `Too many files named like "${wanted}"`
+            })
+            continue
+          }
+
+          const to = join(dir, finalName)
+          if (!claimed.has(dir)) claimed.set(dir, new Set())
+          claimed.get(dir)!.add(finalName)
+
+          if (!payload.apply) {
+            results.push({ trackId, from, to, status: 'renamed' })
+            continue
+          }
+
+          expectMove(from, to)
+          try {
+            await rename(from, to)
+          } catch (err) {
+            cancelExpectation(from, to)
+            results.push({ trackId, from, status: 'failed', reason: (err as Error).message })
+            continue
+          }
+
+          // Only the path changes. Deliberately NOT updateTrackMeta with
+          // title: the unused fs:rename-file did that, and it overwrites a
+          // track's title with its filename — backwards for templating, where
+          // the title is what produced the name.
+          updateTrackFilepath(from, to)
+          results.push({ trackId, from, to, status: 'renamed' })
+        }
+
+        return { ok: true, results }
       } catch (err) {
         return { ok: false, error: (err as Error).message }
       }

@@ -1315,6 +1315,162 @@ export function renameTagAndCascade(
   return { renamed: true, mergedInto, tracksUpdated }
 }
 
+// ── Renaming a watched folder (a library root) ────────────────────────────
+// Same shape as repointFolderSubtree, with one difference that is easy to get
+// wrong: descendant folders' `relative_path` does NOT change. It is relative
+// to the ROOT, and the root is what moved — "House/Deep" is still
+// "House/Deep" after /music becomes /library. Rewriting it here would break
+// UNIQUE(root_folder_id, relative_path) against rows that were already
+// correct.
+//
+// What does move: library_roots.path (and its display name), the root folder
+// row's own path, every descendant folder's absolute path, and every track's
+// filepath.
+//
+// The caller stops the watcher, renames the directory and restarts the
+// watcher on the new path — chokidar holds the old one and would otherwise
+// keep reporting a directory that is no longer there. See fs:rename-folder.
+export function repointRootPath(
+  rootId: number,
+  oldPath: string,
+  newPath: string,
+  newName: string
+): { foldersUpdated: number; tracksUpdated: number } {
+  let foldersUpdated = 0
+  let tracksUpdated = 0
+
+  const oldPrefix = oldPath.endsWith('/') ? oldPath : `${oldPath}/`
+  const newPrefix = newPath.endsWith('/') ? newPath : `${newPath}/`
+
+  const run = db.transaction(() => {
+    db.prepare('UPDATE library_roots SET name = ?, path = ? WHERE id = ?').run(
+      newName,
+      newPath,
+      rootId
+    )
+
+    // The root's own folder row. relative_path is '' for it and stays ''.
+    foldersUpdated = db
+      .prepare(
+        `UPDATE folders
+            SET name = @name, path = @newPath, updated_at = strftime('%s','now')
+          WHERE root_folder_id = @rootId AND parent_folder_id IS NULL`
+      )
+      .run({ name: newName, newPath, rootId }).changes
+
+    // Every folder beneath it — absolute path only.
+    foldersUpdated += db
+      .prepare(
+        `UPDATE folders
+            SET path = @newPrefix || substr(path, @cut),
+                updated_at = strftime('%s','now')
+          WHERE root_folder_id = @rootId AND path LIKE @like`
+      )
+      .run({ newPrefix, cut: oldPrefix.length + 1, like: `${oldPrefix}%`, rootId }).changes
+
+    tracksUpdated = db
+      .prepare(
+        `UPDATE tracks
+            SET filepath = @newPrefix || substr(filepath, @cut),
+                updated_at = datetime('now')
+          WHERE filepath LIKE @like`
+      )
+      .run({ newPrefix, cut: oldPrefix.length + 1, like: `${oldPrefix}%` }).changes
+  })
+  run()
+
+  folderEvents.emit('changed')
+  return { foldersUpdated, tracksUpdated }
+}
+
+// ── Renaming a folder ─────────────────────────────────────────────────────
+// Repoints a folder and everything beneath it after the directory itself has
+// been renamed on disk. Caller does the fs.rename first — see fs:rename-folder
+// — because a DB update for a rename that failed would be worse than the
+// reverse: the row would point at a directory that is not there.
+//
+// Three things move together, which is why it is one transaction:
+//   folders.name / path / relative_path  for the folder itself
+//   folders.path / relative_path         for every descendant folder
+//   tracks.filepath / filename           for every track underneath
+//
+// Prefix-replacement on the path strings rather than a re-walk: the directory
+// has already moved, so walking would only rediscover what is computable.
+export function repointFolderSubtree(
+  folderId: number,
+  oldPath: string,
+  newPath: string,
+  newName: string
+): { foldersUpdated: number; tracksUpdated: number } {
+  let foldersUpdated = 0
+  let tracksUpdated = 0
+
+  // Separator-aware so "/music/House" cannot match "/music/House2/...".
+  const oldPrefix = oldPath.endsWith('/') ? oldPath : `${oldPath}/`
+  const newPrefix = newPath.endsWith('/') ? newPath : `${newPath}/`
+
+  const run = db.transaction(() => {
+    const folder = db.prepare('SELECT relative_path FROM folders WHERE id = ?').get(folderId) as
+      | { relative_path: string | null }
+      | undefined
+
+    db.prepare(
+      `UPDATE folders
+          SET name = @name, path = @newPath, updated_at = strftime('%s','now')
+        WHERE id = @id`
+    ).run({ id: folderId, name: newName, newPath })
+
+    // relative_path is what UNIQUE(root_folder_id, relative_path) keys on, so
+    // it has to move for the folder and every descendant or the next
+    // ensureFolderTree would insert duplicates.
+    if (folder?.relative_path != null) {
+      const oldRel = folder.relative_path
+      const parts = oldRel.split('/')
+      parts[parts.length - 1] = newName
+      const newRel = parts.join('/')
+
+      db.prepare('UPDATE folders SET relative_path = ? WHERE id = ?').run(newRel, folderId)
+
+      const oldRelPrefix = oldRel === '' ? '' : `${oldRel}/`
+      const newRelPrefix = newRel === '' ? '' : `${newRel}/`
+      db.prepare(
+        `UPDATE folders
+            SET relative_path = @newRelPrefix || substr(relative_path, @cut)
+          WHERE relative_path LIKE @like AND id <> @id`
+      ).run({
+        newRelPrefix,
+        cut: oldRelPrefix.length + 1,
+        like: `${oldRelPrefix}%`,
+        id: folderId
+      })
+    }
+
+    foldersUpdated =
+      1 +
+      db
+        .prepare(
+          `UPDATE folders
+              SET path = @newPrefix || substr(path, @cut),
+                  updated_at = strftime('%s','now')
+            WHERE path LIKE @like AND id <> @id`
+        )
+        .run({ newPrefix, cut: oldPrefix.length + 1, like: `${oldPrefix}%`, id: folderId }).changes
+
+    tracksUpdated = db
+      .prepare(
+        `UPDATE tracks
+            SET filepath = @newPrefix || substr(filepath, @cut),
+                updated_at = datetime('now')
+          WHERE filepath LIKE @like`
+      )
+      .run({ newPrefix, cut: oldPrefix.length + 1, like: `${oldPrefix}%` }).changes
+  })
+  run()
+
+  folderEvents.emit('changed')
+  return { foldersUpdated, tracksUpdated }
+}
+
 export function getTrackTags(trackId: number): Tag[] {
   return stmts.getTrackTags.all(trackId) as Tag[]
 }

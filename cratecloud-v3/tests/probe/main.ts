@@ -52,6 +52,8 @@ async function run(): Promise<void> {
   const rescanSweep = await import('../../src/main/rescanSweep')
   const authStore = await import('../../src/main/authStore')
   const moveEngine = await import('../../src/main/moveEngine')
+  const filenameTemplate = await import('../../src/main/filenameTemplate')
+  const folderRename = await import('../../src/main/folderRename')
   const expectedChanges = await import('../../src/main/expectedChanges')
 
   const registry: Record<string, (...args: never[]) => unknown> = {
@@ -73,6 +75,11 @@ async function run(): Promise<void> {
     // The shared move engine: real files, real rename/EXDEV handling, real
     // DB update. Testing it through here rather than through fs:move-files
     // keeps the assertions on the engine instead of on the job wrapper.
+    buildFilename: filenameTemplate.buildFilename as unknown as (...args: never[]) => unknown,
+    // The whole rename: real directory, real DB. Exercised end to end rather
+    // than through the handler, which a test cannot reach.
+    renameFolder: folderRename.renameFolder as unknown as (...args: never[]) => unknown,
+    planFolderRename: folderRename.planFolderRename as unknown as (...args: never[]) => unknown,
     moveTrackToFolder: moveEngine.moveTrackToFolder as unknown as (...args: never[]) => unknown,
     moveTracksToFolder: moveEngine.moveTracksToFolder as unknown as (...args: never[]) => unknown,
     clearExpectations: expectedChanges.clearExpectations as unknown as (

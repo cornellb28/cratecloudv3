@@ -330,6 +330,34 @@ declare global {
           tracks?: number
           error?: string
         }>
+        renameFolder: (
+          folderId: number,
+          newName: string
+        ) => Promise<{
+          ok: boolean
+          renamed?: boolean
+          newPath?: string
+          foldersUpdated?: number
+          tracksUpdated?: number
+          error?: string
+        }>
+        // apply:false is a dry run. Every outcome comes back either way, so
+        // the modal shows the real result before anything is renamed.
+        renameFromTemplate: (payload: {
+          trackIds: number[]
+          template: string
+          apply: boolean
+        }) => Promise<{
+          ok: boolean
+          error?: string
+          results?: {
+            trackId: number
+            from: string
+            to?: string
+            status: 'renamed' | 'unchanged' | 'skipped' | 'failed'
+            reason?: string
+          }[]
+        }>
         readFolder: (
           folderPath: string
         ) => Promise<{ ok: boolean; items?: FolderItem[]; error?: string }>

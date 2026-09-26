@@ -197,6 +197,15 @@ export function startWatcher(rootId: number, rootPath: string): void {
   watcher.on('addDir', (dirpath) => {
     if (dirpath === rootPath) return // the watched root itself, not a new folder
 
+    // The landing half of a rename CrateCloud performed. The folder row was
+    // already repointed at this path, so ensureFolderTree would be a no-op —
+    // but consuming the expectation keeps the pair balanced with the unlink
+    // below, which is the half that actually matters.
+    if (consumeExpectedAddition(dirpath)) {
+      console.log(`[watcher] dir add is our own rename landing, ignoring: ${dirpath}`)
+      return
+    }
+
     console.log(`[watcher] dir added: ${dirpath}`)
     scheduleDirEvent(dirpath, 'add', rootId, (path, _type, id) => {
       onDirAdded(path, id).catch((err) => console.error('[watcher] onDirAdded error:', err))
@@ -207,6 +216,15 @@ export function startWatcher(rootId: number, rootPath: string): void {
 
   watcher.on('unlinkDir', (dirpath) => {
     if (dirpath === rootPath) return
+
+    // The departing half of a rename CrateCloud performed. Without this,
+    // onDirRemoved would look the OLD path up and — if the lookup happened
+    // to still resolve — call markFolderMissing, which marks the folder AND
+    // every track under it missing. A rename would look like a deletion.
+    if (consumeExpectedRemoval(dirpath)) {
+      console.log(`[watcher] dir unlink is our own rename leaving, ignoring: ${dirpath}`)
+      return
+    }
 
     console.log(`[watcher] dir removed: ${dirpath}`)
     scheduleDirEvent(dirpath, 'unlink', rootId, (path, _type, id) => {

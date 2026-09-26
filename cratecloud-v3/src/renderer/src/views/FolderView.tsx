@@ -12,7 +12,9 @@ import { MoveConfirmDialog } from '../components/MoveConfirmDialog'
 import { NewFolderModal } from '../components/NewFolderModal'
 import { DeleteFolderDialog, type DeleteFolderChoice } from '../components/DeleteFolderDialog'
 import { MoveToModal } from '../components/MoveToModal'
-import { Plus, RotateCw, Trash2 } from 'lucide-react'
+import { RenameFolderDialog } from '../components/RenameFolderDialog'
+import { RenameFilesDialog } from '../components/RenameFilesDialog'
+import { FilePen, FolderPen, Library, Plus, RotateCw, Trash2 } from 'lucide-react'
 
 // Shared with MoveFileButton's single-track "Move to..." confirmation —
 // dismissing one dismisses both, they're the same underlying concern.
@@ -49,6 +51,11 @@ export function FolderView({ libraryRoots }: FolderViewProps): React.JSX.Element
   const [creatingFolder, setCreatingFolder] = useState(false)
   // Removing the folder currently being browsed.
   const [deletingFolder, setDeletingFolder] = useState(false)
+  // Which folder the rename dialog is for. The header button passes the
+  // folder being browsed; a card passes itself, so a subfolder can be
+  // renamed without opening it first.
+  const [renameTargetId, setRenameTargetId] = useState<number | null>(null)
+  const [renamingFiles, setRenamingFiles] = useState(false)
   const [deleteBusy, setDeleteBusy] = useState(false)
   // Surfaced inside the dialog, not only as a toast. A failure here leaves
   // the dialog open, and an open dialog with no stated reason reads as
@@ -146,6 +153,21 @@ export function FolderView({ libraryRoots }: FolderViewProps): React.JSX.Element
     return map
   }, [folders])
 
+  // Every track under the folder being browsed, subfolders included — the
+  // set both rename dialogs and the "move out" branch operate on. Reuses the
+  // descendant map rather than walking the tree a second time.
+  const tracksUnderCurrent = useMemo(() => {
+    if (currentFolderId === null) return []
+    const under = descendantIdsByFolder.get(currentFolderId) ?? new Set([currentFolderId])
+    return tracks.filter((t) => t.folder_id !== null && under.has(t.folder_id))
+  }, [tracks, currentFolderId, descendantIdsByFolder])
+
+  // Both renames change filepaths under this folder, so the shared slice has
+  // to be refetched — the rows the store holds still point at the old paths.
+  async function reloadTracks(): Promise<void> {
+    setTracks(await window.api.db.allTracks())
+  }
+
   function getTrackCount(folderId: number): number {
     return recursiveCountByFolder.get(folderId) ?? 0
   }
@@ -228,10 +250,7 @@ export function FolderView({ libraryRoots }: FolderViewProps): React.JSX.Element
     if (currentFolderId === null) return
 
     if (choice === 'move') {
-      const under = descendantIdsByFolder.get(currentFolderId) ?? new Set([currentFolderId])
-      const ids = tracks
-        .filter((t) => t.folder_id !== null && under.has(t.folder_id))
-        .map((t) => t.id)
+      const ids = tracksUnderCurrent.map((t) => t.id)
       setDeletingFolder(false)
       if (ids.length === 0) {
         toast.info('Nothing to move', { description: 'This folder has no tracks in it.' })
@@ -463,6 +482,11 @@ export function FolderView({ libraryRoots }: FolderViewProps): React.JSX.Element
                   style={pending ? { opacity: 0.5, cursor: 'default' } : undefined}
                   title={pending ? 'Scanning…' : undefined}
                 >
+                  {/* Watched folders rename too. It is a heavier operation
+                      than a subfolder — library_roots.path follows, and the
+                      watcher is stopped and restarted on the new path — but
+                      it is the same gesture, so it is offered the same way.
+                      Not while pending: there is no folder row yet. */}
                   <FolderCard
                     name={root.name}
                     path={root.path}
@@ -472,6 +496,7 @@ export function FolderView({ libraryRoots }: FolderViewProps): React.JSX.Element
                     onClick={() => {
                       if (!pending) navigateInto(rootFolderId)
                     }}
+                    onRename={pending ? undefined : () => setRenameTargetId(rootFolderId)}
                   />
                 </div>
               )
@@ -612,6 +637,40 @@ export function FolderView({ libraryRoots }: FolderViewProps): React.JSX.Element
           </button>
         )}
 
+        {/* Back to the full watched-folder list. Nothing else reached it:
+            ⌂ jumps to the CURRENT root's top level and ← goes one level up,
+            so from inside a root the picker was unreachable without leaving
+            the Folders view entirely.
+
+            Rendered as the first crumb rather than another icon, because
+            that is what it is — the level above every root. */}
+        <button
+          onClick={() => {
+            setNavStack([])
+            setSelectedIds(new Set())
+          }}
+          title="All watched folders"
+          style={{
+            background: 'none',
+            border: 'none',
+            color: '#555',
+            fontSize: '12px',
+            cursor: 'pointer',
+            padding: 0,
+            fontFamily: 'inherit',
+            display: 'inline-flex',
+            alignItems: 'center',
+            gap: '5px',
+            flexShrink: 0
+          }}
+          onMouseEnter={(e) => (e.currentTarget.style.color = '#a09be8')}
+          onMouseLeave={(e) => (e.currentTarget.style.color = '#555')}
+        >
+          <Library size={12} />
+          All folders
+        </button>
+        <span style={{ color: '#333', fontSize: '11px', flexShrink: 0 }}>/</span>
+
         {breadcrumbs.map((crumb, i) => {
           const isLast = i === breadcrumbs.length - 1
           return (
@@ -725,6 +784,29 @@ export function FolderView({ libraryRoots }: FolderViewProps): React.JSX.Element
                   <Plus size={16} />
                 </IconButton>
 
+                {/* Offered at every level, including a watched folder —
+                    unlike delete, which stays off roots because removing one
+                    is an un-registration, not a rename. */}
+                <IconButton
+                  onClick={() => setRenameTargetId(currentFolderId)}
+                  disabled={isAnalyzing}
+                  label={navStack.length > 1 ? 'Rename this folder' : 'Rename this watched folder'}
+                >
+                  <FolderPen size={15} />
+                </IconButton>
+
+                <IconButton
+                  onClick={() => setRenamingFiles(true)}
+                  disabled={isAnalyzing || totalTracks === 0}
+                  label={
+                    totalTracks === 0
+                      ? 'No tracks in this folder to rename'
+                      : 'Rename files from the template'
+                  }
+                >
+                  <FilePen size={15} />
+                </IconButton>
+
                 {/* Only below a library root. A root is un-registered from
                     Settings > Library, not deleted here — the IPC refuses it
                     too, but not offering the button is the better half of
@@ -759,6 +841,38 @@ export function FolderView({ libraryRoots }: FolderViewProps): React.JSX.Element
           }}
         />
       )}
+
+      {renameTargetId !== null &&
+        (() => {
+          // Resolved at render so the dialog shows the right folder's own
+          // name and counts, whether it came from the header or a card.
+          const target = foldersById.get(renameTargetId)
+          if (!target) return null
+          const childCount = (childrenByParent.get(renameTargetId) ?? []).length
+          return (
+            <RenameFolderDialog
+              open
+              folderId={renameTargetId}
+              currentName={target.name}
+              trackCount={getTrackCount(renameTargetId)}
+              subfolderCount={childCount}
+              isWatchedFolder={target.parent_folder_id == null}
+              onClose={() => setRenameTargetId(null)}
+              onRenamed={() => {
+                setSelectedIds(new Set())
+                void reloadTracks()
+              }}
+            />
+          )
+        })()}
+
+      <RenameFilesDialog
+        open={renamingFiles}
+        trackIds={tracksUnderCurrent.map((t) => t.id)}
+        scopeLabel={`${totalTracks} track${totalTracks === 1 ? '' : 's'} in ${folderName}`}
+        onClose={() => setRenamingFiles(false)}
+        onRenamed={() => void reloadTracks()}
+      />
 
       <DeleteFolderDialog
         open={deletingFolder}
@@ -829,6 +943,7 @@ export function FolderView({ libraryRoots }: FolderViewProps): React.JSX.Element
                   artworkHashes={getArtworkForFolder(folder.id)}
                   highlighted={highlightedFolderIds.has(folder.id)}
                   onClick={() => navigateInto(folder.id)}
+                  onRename={() => setRenameTargetId(folder.id)}
                 />
               ))}
             </div>
