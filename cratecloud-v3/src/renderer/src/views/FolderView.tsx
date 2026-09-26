@@ -7,9 +7,12 @@ import { TrackRow } from '../components/TrackRow'
 import { TrackCard } from '../components/TrackCard'
 import { TRACK_GRID_GAP, trackGridColumns } from '../lib/trackCard'
 import { BulkBar } from '../components/BulkBar'
-import { Button } from '@renderer/components/ui/button'
 import { useFileDrop } from '../hooks/useFileDrop'
 import { MoveConfirmDialog } from '../components/MoveConfirmDialog'
+import { NewFolderModal } from '../components/NewFolderModal'
+import { DeleteFolderDialog, type DeleteFolderChoice } from '../components/DeleteFolderDialog'
+import { MoveToModal } from '../components/MoveToModal'
+import { Plus, RotateCw, Trash2 } from 'lucide-react'
 
 // Shared with MoveFileButton's single-track "Move to..." confirmation —
 // dismissing one dismisses both, they're the same underlying concern.
@@ -41,10 +44,20 @@ export function FolderView({ libraryRoots }: FolderViewProps): React.JSX.Element
   const [navStack, setNavStack] = useState<number[]>([])
   const [selectedIds, setSelectedIds] = useState<Set<number>>(new Set())
 
-  // "New folder" inline input, scoped to the currently viewed folder
+  // Opens NewFolderModal, which owns the name, the track search and the
+  // create-plus-move. Scoped to the folder currently being browsed.
   const [creatingFolder, setCreatingFolder] = useState(false)
-  const [newFolderName, setNewFolderName] = useState('')
-  const [creating, setCreating] = useState(false)
+  // Removing the folder currently being browsed.
+  const [deletingFolder, setDeletingFolder] = useState(false)
+  const [deleteBusy, setDeleteBusy] = useState(false)
+  // Surfaced inside the dialog, not only as a toast. A failure here leaves
+  // the dialog open, and an open dialog with no stated reason reads as
+  // "the button does nothing".
+  const [deleteError, setDeleteError] = useState<string | null>(null)
+  // Set when the DJ picked "move the tracks somewhere else first" — hands
+  // off to the existing MoveToModal rather than reimplementing a
+  // destination picker, a recents list and a cross-device check.
+  const [movingOut, setMovingOut] = useState<number[] | null>(null)
 
   // Folders currently flashing (see armHighlight) — a folder id lives here
   // for HIGHLIGHT_DURATION_MS after being created, imported, or moved in.
@@ -204,40 +217,64 @@ export function FolderView({ libraryRoots }: FolderViewProps): React.JSX.Element
     setAnalyzing(false)
   }
 
-  // Create a subfolder of the folder currently being browsed. fs:create-folder
-  // already does mkdir + ensureFolderTree + folders:changed — App.tsx's
-  // debounced onFoldersChanged subscription refreshes the shared `folders`
-  // slice on its own. Stays on the current (parent) folder instead of
-  // navigating into the new one — it should appear right alongside the
-  // subfolders already here, not whisk the DJ away to an empty folder —
-  // and flashes it once it shows up in the grid.
-  async function handleCreateFolder(parentPath: string): Promise<void> {
-    const name = newFolderName.trim()
-    if (!name) return
-    if (name.includes('/') || name.includes('\\')) {
-      toast.error('Could not create folder', { description: 'Name cannot contain slashes' })
+  // The three outcomes of DeleteFolderDialog. 'move' is not a delete at all:
+  // it hands the tracks to MoveToModal and leaves the folder alone, so a
+  // partial or cancelled move can never strand files in a directory that has
+  // already been thrown away. Removing the emptied folder afterwards is a
+  // second, deliberate click.
+  async function handleDeleteFolder(choice: DeleteFolderChoice): Promise<void> {
+    // null is the root picker, which has no folder to remove. The button is
+    // not rendered there, so this is belt and braces.
+    if (currentFolderId === null) return
+
+    if (choice === 'move') {
+      const under = descendantIdsByFolder.get(currentFolderId) ?? new Set([currentFolderId])
+      const ids = tracks
+        .filter((t) => t.folder_id !== null && under.has(t.folder_id))
+        .map((t) => t.id)
+      setDeletingFolder(false)
+      if (ids.length === 0) {
+        toast.info('Nothing to move', { description: 'This folder has no tracks in it.' })
+        return
+      }
+      setMovingOut(ids)
       return
     }
 
-    setCreating(true)
+    setDeleteBusy(true)
+    setDeleteError(null)
     try {
-      const result = await window.api.fs.createFolder(parentPath, name)
-      if (result.ok && result.path) {
-        setCreatingFolder(false)
-        setNewFolderName('')
-        if (result.folderId == null) {
-          toast.warning(`Created "${name}"`, { description: result.reason })
-        } else {
-          toast.success(`Created "${name}"`)
-          armHighlight(result.folderId)
-        }
+      const result = await window.api.fs.deleteFolder(currentFolderId, choice)
+      if (!result.ok) {
+        setDeleteError(result.error ?? 'Unknown error')
+        toast.error('Could not remove the folder', { description: result.error ?? 'Unknown error' })
+        return
+      }
+
+      // Step out before the row disappears — staying would leave the view
+      // pointed at a folder that no longer exists.
+      setNavStack(navStack.slice(0, -1))
+      setSelectedIds(new Set())
+      setDeletingFolder(false)
+
+      if (choice === 'trash') {
+        toast.success(`Moved “${folderName}” to the Trash`, {
+          description: `${result.tracks ?? 0} track${result.tracks === 1 ? '' : 's'} removed from CrateCloud. Recoverable from Finder.`
+        })
+        // Track rows went with it, so the shared slice is stale.
+        setTracks(await window.api.db.allTracks())
       } else {
-        toast.error('Could not create folder', { description: result.error ?? 'Unknown error' })
+        toast.success(`Removed “${folderName}” from CrateCloud`, {
+          description: 'Your files are untouched. The tracks are still in your library.'
+        })
+        setTracks(await window.api.db.allTracks())
       }
     } catch (err) {
-      toast.error('Could not create folder', { description: (err as Error).message })
+      setDeleteError((err as Error).message)
+      toast.error('Could not remove the folder', { description: (err as Error).message })
+    } finally {
+      setDeleteBusy(false)
     }
-    setCreating(false)
   }
 
   // Actually runs the move — either straight from handleDropIntoFolder (the
@@ -666,78 +703,91 @@ export function FolderView({ libraryRoots }: FolderViewProps): React.JSX.Element
               )}
             </div>
             {currentFolder.path && (
-              <div style={{ display: 'flex', gap: '8px', alignItems: 'center', flexWrap: 'wrap' }}>
-                <Button
+              <div style={{ display: 'flex', gap: '6px', alignItems: 'center', flexWrap: 'wrap' }}>
+                {/* Both actions are icon buttons now. The label lives in the
+                    tooltip and the accessible name, not in the chrome —
+                    this header already carries the folder name, the counts
+                    and a breadcrumb above it. */}
+                <IconButton
                   onClick={() => handleImportThisFolder(currentFolder.path as string)}
                   disabled={isAnalyzing}
-                  variant="outline"
-                  size="sm"
+                  label={isAnalyzing ? 'Scanning…' : 'Re-scan this folder'}
+                  spinning={isAnalyzing}
                 >
-                  {isAnalyzing ? 'Scanning...' : '↺ Re-scan this folder'}
-                </Button>
+                  <RotateCw size={15} />
+                </IconButton>
 
-                {creatingFolder ? (
-                  <div style={{ display: 'flex', alignItems: 'center', gap: '4px' }}>
-                    <input
-                      autoFocus
-                      value={newFolderName}
-                      disabled={creating}
-                      onChange={(e) => setNewFolderName(e.target.value)}
-                      onKeyDown={(e) => {
-                        if (e.key === 'Enter') void handleCreateFolder(currentFolder.path as string)
-                        if (e.key === 'Escape') {
-                          setCreatingFolder(false)
-                          setNewFolderName('')
-                        }
-                      }}
-                      placeholder="Folder name"
-                      style={{
-                        background: '#0e0e12',
-                        border: '0.5px solid #333',
-                        borderRadius: '4px',
-                        color: '#e8e8f0',
-                        fontSize: '12px',
-                        padding: '5px 8px',
-                        fontFamily: 'inherit',
-                        width: '140px'
-                      }}
-                    />
-                    <span
-                      onClick={() => void handleCreateFolder(currentFolder.path as string)}
-                      style={{
-                        fontSize: '13px',
-                        color: '#1d9e75',
-                        cursor: 'pointer',
-                        padding: '0 2px'
-                      }}
-                    >
-                      ✓
-                    </span>
-                    <span
-                      onClick={() => {
-                        setCreatingFolder(false)
-                        setNewFolderName('')
-                      }}
-                      style={{
-                        fontSize: '13px',
-                        color: '#555',
-                        cursor: 'pointer',
-                        padding: '0 2px'
-                      }}
-                    >
-                      ×
-                    </span>
-                  </div>
-                ) : (
-                  <Button onClick={() => setCreatingFolder(true)} variant="outline" size="sm">
-                    + New folder
-                  </Button>
+                <IconButton
+                  onClick={() => setCreatingFolder(true)}
+                  disabled={isAnalyzing}
+                  label="New subfolder"
+                >
+                  <Plus size={16} />
+                </IconButton>
+
+                {/* Only below a library root. A root is un-registered from
+                    Settings > Library, not deleted here — the IPC refuses it
+                    too, but not offering the button is the better half of
+                    that guard. */}
+                {navStack.length > 1 && (
+                  <IconButton
+                    onClick={() => setDeletingFolder(true)}
+                    disabled={isAnalyzing}
+                    label="Remove this folder"
+                    danger
+                  >
+                    <Trash2 size={15} />
+                  </IconButton>
                 )}
               </div>
             )}
           </div>
         </div>
       </div>
+
+      {currentFolder.path && (
+        <NewFolderModal
+          parentPath={currentFolder.path}
+          parentName={folderName}
+          open={creatingFolder}
+          onClose={() => setCreatingFolder(false)}
+          // Stays on the parent rather than navigating into the new folder:
+          // it should appear alongside the subfolders already here, not whisk
+          // the DJ away to an empty one. Flashed once its row shows up.
+          onCreated={(folderId) => {
+            if (folderId != null) armHighlight(folderId)
+          }}
+        />
+      )}
+
+      <DeleteFolderDialog
+        open={deletingFolder}
+        folderName={folderName}
+        trackCount={totalTracks}
+        subfolderCount={subfolders.length}
+        busy={deleteBusy}
+        error={deleteError}
+        onChoose={(choice) => void handleDeleteFolder(choice)}
+        onCancel={() => {
+          setDeletingFolder(false)
+          setDeleteError(null)
+        }}
+      />
+
+      {/* The "move the tracks out first" branch. The folder is deliberately
+          left in place — see handleDeleteFolder. */}
+      {movingOut !== null && (
+        <MoveToModal
+          trackIds={movingOut}
+          open
+          onClose={() => setMovingOut(null)}
+          onMoveStarted={() => {
+            toast.info('Moving tracks out', {
+              description: `Once it finishes, “${folderName}” will be empty and you can remove it.`
+            })
+          }}
+        />
+      )}
 
       {/* ── Scrollable content ─────────────────────── */}
       <div
@@ -878,5 +928,74 @@ export function FolderView({ libraryRoots }: FolderViewProps): React.JSX.Element
         />
       )}
     </div>
+  )
+}
+
+// ─── IconButton ───────────────────────────────────────────
+// A square icon-only action. `label` is the tooltip AND the accessible name,
+// so dropping the visible text does not drop the meaning — an icon with
+// neither is a guess for a sighted DJ and silence for a screen reader.
+function IconButton({
+  onClick,
+  disabled,
+  label,
+  spinning = false,
+  danger = false,
+  children
+}: {
+  onClick: () => void
+  disabled?: boolean
+  label: string
+  spinning?: boolean
+  danger?: boolean
+  children: React.ReactNode
+}): React.JSX.Element {
+  // Destructive actions read red on hover, not at rest: a permanently red
+  // button in a toolbar is noise, and noise is what gets mis-clicked.
+  const hoverColor = danger ? '#d8695d' : '#a09be8'
+  const hoverBorder = danger ? '#d8695d55' : '#3a3060'
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      disabled={disabled}
+      title={label}
+      aria-label={label}
+      style={{
+        display: 'inline-flex',
+        alignItems: 'center',
+        justifyContent: 'center',
+        width: '30px',
+        height: '30px',
+        borderRadius: '6px',
+        background: 'none',
+        border: '0.5px solid #252535',
+        color: disabled ? '#333' : '#777',
+        cursor: disabled ? 'default' : 'pointer',
+        fontFamily: 'inherit',
+        transition: 'color 0.12s ease, border-color 0.12s ease'
+      }}
+      onMouseEnter={(e) => {
+        if (disabled) return
+        e.currentTarget.style.color = hoverColor
+        e.currentTarget.style.borderColor = hoverBorder
+      }}
+      onMouseLeave={(e) => {
+        if (disabled) return
+        e.currentTarget.style.color = '#777'
+        e.currentTarget.style.borderColor = '#252535'
+      }}
+    >
+      <span
+        style={{
+          display: 'inline-flex',
+          // Only the glyph spins; a rotating border would be a different,
+          // worse animation.
+          animation: spinning ? 'spin 1s linear infinite' : undefined
+        }}
+      >
+        {children}
+      </span>
+    </button>
   )
 }

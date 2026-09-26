@@ -30,7 +30,7 @@ export function BulkBar({
   onSelectAll,
   crateId
 }: BulkBarProps): React.JSX.Element | null {
-  const { removeTracksFromCrateLocally } = useLibraryStore()
+  const { removeTracksFromCrateLocally, updateTrack } = useLibraryStore()
   const [editModalOpen, setEditModalOpen] = useState(false)
   const [moveModalOpen, setMoveModalOpen] = useState(false)
   const [cratePickerOpen, setCratePickerOpen] = useState(false)
@@ -69,6 +69,23 @@ export function BulkBar({
     } finally {
       setAnalysis(null)
     }
+  }
+
+  // One image, applied to every selected track. Content-addressed storage
+  // means the fifty rows share one file rather than fifty copies of it — see
+  // the artwork:pick handler.
+  async function handleArtwork(): Promise<void> {
+    const result = await window.api.artwork.pick(selectedArray)
+    // No error and not ok means the file dialog was cancelled: not worth a
+    // toast, the DJ knows they just pressed Cancel.
+    if (!result.ok) {
+      if (result.error) toast.error('Could not set artwork', { description: result.error })
+      return
+    }
+    for (const id of selectedArray) updateTrack(id, { artwork_hash: result.hash ?? null })
+    toast.success(
+      result.applied === 1 ? 'Artwork set' : `Artwork set on ${result.applied} tracks`
+    )
   }
 
   async function handleRemoveFromCrate(): Promise<void> {
@@ -156,6 +173,18 @@ export function BulkBar({
           style={{ borderColor: '#7f77dd', color: '#a09be8' }}
         >
           Edit labels
+        </Button>
+
+        <Button
+          variant="outline"
+          size="sm"
+          disabled={busy}
+          onClick={() => void handleArtwork()}
+          className="text-xs"
+          style={{ borderColor: '#7f77dd', color: '#a09be8' }}
+          title="Set one cover image on every selected track"
+        >
+          Artwork
         </Button>
 
         {/* Re-analyze — BPM and key for every selected track. While it runs

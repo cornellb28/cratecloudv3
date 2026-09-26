@@ -6,6 +6,8 @@ import { Button } from '@renderer/components/ui/button'
 import { Tabs, TabsList, TabsTrigger, TabsContent } from '@renderer/components/ui/tabs'
 import { ReconciliationModal } from '@renderer/components/ReconciliationModal'
 import { SeratoImportConfirmDialog } from '@renderer/components/SeratoImportConfirmDialog'
+import { useLibraryStore } from '../store/useLibraryStore'
+import { FilenameTemplateEditor } from '../components/FilenameTemplateEditor'
 
 // Settings as a full page rather than a modal. A modal was wrong for this:
 // it capped the content at 440px with everything stacked in one scroll, and
@@ -186,6 +188,7 @@ export function SettingsView({
   const [tab, setTab] = useState<TabId>('account')
   const [adding, setAdding] = useState(false)
   const [rescanning, setRescanning] = useState(false)
+  const analysisProgress = useLibraryStore((s) => s.analysisProgress)
   const [signingOut, setSigningOut] = useState(false)
   const [reconcileOpen, setReconcileOpen] = useState(false)
   const [seratoImportPrompt, setSeratoImportPrompt] = useState<{
@@ -473,6 +476,68 @@ export function SettingsView({
                   {rescanning ? 'Rescanning...' : '↺ Rescan Library'}
                 </Button>
               </div>
+
+              {/* The same run the toolbar bar is showing, with the same Stop.
+                  A rescan is usually started from here, so this is where a DJ
+                  looks when they want it to stop — expecting them to go find
+                  the toolbar is the wrong way round. */}
+              {analysisProgress !== null && analysisProgress.total > 0 && (
+                <div
+                  style={{
+                    marginTop: '12px',
+                    padding: '10px 12px',
+                    background: '#16161f',
+                    border: '0.5px solid #252535',
+                    borderRadius: '6px',
+                    display: 'flex',
+                    alignItems: 'center',
+                    gap: '12px'
+                  }}
+                >
+                  <div style={{ flex: 1, minWidth: 0 }}>
+                    <div style={{ fontSize: '12px', color: '#c0c0d8' }}>
+                      Analyzing BPM + key — {analysisProgress.done} / {analysisProgress.total}
+                    </div>
+                    <div
+                      style={{
+                        marginTop: '6px',
+                        background: '#1e1e2a',
+                        borderRadius: '4px',
+                        height: '3px',
+                        overflow: 'hidden'
+                      }}
+                    >
+                      <div
+                        style={{
+                          background: '#1d9e75',
+                          height: '100%',
+                          width: `${Math.round(
+                            (analysisProgress.done / analysisProgress.total) * 100
+                          )}%`,
+                          transition: 'width 0.3s ease',
+                          borderRadius: '4px'
+                        }}
+                      />
+                    </div>
+                  </div>
+                  <Button
+                    onClick={() => void window.api.stopAnalysis()}
+                    variant="outline"
+                    size="sm"
+                    title="Stop analyzing — tracks already done are kept, the rest stay queued"
+                    style={{ flexShrink: 0 }}
+                  >
+                    Stop
+                  </Button>
+                </div>
+              )}
+            </Section>
+
+            <Section
+              title="Filename template"
+              description="What a renamed file is called. Used by the rename actions in the Folders view — nothing is renamed until you ask for it."
+            >
+              <FilenameTemplateEditor />
             </Section>
 
             <Section

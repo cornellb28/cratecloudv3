@@ -164,6 +164,11 @@ const api = {
   // against what is actually on disk. Reports on the same import:progress
   // channel as a folder import, one job per root.
   rescanLibrary: () => ipcRenderer.invoke('library:rescan'),
+  // Stops the Phase 2 analysis pass after the batch in flight.
+  stopAnalysis: () => ipcRenderer.invoke('analysis:stop'),
+  // Dev only: whether out/main or out/preload have been rebuilt since this
+  // process loaded them. See staleBuild.ts.
+  buildStatus: () => ipcRenderer.invoke('app:build-status'),
 
   // Opens a web page in the system browser. Main validates the scheme.
   openExternal: (url: string) => ipcRenderer.invoke('shell:open-external', url),
@@ -290,6 +295,11 @@ const api = {
     forTracks: (trackIds: number[]) => ipcRenderer.invoke('tags:for-tracks', trackIds),
     tracksByTag: (tagId: number) => ipcRenderer.invoke('tags:tracks-by-tag', tagId),
     apply: (trackId: number, tagId: number) => ipcRenderer.invoke('tags:apply', trackId, tagId),
+    // One transaction in main: replaces this field's tags and recomputes the
+    // derived tracks.<field> column together. Returns the derived value.
+    setForField: (trackId: number, field: string, values: string[]) =>
+      ipcRenderer.invoke('tags:set-for-field', trackId, field, values),
+    rename: (tagId: number, newValue: string) => ipcRenderer.invoke('tags:rename', tagId, newValue),
     remove: (trackId: number, tagId: number) => ipcRenderer.invoke('tags:remove', trackId, tagId),
     checkCandidates: (candidates: string[], field: string) =>
       ipcRenderer.invoke('tags:check-candidates', candidates, field),
@@ -350,7 +360,8 @@ const api = {
   artwork: {
     pathFor: (hash: string | null, size: 'full' | 'thumb') =>
       ipcRenderer.invoke('artwork:path-for', hash, size),
-    pick: (trackId: number) => ipcRenderer.invoke('artwork:pick', trackId),
+    // One track, or a whole selection sharing a single stored image.
+    pick: (target: number | number[]) => ipcRenderer.invoke('artwork:pick', target),
     sweepOrphaned: () => ipcRenderer.invoke('artwork:sweep-orphaned')
   },
   fs: {
@@ -366,6 +377,10 @@ const api = {
       ipcRenderer.invoke('fs:rename-file', filepath, newName),
     createFolder: (parent: string, name: string) =>
       ipcRenderer.invoke('fs:create-folder', parent, name),
+    // mode 'library' removes the rows and leaves every file alone; 'trash'
+    // sends the directory to the OS Trash and removes the track rows too.
+    deleteFolder: (folderId: number, mode: 'library' | 'trash') =>
+      ipcRenderer.invoke('fs:delete-folder', folderId, mode),
     readFolder: (folderPath: string) => ipcRenderer.invoke('fs:read-folder', folderPath),
     // Drag-and-drop from Finder — classify what was dropped (never guess
     // from the filename in the renderer), and copy-then-import a drop into
@@ -379,8 +394,11 @@ const api = {
       deleteSource?: boolean
     }) => ipcRenderer.invoke('fs:copy-into-folder', payload),
     cancelCopy: (jobId: string) => ipcRenderer.invoke('fs:cancel-copy', jobId),
-    showInFolder: (filepath: string): Promise<void> =>
-      ipcRenderer.invoke('fs:showInFolder', filepath)
+    // 'fs:show-in-folder', not 'fs:showInFolder' — the channel main registers,
+    // and the kebab-case every other fs: channel uses. They disagreed, so the
+    // invoke hit a channel with no handler and the button did nothing at all.
+    showInFolder: (filepath: string): Promise<{ ok: boolean; error?: string }> =>
+      ipcRenderer.invoke('fs:show-in-folder', filepath)
   },
   onMoveProgress: (cb: (p: MoveProgressPayload) => void) =>
     ipcRenderer.on('move:progress', (_e, p) => cb(p)),

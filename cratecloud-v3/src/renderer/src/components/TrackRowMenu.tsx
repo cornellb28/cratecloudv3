@@ -1,11 +1,12 @@
 import React, { useEffect, useRef, useState } from 'react'
 import ReactDOM from 'react-dom'
 import { toast } from 'sonner'
-import { MoreVertical, Library, Trash2, FolderPlus, FolderMinus } from 'lucide-react'
+import { MoreVertical, Library, Trash2, FolderPlus, FolderMinus, Tag, Image as ImageIcon } from 'lucide-react'
 import { useLibraryStore } from '../store/useLibraryStore'
 import { usePlayerStore } from '../store/usePlayerStore'
 import { DeleteFileConfirmDialog } from './DeleteFileConfirmDialog'
 import { CratePickerModal } from './CratePickerModal'
+import { BulkEditModal } from './BulkEditModal'
 import { reanalyzeTrack } from '../lib/reanalyze'
 
 interface TrackRowMenuProps {
@@ -18,6 +19,7 @@ export function TrackRowMenu({ track, crateId }: TrackRowMenuProps): React.JSX.E
   const [menuPos, setMenuPos] = useState<{ top: number; left: number } | null>(null)
   const [confirmOpen, setConfirmOpen] = useState(false)
   const [cratePickerOpen, setCratePickerOpen] = useState(false)
+  const [editLabelsOpen, setEditLabelsOpen] = useState(false)
   const [busy, setBusy] = useState(false)
 
   const triggerRef = useRef<HTMLButtonElement>(null)
@@ -78,7 +80,21 @@ export function TrackRowMenu({ track, crateId }: TrackRowMenuProps): React.JSX.E
 
   const handlePlay = act(() => playTrack(track))
   const handleOpenInspector = act(() => setActiveTrack(track.id))
-  const handleShowInFinder = act(() => { if (track.filepath) window.api.fs.showInFolder?.(track.filepath) })
+  // Awaited and reported. It used to be fire-and-forget with an optional
+  // call (`showInFolder?.()`), so a rejected invoke — which is exactly what
+  // the channel mismatch produced — vanished into an unhandled rejection and
+  // the menu item looked inert.
+  async function handleShowInFinder(): Promise<void> {
+    closeMenu()
+    if (!track.filepath) {
+      toast.error('No file path for this track')
+      return
+    }
+    const result = await window.api.fs.showInFolder(track.filepath)
+    if (!result?.ok) {
+      toast.error('Could not show in Finder', { description: result?.error ?? 'Unknown error' })
+    }
+  }
   const handleCopyFilepath = act(() => { if (track.filepath) navigator.clipboard.writeText(track.filepath) })
 
   // The bar on this track's card, the store write and the DB write all live
@@ -89,6 +105,16 @@ export function TrackRowMenu({ track, crateId }: TrackRowMenuProps): React.JSX.E
     if (outcome === 'ok') toast.success('Re-analyzed successfully')
     else if (outcome === 'failed') toast.error('Re-analyze failed')
     else toast.error('Nothing to analyze', { description: 'The file is missing.' })
+  }
+
+  async function handleArtwork(): Promise<void> {
+    const result = await window.api.artwork.pick(track.id)
+    if (!result.ok) {
+      if (result.error) toast.error('Could not set artwork', { description: result.error })
+      return
+    }
+    updateTrack(track.id, { artwork_hash: result.hash ?? null })
+    toast.success('Artwork set')
   }
 
   async function handleMoveToBoard(boardId: number): Promise<void> {
@@ -172,6 +198,22 @@ export function TrackRowMenu({ track, crateId }: TrackRowMenuProps): React.JSX.E
       <MenuItem onClick={handleOpenInspector} icon="✎">
         Open in Inspector
       </MenuItem>
+      {/* The same modal the BulkBar opens, scoped to this one track — so
+          "set the genre on this" is reachable without first selecting it. */}
+      <MenuItem
+        onClick={() => { closeMenu(); setEditLabelsOpen(true) }}
+        icon={<Tag size={14} />}
+      >
+        Edit labels
+      </MenuItem>
+      {/* The per-track half of the BulkBar's Artwork action, so a DJ can fix
+          one cover without first selecting it. */}
+      <MenuItem
+        onClick={() => { closeMenu(); void handleArtwork() }}
+        icon={<ImageIcon size={14} />}
+      >
+        Change artwork
+      </MenuItem>
       {track.filepath && !isMissing && (
         <MenuItem onClick={handleReanalyze} icon="⟳">Re-analyze</MenuItem>
       )}
@@ -180,7 +222,7 @@ export function TrackRowMenu({ track, crateId }: TrackRowMenuProps): React.JSX.E
 
       {boards.length > 0 && (
         <>
-          <Label>Move to board</Label>
+          <Label>Move to stage</Label>
           {boards.map(board => (
             <MenuItem key={board.id} onClick={() => handleMoveToBoard(board.id)} indent>
               <span style={{
@@ -209,7 +251,7 @@ export function TrackRowMenu({ track, crateId }: TrackRowMenuProps): React.JSX.E
       {track.filepath && !isMissing && (
         <>
           <MenuItem onClick={handleMoveFile} icon="↗">Move file to folder</MenuItem>
-          <MenuItem onClick={handleShowInFinder} icon="⊟">Show in Finder</MenuItem>
+          <MenuItem onClick={() => void handleShowInFinder()} icon="⊟">Show in Finder</MenuItem>
           <MenuItem onClick={handleCopyFilepath} icon="⎘">Copy filepath</MenuItem>
           <Divider />
         </>
@@ -259,6 +301,12 @@ export function TrackRowMenu({ track, crateId }: TrackRowMenuProps): React.JSX.E
         trackIds={[track.id]}
         open={cratePickerOpen}
         onClose={() => setCratePickerOpen(false)}
+      />
+
+      <BulkEditModal
+        trackIds={[track.id]}
+        open={editLabelsOpen}
+        onClose={() => setEditLabelsOpen(false)}
       />
 
       <DeleteFileConfirmDialog

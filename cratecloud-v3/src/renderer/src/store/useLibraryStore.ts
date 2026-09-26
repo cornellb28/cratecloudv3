@@ -79,6 +79,20 @@ interface LibraryState {
   // by an effect in FolderView, which clears it back to null.
   pendingFolderNav: number | null
 
+  // Set by any tag badge anywhere in the app — a row, a card, the dashboard.
+  // Consumed once by an effect in App, which switches to the Tags view and
+  // seeds the filter with it, then clears this back to null.
+  //
+  // A store signal rather than a prop: TrackRow and TrackCard are rendered by
+  // six different views, and threading an onTagClick through all of them to
+  // reach App would mean every one of them carrying a prop it does not use.
+  pendingTagNav: Tag | null
+
+  // Phase 2 (BPM + key) progress, or null when nothing is running. In the
+  // store rather than App state because two surfaces need it: the toolbar
+  // bar and Settings > Library, which both offer the Stop button.
+  analysisProgress: { done: number; total: number } | null
+
   // ── Actions ──────────────────────────────────────────
   // Actions are functions that change the state
   // Components call these instead of setState directly
@@ -114,6 +128,8 @@ interface LibraryState {
   upsertJob: (job: JobState) => void
   removeJob: (jobId: string) => void
   setPendingFolderNav: (folderId: number | null) => void
+  setPendingTagNav: (tag: Tag | null) => void
+  setAnalysisProgress: (progress: { done: number; total: number } | null) => void
 
   // ── Crates ───────────────────────────────────────────
   setCrates: (crates: Crate[]) => void
@@ -144,6 +160,8 @@ export const useLibraryStore = create<LibraryState>((set) => ({
   crateTrackIds: new Map(),
   jobs: {},
   pendingFolderNav: null,
+  pendingTagNav: null,
+  analysisProgress: null,
   viewModes: {},
   bpmRange: null,
   setBpmRange: (range) => set({ bpmRange: range }),
@@ -262,6 +280,8 @@ export const useLibraryStore = create<LibraryState>((set) => ({
 
   // ── Cross-component navigation signal ──────────────────
   setPendingFolderNav: (folderId) => set({ pendingFolderNav: folderId }),
+  setPendingTagNav: (tag) => set({ pendingTagNav: tag }),
+  setAnalysisProgress: (progress) => set({ analysisProgress: progress }),
 
   // ── Crates ─────────────────────────────────────────────
   setCrates: (crates) => set({ crates }),

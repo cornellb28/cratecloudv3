@@ -3,6 +3,7 @@ import { useLibraryStore } from '../store/useLibraryStore'
 import { ImportDropzone } from './ImportDropzone'
 import { Input } from '@renderer/components/ui/input'
 import type { View } from './Sidebar'
+import { NotificationBell } from './NotificationBell'
 
 interface ToolbarProps {
   onImportFolder: (path: string) => void
@@ -136,6 +137,11 @@ export function Toolbar({ onImportFolder, activeView, onImportFiles }: ToolbarPr
       <span style={{ color: '#444', fontSize: '12px', marginLeft: 'auto' }}>
         {tracks.length} tracks
       </span>
+
+      {/* Whatever the view, the watcher's review queue is reachable from
+          here — it used to be findable only from Settings > Library, which
+          a DJ would open only if they already suspected something. */}
+      <NotificationBell />
     </div>
   )
 }

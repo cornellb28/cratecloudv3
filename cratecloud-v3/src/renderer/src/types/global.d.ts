@@ -72,6 +72,15 @@ declare global {
 
       openExternal: (url: string) => Promise<{ ok: boolean; error?: string }>
 
+      // Stops the Phase 2 analysis pass after the batch in flight. Safe to
+      // call when nothing is running.
+      stopAnalysis: () => Promise<{ ok: boolean }>
+
+      // Dev only. `stale` means out/main or out/preload were rebuilt after
+      // this Electron process loaded them — the renderer is newer than the
+      // code it is talking to, and only a full restart fixes that.
+      buildStatus: () => Promise<{ stale: boolean; changed: string[] }>
+
       rescanLibrary: () => Promise<{
         ok: boolean
         error?: string
@@ -122,7 +131,12 @@ declare global {
         }) => void
       ) => void
 
-      onAnalysisComplete: (cb: (data: { analyzed: number; total: number }) => void) => void
+      // `stopped` is true when the DJ hit Stop — the run ended early and
+      // the tracks it never reached still have analyzed_at null, so the
+      // next run resumes from there.
+      onAnalysisComplete: (
+        cb: (data: { analyzed: number; total: number; stopped?: boolean }) => void
+      ) => void
 
       onAnalyzeFileProgress: (cb: (p: AnalyzeFileProgressPayload) => void) => void
 
@@ -180,6 +194,26 @@ declare global {
         forTracks: (trackIds: number[]) => Promise<Record<number, Tag[]>>
         tracksByTag: (tagId: number) => Promise<Track[]>
         apply: (trackId: number, tagId: number) => Promise<{ ok: boolean; error?: string }>
+        // Replaces this field's tags and recomputes tracks.<field> in one
+        // transaction. `derived` is the new column value, ready to write to
+        // the file without reading back.
+        setForField: (
+          trackId: number,
+          field: string,
+          values: string[]
+        ) => Promise<{ ok: boolean; derived?: string | null; error?: string }>
+        // Renames a tag everywhere and re-derives every track carrying it.
+        // Merges into an existing tag of the same field on a collision.
+        rename: (
+          tagId: number,
+          newValue: string
+        ) => Promise<{
+          ok: boolean
+          renamed?: boolean
+          mergedInto?: number | null
+          tracksUpdated?: number
+          error?: string
+        }>
         remove: (trackId: number, tagId: number) => Promise<{ ok: boolean; error?: string }>
         checkCandidates: (candidates: string[], field: string) => Promise<TagCandidate[]>
         confirmImport: (
@@ -283,6 +317,19 @@ declare global {
           reason?: string
           error?: string
         }>
+        // 'library' removes the folder rows only — files untouched, and the
+        // tracks survive unfiled (tracks.folder_id is ON DELETE SET NULL).
+        // 'trash' sends the directory to the OS Trash and removes the track
+        // rows with it. Counts come back so the caller can report them.
+        deleteFolder: (
+          folderId: number,
+          mode: 'library' | 'trash'
+        ) => Promise<{
+          ok: boolean
+          folders?: number
+          tracks?: number
+          error?: string
+        }>
         readFolder: (
           folderPath: string
         ) => Promise<{ ok: boolean; items?: FolderItem[]; error?: string }>
@@ -299,7 +346,7 @@ declare global {
           deleteSource?: boolean
         }) => Promise<{ jobId: string }>
         cancelCopy: (jobId: string) => Promise<{ ok: boolean; error?: string }>
-        showInFolder: (filepath: string) => Promise<void>
+        showInFolder: (filepath: string) => Promise<{ ok: boolean; error?: string }>
       }
 
       onFoldersChanged: (cb: () => void) => void
@@ -315,7 +362,11 @@ declare global {
 
       artwork: {
         pathFor: (hash: string | null, size: 'full' | 'thumb') => Promise<string | null>
-        pick: (trackId: number) => Promise<{ ok: boolean; hash?: string; error?: string }>
+        // A single track id, or a selection that will all share one stored
+        // image. `applied` is how many rows were pointed at it.
+        pick: (
+          target: number | number[]
+        ) => Promise<{ ok: boolean; hash?: string; applied?: number; error?: string }>
         sweepOrphaned: () => Promise<{ removed: number; bytesReclaimed: number }>
       }
     }

@@ -76,28 +76,38 @@ export function TagInput({ trackId, field, label, color = '#7f77dd' }: TagInputP
     const track = store.tracks.find((t) => t.id === trackId)
     if (!track) return
 
-    // Join multiple tag values with a separator Serato can read
-    // e.g. comment field: "FTW / CLASSIC / HEADZ"
-    const value = currentTags.length > 0 ? currentTags.map((t) => t.value).join(' / ') : null
+    // One call, one transaction in main: the pivot rows for this field and
+    // the derived tracks.<field> column move together, and the joined value
+    // comes back so the file write below does not need a read.
+    //
+    // This used to be an optimistic store write plus a separate
+    // updateTrackMeta, with the join done here — three steps that could each
+    // fail on their own and leave the badges and the library list disagreeing.
+    // See setTagsForField in main/db.ts.
+    const result = await window.api.tags.setForField(
+      trackId,
+      field,
+      currentTags.map((t) => t.value)
+    )
 
-    // The badge fields all map onto a real tracks column of the same name,
-    // so the row can be kept in step with the file without a lookup table.
-    store.updateTrack(trackId, { [field]: value } as Partial<Track>)
-    const dbResult = await window.api.db.updateTrackMeta({ id: trackId, [field]: value })
-    if (!dbResult.ok) {
-      toast.error('Could not save tag', { description: dbResult.error ?? 'Unknown error' })
+    if (!result.ok) {
+      toast.error('Could not save tag', { description: result.error ?? 'Unknown error' })
+      return
     }
 
-    const result = await window.api.writeTags(
+    const value = result.derived ?? null
+    store.updateTrack(trackId, { [field]: value } as Partial<Track>)
+
+    const fileWrite = await window.api.writeTags(
       track.filepath,
       withTrackIdentity(track, { [fieldToMetaKey(field)]: value ?? '' })
     )
 
-    if (!result.ok) {
-      toast.error('Could not save tag to file', { description: result.error ?? 'Unknown error' })
+    if (!fileWrite.ok) {
+      toast.error('Could not save tag to file', { description: fileWrite.error ?? 'Unknown error' })
       return
     }
-    const fileResult = result.results?.[0] as { success?: boolean; error?: string } | undefined
+    const fileResult = fileWrite.results?.[0] as { success?: boolean; error?: string } | undefined
     if (fileResult && fileResult.success === false) {
       toast.error('Could not save tag to file', { description: fileResult.error ?? 'Unknown error' })
     }

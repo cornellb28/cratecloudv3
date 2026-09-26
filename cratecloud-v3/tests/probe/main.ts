@@ -51,6 +51,8 @@ async function run(): Promise<void> {
   const tagWrites = await import('../../src/main/tagWrites')
   const rescanSweep = await import('../../src/main/rescanSweep')
   const authStore = await import('../../src/main/authStore')
+  const moveEngine = await import('../../src/main/moveEngine')
+  const expectedChanges = await import('../../src/main/expectedChanges')
 
   const registry: Record<string, (...args: never[]) => unknown> = {
     ...(db as unknown as Record<string, (...args: never[]) => unknown>),
@@ -65,6 +67,18 @@ async function run(): Promise<void> {
     ) => unknown,
     sweepFolders: ((rootId: number, rootPath: string, scannedPath: string, visited: string[]) =>
       rescanSweep.sweepFolders(rootId, rootPath, scannedPath, new Set(visited))) as unknown as (
+      ...args: never[]
+    ) => unknown,
+
+    // The shared move engine: real files, real rename/EXDEV handling, real
+    // DB update. Testing it through here rather than through fs:move-files
+    // keeps the assertions on the engine instead of on the job wrapper.
+    moveTrackToFolder: moveEngine.moveTrackToFolder as unknown as (...args: never[]) => unknown,
+    moveTracksToFolder: moveEngine.moveTracksToFolder as unknown as (...args: never[]) => unknown,
+    clearExpectations: expectedChanges.clearExpectations as unknown as (
+      ...args: never[]
+    ) => unknown,
+    pendingExpectationCount: expectedChanges.pendingExpectationCount as unknown as (
       ...args: never[]
     ) => unknown,
 

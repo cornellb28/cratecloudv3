@@ -4,6 +4,8 @@ import { useLibraryStore } from '../store/useLibraryStore'
 import { Slider } from '@renderer/components/ui/slider'
 import { Separator } from '@renderer/components/ui/separator'
 import { TagInput } from './TagInput'
+import { StagePill } from './StagePill'
+import { STAGE_NOUN } from '../lib/stages'
 import { MoveFileButton } from './MoveFileButton'
 import { Input } from '@renderer/components/ui/input'
 import { getYearOptions } from '../utils/years'
@@ -388,6 +390,27 @@ export function Inspector(): React.JSX.Element {
                 onSave={(v) => saveField('title', v)}
                 onKeyDown={(e) => onKeyDown(e, 'title')}
               />
+
+              {/* Stage — workflow state, not metadata, so it sits above the
+                  tag fields rather than among them. Same click-to-cycle as
+                  the pill on the row and the card. */}
+              <div style={{
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'space-between',
+                gap: '12px',
+              }}>
+                <span style={{
+                  fontSize: '11px',
+                  fontWeight: 500,
+                  letterSpacing: '0.6px',
+                  textTransform: 'uppercase',
+                  color: '#444',
+                }}>
+                  {STAGE_NOUN}
+                </span>
+                <StagePill track={track} variant="pill" size="md" />
+              </div>
 
               <TagInput trackId={track.id} field="artist" label="Artist" color="#d4537e" />
               <TagInput trackId={track.id} field="genre" label="Genre" color="#9b8ed4" />

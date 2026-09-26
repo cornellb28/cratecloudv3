@@ -18,6 +18,8 @@ import {
   type TrackStat
 } from '../lib/trackCard'
 import type { SelectModifiers } from '../lib/selection'
+import { StagePill } from './StagePill'
+import { TagBadge } from './TagBadge'
 
 // Two fits beside the board pill and the crate count at three columns
 // without any of them being squeezed to an ellipsis. The rest become "+N",
@@ -41,7 +43,7 @@ export function TrackCard({
   isSelected = false,
   onSelect
 }: TrackCardProps): React.JSX.Element {
-  const { activeTrackId, setActiveTrack, trackTags, boards, crateTrackIds, trackAnalysis } =
+  const { activeTrackId, setActiveTrack, trackTags, crateTrackIds, trackAnalysis } =
     useLibraryStore()
   const { currentTrack, isPlaying, playTrack, togglePlayPause } = usePlayerStore()
   const [hovered, setHovered] = useState(false)
@@ -55,7 +57,6 @@ export function TrackCard({
   // actually filter by. Genre and label already appear on the meta line.
   const ownTags = appliedTags.filter((t) => t.field === 'comment' || t.field === 'grouping')
   const artworkUrl = useArtworkUrl(track.artwork_hash, 'thumb')
-  const board = boards.find((b) => b.id === track.board_id)
 
   const stats = useMemo(() => trackStats(track), [track])
   const metaParts = useMemo(() => trackMetaParts(track), [track])
@@ -334,28 +335,9 @@ export function TrackCard({
             </span>
           )}
 
-          {board && (
-            <span
-              style={{
-                display: 'inline-flex',
-                alignItems: 'center',
-                gap: '4px',
-                fontSize: '9px',
-                color: '#6a6a80',
-                flexShrink: 0
-              }}
-            >
-              <span
-                style={{
-                  width: '6px',
-                  height: '6px',
-                  borderRadius: '50%',
-                  background: board.color
-                }}
-              />
-              {board.name}
-            </span>
-          )}
+          {/* Stage — click cycles it, same as in list view. The inline
+              variant keeps the card's quieter meta-line treatment. */}
+          <StagePill track={track} variant="inline" />
 
           {crateCount > 0 && (
             <span
@@ -377,30 +359,9 @@ export function TrackCard({
             }}
           >
             {ownTags.slice(0, MAX_TAGS).map((tag) => (
-              <span
-                key={tag.id}
-                title={tag.value}
-                style={{
-                  fontSize: '9px',
-                  fontWeight: 500,
-                  lineHeight: '15px',
-                  padding: '0 6px',
-                  borderRadius: '4px',
-                  background: `${tag.color}22`,
-                  color: tag.color,
-                  border: `0.5px solid ${tag.color}44`,
-                  whiteSpace: 'nowrap',
-                  overflow: 'hidden',
-                  textOverflow: 'ellipsis',
-                  // Caps one long tag rather than letting it squeeze its
-                  // neighbours down to two letters and an ellipsis.
-                  maxWidth: '84px',
-                  flexShrink: 0
-                }}
-              >
-                {tag.value}
-              </span>
+              <TagBadge key={tag.id} tag={tag} size="xs" title={tag.value} />
             ))}
+
             {ownTags.length > MAX_TAGS && (
               <span
                 title={ownTags.map((t) => t.value).join(', ')}

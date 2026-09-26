@@ -32,7 +32,7 @@ const FREE_INCLUDES = [
 
 const PAID_INCLUDES = [
   ...FREE_INCLUDES,
-  'Tags, crates and boards synced across your machines',
+  'Tags, crates and stages synced across your machines',
   'Browse and tag from the mobile app'
 ]
 

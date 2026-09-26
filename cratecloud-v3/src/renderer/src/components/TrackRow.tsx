@@ -5,6 +5,8 @@ import { Badge } from '@renderer/components/ui/badge'
 import { Checkbox } from '@renderer/components/ui/checkbox'
 import { useArtworkUrl } from '../hooks/useArtworkUrl'
 import { TrackRowMenu } from './TrackRowMenu'
+import { StagePill } from './StagePill'
+import { TagBadge } from './TagBadge'
 import type { SelectModifiers } from '../lib/selection'
 
 interface TrackRowProps {
@@ -25,7 +27,7 @@ export function TrackRow({
   onSelected,
   crateId
 }: TrackRowProps): React.JSX.Element {
-  const { activeTrackId, setActiveTrack, trackTags, boards } = useLibraryStore()
+  const { activeTrackId, setActiveTrack, trackTags } = useLibraryStore()
   const { currentTrack, isPlaying, playTrack, togglePlayPause } = usePlayerStore()
 
   const isActive = activeTrackId === track.id
@@ -35,7 +37,6 @@ export function TrackRow({
   const isCurrentTrack = currentTrack?.id === track.id
   const isMissing = !!track.missing
 
-  const board = boards.find((b) => b.id === track.board_id)
 
   // Radix turns a click on the checkbox into onCheckedChange, which carries
   // no mouse event — so the modifier keys are read in the capture phase on
@@ -214,44 +215,14 @@ export function TrackRow({
           </Badge>
         )}
         {appliedTags.slice(0, 3).map(tag => (
-          <Badge key={tag.id} variant="outline" style={{
-            fontSize: '10px',
-            height: '20px',
-            padding: '0 6px',
-            background: tag.color + '22',
-            color: tag.color,
-            borderColor: tag.color + '44',
-            fontWeight: 500,
-          }}>
-            {tag.value}
-          </Badge>
+          <TagBadge key={tag.id} tag={tag} />
         ))}
       </div>
 
-      {/* Board pill */}
-      {board && (
-        <div style={{
-          display: 'flex',
-          alignItems: 'center',
-          gap: '4px',
-          flexShrink: 0,
-          background: board.color + '22',
-          border: `0.5px solid ${board.color}44`,
-          borderRadius: '4px',
-          padding: '2px 7px',
-        }}>
-          <span style={{
-            width: '5px',
-            height: '5px',
-            borderRadius: '50%',
-            background: board.color,
-            flexShrink: 0,
-          }} />
-          <span style={{ fontSize: '10px', color: board.color, fontWeight: 500 }}>
-            {board.name}
-          </span>
-        </div>
-      )}
+      {/* Stage pill — click cycles Untagged → Tagged → Crate ready → Gig
+          ready and wraps. It stops the click itself, so the row still plays
+          and opens the Inspector when clicked anywhere else. */}
+      <StagePill track={track} variant="pill" />
 
       {/* Duration + format */}
       <div style={{

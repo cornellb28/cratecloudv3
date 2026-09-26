@@ -2,6 +2,7 @@ import Database, { RunResult, Statement } from 'better-sqlite3'
 import { app } from 'electron'
 import { join, basename, dirname, relative, isAbsolute } from 'path'
 import { mkdirSync } from 'fs'
+import { isTagBackedField, joinValues as joinTagValues, normalizeTagValue } from './tagFields'
 import { tmpdir } from 'os'
 import { EventEmitter } from 'events'
 import { randomUUID } from 'crypto'
@@ -141,7 +142,11 @@ db.exec(`
   -- A tag is created once and reused forever.
   --
   -- field separates tag categories:
-  --   'label'   → DJ badges: FTW, CLASSIC, HEADZ
+  --   'label'   → the record label, e.g. Def Jam, Ninja Tune. Written to
+  --               the file's publisher frame (TPUB / organization) and read
+  --               back by Serato's Label column, so it is real metadata
+  --               rather than a badge. Preserved as typed.
+  --               (DJ badges live in 'comment' and 'grouping' instead.)
   --   'genre'   → Tech House, Afro House
   --   'artist'  → Kenji Rō, Femke V
   --   'vibe'    → DARK, PEAK, WARM
@@ -149,7 +154,9 @@ db.exec(`
   --   'custom'  → anything the DJ invents
   --
   -- value is always normalized before insert:
-  --   label/custom/vibe/venue → UPPERCASE
+  --   custom/vibe/venue       → UPPERCASE
+  --   label                   → preserved as typed (a record label's
+  --                             capitalisation is part of its name)
   --   genre                   → Title Case
   --   artist                  → preserved as typed
   --
@@ -1146,19 +1153,10 @@ export function getTracksByBoardId(boardId: number): Track[] {
 
 // ─── Tag functions ────────────────────────────────────────
 
-export function normalizeTagValue(field: string, value: string): string {
-  const trimmed = value.trim()
-  if (field === 'label' || field === 'custom' || field === 'vibe' || field === 'venue') {
-    return trimmed.toUpperCase()
-  }
-  if (field === 'genre') {
-    return trimmed
-      .split(' ')
-      .map((w) => w.charAt(0).toUpperCase() + w.slice(1).toLowerCase())
-      .join(' ')
-  }
-  return trimmed
-}
+// Re-exported from tagFields.ts, which has no database in it and so can be
+// unit-tested. The genre rule there no longer destroys "R&B" — see the
+// comment on it for why a word containing a non-letter is left alone.
+export { normalizeTagValue } from './tagFields'
 
 // Two statements because OR IGNORE returns 0 on conflict.
 // getTagId always returns the correct id whether the tag
@@ -1179,6 +1177,142 @@ export function applyTag(trackId: number, tagId: number): RunResult {
 
 export function removeTag(trackId: number, tagId: number): RunResult {
   return stmts.unlinkTag.run({ track_id: trackId, tag_id: tagId })
+}
+
+// ── Tag-backed fields: the database half ──────────────────────────────────
+// The rules live in tagFields.ts (pure, unit-tested). This is the part that
+// needs the connection.
+//
+// The invariant these uphold, and the reason they exist: a track's tags and
+// its derived column change TOGETHER or not at all. Before this, the sync was
+// three sequential awaits in a React component (TagInput.writeFieldToDisk) —
+// store, then an IPC db write, then an IPC file write — with nothing holding
+// them together. A failure in the middle left the badges saying one thing and
+// the library list another, which is exactly the drift the migration had to
+// go and reconcile by hand.
+
+// Recomputes tracks.<field> from the tags currently applied. Returns the new
+// value so a caller can write it to the file without a second read.
+//
+// The field name goes into SQL, so it is checked against the allow-list
+// rather than trusted — isTagBackedField is the whole defence here.
+function deriveFieldValue(trackId: number, field: string): string | null {
+  const rows = db
+    .prepare(
+      `SELECT g.value FROM track_tags tt
+         JOIN tags g ON g.id = tt.tag_id
+        WHERE tt.track_id = ? AND g.field = ?
+        ORDER BY tt.rowid`
+    )
+    .all(trackId, field) as { value: string }[]
+
+  return joinTagValues(rows.map((r) => r.value))
+}
+
+export function getDerivedFieldValue(trackId: number, field: string): string | null {
+  if (!isTagBackedField(field)) throw new Error(`Not a tag-backed field: ${field}`)
+  return deriveFieldValue(trackId, field)
+}
+
+// Replaces every tag of `field` on this track with `values`, and recomputes
+// the derived column — in ONE transaction. Order is preserved: the display
+// string reads in the order the values were given.
+//
+// Returns the derived value so the caller can hand it straight to the file
+// write without reading back.
+export function setTagsForField(trackId: number, field: string, values: string[]): string | null {
+  if (!isTagBackedField(field)) throw new Error(`Not a tag-backed field: ${field}`)
+
+  let derived: string | null = null
+
+  const run = db.transaction(() => {
+    // Unlink only this field's tags. A track's comment badges and its genre
+    // tags live in the same pivot table, and one must not clear the other.
+    db.prepare(
+      `DELETE FROM track_tags
+        WHERE track_id = ?
+          AND tag_id IN (SELECT id FROM tags WHERE field = ?)`
+    ).run(trackId, field)
+
+    for (const value of values) {
+      const trimmed = value.trim()
+      if (trimmed === '') continue
+      // findOrCreateTag normalizes per field (see normalizeTagValue).
+      const tagId = findOrCreateTag(field, trimmed)
+      stmts.linkTag.run({ track_id: trackId, tag_id: tagId })
+    }
+
+    derived = deriveFieldValue(trackId, field)
+    db.prepare(
+      `UPDATE tracks SET ${field} = @value, updated_at = datetime('now') WHERE id = @id`
+    ).run({ id: trackId, value: derived })
+  })
+  run()
+
+  return derived
+}
+
+// Renames a tag and re-derives every track that carries it, in one
+// transaction. New — nothing renamed a tag before, which is why five fields'
+// worth of display strings could drift from their tags in the first place.
+//
+// If the new value collides with an existing tag in the same field, the two
+// are MERGED: the rows move onto the survivor and the renamed tag is dropped.
+// That is a rename the DJ explicitly asked for, not the automatic
+// near-duplicate merging that is deliberately out of scope.
+export function renameTagAndCascade(
+  tagId: number,
+  newValue: string
+): { renamed: boolean; mergedInto: number | null; tracksUpdated: number } {
+  const tag = db.prepare('SELECT id, field, value FROM tags WHERE id = ?').get(tagId) as
+    | { id: number; field: string; value: string }
+    | undefined
+  if (!tag) throw new Error(`No such tag: ${tagId}`)
+
+  const normalized = normalizeTagValue(tag.field, newValue)
+  if (normalized === '') throw new Error('A tag cannot be renamed to nothing')
+  if (normalized === tag.value) return { renamed: false, mergedInto: null, tracksUpdated: 0 }
+
+  let mergedInto: number | null = null
+  let tracksUpdated = 0
+
+  const run = db.transaction(() => {
+    const existing = db
+      .prepare('SELECT id FROM tags WHERE field = ? AND value = ? AND id <> ?')
+      .get(tag.field, normalized, tagId) as { id: number } | undefined
+
+    // Every track that will need its derived column recomputed — captured
+    // BEFORE the pivot rows move, since after the merge the old tag is gone.
+    const affected = db
+      .prepare('SELECT DISTINCT track_id FROM track_tags WHERE tag_id = ?')
+      .all(tagId)
+      .map((r) => (r as { track_id: number }).track_id)
+
+    if (existing) {
+      mergedInto = existing.id
+      // OR IGNORE: a track carrying both tags already would violate the
+      // (track_id, tag_id) primary key.
+      db.prepare('UPDATE OR IGNORE track_tags SET tag_id = ? WHERE tag_id = ?').run(
+        existing.id,
+        tagId
+      )
+      db.prepare('DELETE FROM track_tags WHERE tag_id = ?').run(tagId)
+      db.prepare('DELETE FROM tags WHERE id = ?').run(tagId)
+    } else {
+      db.prepare('UPDATE tags SET value = ? WHERE id = ?').run(normalized, tagId)
+    }
+
+    for (const trackId of affected) {
+      const derived = deriveFieldValue(trackId, tag.field)
+      db.prepare(
+        `UPDATE tracks SET ${tag.field} = @value, updated_at = datetime('now') WHERE id = @id`
+      ).run({ id: trackId, value: derived })
+    }
+    tracksUpdated = affected.length
+  })
+  run()
+
+  return { renamed: true, mergedInto, tracksUpdated }
 }
 
 export function getTrackTags(trackId: number): Tag[] {
@@ -1992,6 +2126,63 @@ export function markFoldersMissingByIds(ids: number[]): number {
   )
   if (changed > 0) folderEvents.emit('changed')
   return changed
+}
+
+// ─── Deleting a folder ─────────────────────────────────────
+// Removes a folder row and everything beneath it. The SCHEMA does most of
+// this on its own, and the two clauses pull in opposite directions on
+// purpose (PRAGMA foreign_keys is ON — see the top of this file):
+//
+//   folders.parent_folder_id  ON DELETE CASCADE   → subfolder rows go too
+//   tracks.folder_id          ON DELETE SET NULL  → tracks SURVIVE, unfiled
+//
+// So the default is the forgiving one: the folder disappears from the
+// Folders view and every track keeps its tags, crates and stage, just with
+// no folder. Nothing a DJ typed is lost by removing a folder.
+//
+// `deleteTracks` is the opt-in for the case where the files themselves have
+// been trashed, and leaving the rows behind would only produce a library
+// full of tracks that can never be found again.
+//
+// Returns what it actually removed so the caller can say so rather than
+// guessing.
+export function deleteFolderCascade(
+  folderId: number,
+  options: { deleteTracks: boolean }
+): { folders: number; tracks: number } {
+  const descendantIds = db
+    .prepare(
+      `WITH RECURSIVE descendants(id) AS (
+         SELECT id FROM folders WHERE id = ?
+         UNION ALL
+         SELECT f.id FROM folders f JOIN descendants d ON f.parent_folder_id = d.id
+       )
+       SELECT id FROM descendants`
+    )
+    .all(folderId)
+    .map((row) => (row as { id: number }).id)
+
+  if (descendantIds.length === 0) return { folders: 0, tracks: 0 }
+
+  let trackCount = 0
+
+  const run = db.transaction(() => {
+    if (options.deleteTracks) {
+      // Counted before the delete, since after it there is nothing to count.
+      trackCount = runChunkedById(
+        descendantIds,
+        (placeholders) => `DELETE FROM tracks WHERE folder_id IN (${placeholders})`
+      )
+    }
+    // One delete on the top folder; the CASCADE takes the descendants with
+    // it. Deleting them individually would work too, but would depend on
+    // child-before-parent ordering that the cascade already guarantees.
+    db.prepare('DELETE FROM folders WHERE id = ?').run(folderId)
+  })
+  run()
+
+  folderEvents.emit('changed')
+  return { folders: descendantIds.length, tracks: trackCount }
 }
 
 // Epoch seconds, matching library_roots.created_at's strftime('%s','now').

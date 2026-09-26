@@ -21,6 +21,7 @@ import { TagPageView } from './views/TagPageView'
 import { CrateView } from './views/CrateView'
 import { PasswordResetDialog } from './components/PasswordResetDialog'
 import { LAST_VIEW_KEY, restoreView, isRestorable } from './lib/lastView'
+import { StaleBuildBanner } from './components/StaleBuildBanner'
 
 const COLLAPSE_THRESHOLD = 900 // px
 const FOLDERS_REFETCH_DEBOUNCE_MS = 300
@@ -43,6 +44,8 @@ function App(): React.JSX.Element {
     removeJob,
     mergeTracks,
     setPendingFolderNav,
+    setPendingTagNav,
+    setAnalysisProgress,
     setCrates,
     setCrateTrackIds
   } = useLibraryStore()
@@ -67,12 +70,13 @@ function App(): React.JSX.Element {
   // Add library roots to app state
   const [libraryRoots, setLibraryRoots] = useState<LibraryRoot[]>([])
   const [reconcileOpen, setReconcileOpen] = useState(false)
-  const [selectedTag, setSelectedTag] = useState<Tag | null>(null)
+  // A stack, not one tag: the Tags page narrows by adding tags on top of
+  // each other. Empty means the tag cloud is showing instead.
+  const [selectedTags, setSelectedTags] = useState<Tag[]>([])
   const [selectedCrateId, setSelectedCrateId] = useState<number | null>(null)
-  const [analysisProgress, setAnalysisProgress] = useState<{
-    done: number
-    total: number
-  } | null>(null)
+  // Lives in the store now: Settings > Library shows the same run and the
+  // same Stop button, and two copies of this would drift.
+  const analysisProgress = useLibraryStore((s) => s.analysisProgress)
   const [seratoImportPrompt, setSeratoImportPrompt] = useState<{
     folderPath: string
     seratoDir: string
@@ -154,6 +158,30 @@ function App(): React.JSX.Element {
       cancelled = true
       window.api.offAuthChanged()
     }
+  }, [])
+
+  // ── Follow a tag clicked anywhere in the app ────────────
+  // Any TagBadge — on a row, a card, the dashboard — sets pendingTagNav.
+  // Consumed once here and cleared, the same shape as pendingFolderNav.
+  //
+  // A store subscription rather than an effect on the value: reading it as a
+  // dependency and calling setState in the effect body is a cascading render
+  // (react-hooks/set-state-in-effect), whereas a subscription callback is an
+  // external-system update, which is what effects are actually for. Same
+  // pattern FolderView uses for pendingFolderNav.
+  //
+  // It REPLACES the filter rather than adding to it: clicking a tag on some
+  // track in the library means "show me this tag", not "narrow what I was
+  // already looking at". Stacking is what the Narrow further row is for.
+  useEffect(() => {
+    return useLibraryStore.subscribe((state, prev) => {
+      if (state.pendingTagNav != null && state.pendingTagNav !== prev.pendingTagNav) {
+        setActiveView('tags')
+        setSelectedTags([state.pendingTagNav])
+        setPendingTagNav(null)
+      }
+    })
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
   // ── Watchers ────────────────────
@@ -423,7 +451,16 @@ function App(): React.JSX.Element {
     })
 
     // Phase 2 complete — hide the analysis bar
-    window.api.onAnalysisComplete(() => {
+    window.api.onAnalysisComplete((data) => {
+      if (data?.stopped) {
+        toast.info('Analysis stopped', {
+          description: `${data.analyzed} of ${data.total} analyzed. The rest stay queued for next time.`
+        })
+        // Cleared at once rather than after the usual 3s hold: the bar is
+        // showing a run that is over, and leaving it up reads as still working.
+        setAnalysisProgress(null)
+        return
+      }
       setTimeout(() => setAnalysisProgress(null), 3000)
     })
 
@@ -513,7 +550,7 @@ function App(): React.JSX.Element {
 
   function handleViewChange(view: View): void {
     setActiveView(view)
-    if (view !== 'tags') setSelectedTag(null)
+    if (view !== 'tags') setSelectedTags([])
   }
 
   async function handleCancelCopy(jobId: string): Promise<void> {
@@ -648,6 +685,10 @@ function App(): React.JSX.Element {
         onOpenFolder={(folderPath) => void navigateToFolderPath(folderPath)}
       />
 
+      {/* Dev-only. Sits above every view because a stale main process makes
+          any of them behave unpredictably. */}
+      <StaleBuildBanner />
+
       {/* Phase 2 — analysis progress bar */}
       {analysisProgress !== null && analysisProgress.total > 0 && (
         <div
@@ -658,8 +699,39 @@ function App(): React.JSX.Element {
             flexShrink: 0
           }}
         >
-          <div className="text-xs text-muted-foreground mb-1">
-            Analyzing BPM + key — {analysisProgress.done} / {analysisProgress.total}
+          <div
+            style={{
+              display: 'flex',
+              alignItems: 'center',
+              gap: '10px',
+              marginBottom: '4px'
+            }}
+          >
+            <span className="text-xs text-muted-foreground">
+              Analyzing BPM + key — {analysisProgress.done} / {analysisProgress.total}
+            </span>
+            {/* Analysis is minutes of work on a large import — librosa reads
+                every file end to end. Quitting the app should not be the
+                only way out of it. */}
+            <button
+              type="button"
+              onClick={() => void window.api.stopAnalysis()}
+              title="Stop analyzing — tracks already done are kept"
+              style={{
+                marginLeft: 'auto',
+                background: 'none',
+                border: '0.5px solid #3a3060',
+                borderRadius: '5px',
+                color: '#a09be8',
+                fontSize: '10px',
+                padding: '2px 9px',
+                cursor: 'pointer',
+                fontFamily: 'inherit',
+                flexShrink: 0
+              }}
+            >
+              Stop
+            </button>
           </div>
           <div
             style={{
@@ -708,7 +780,11 @@ function App(): React.JSX.Element {
                 onOpenAccount={() => void openAccount()}
               />
             ) : (
-              <DashboardView auth={auth} onOpenAccount={() => void openAccount()} />
+              <DashboardView
+                auth={auth}
+                onOpenAccount={() => void openAccount()}
+                onOpenLibrary={() => setActiveView('library')}
+              />
             ))}
           {activeView === 'library' && <LibraryView />}
           {activeView === 'folders' &&
@@ -744,12 +820,16 @@ function App(): React.JSX.Element {
               </div>
             ))}
 
-          {activeView === 'tags' && !selectedTag && (
-            <TagsCloudView onTagSelect={(tag) => setSelectedTag(tag)} />
+          {activeView === 'tags' && selectedTags.length === 0 && (
+            <TagsCloudView onTagSelect={(tag) => setSelectedTags([tag])} />
           )}
 
-          {activeView === 'tags' && selectedTag && (
-            <TagPageView tag={selectedTag} onBack={() => setSelectedTag(null)} />
+          {activeView === 'tags' && selectedTags.length > 0 && (
+            <TagPageView
+              tags={selectedTags}
+              onChange={setSelectedTags}
+              onBack={() => setSelectedTags([])}
+            />
           )}
 
           {activeView === 'settings' && (

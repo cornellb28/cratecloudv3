@@ -1,6 +1,7 @@
 import chokidar from 'chokidar'
 import { basename, extname } from 'path'
 import type { FSWatcher } from 'chokidar'
+import { consumeExpectedAddition, consumeExpectedRemoval } from './expectedChanges'
 
 // ─── Types ───────────────────────────────────────────────
 
@@ -132,6 +133,16 @@ export function startWatcher(rootId: number, rootPath: string): void {
   watcher.on('add', async (filepath) => {
     if (!isAudio(filepath)) return
 
+    // The landing half of a move CrateCloud made itself (see
+    // expectedChanges.ts). The engine has already repointed the row and the
+    // DJ asked for it, so there is nothing to import and nothing to review —
+    // queueing a pending_changes row here would ask them to confirm their own
+    // action. Consume-once, so a later genuine add at this path still counts.
+    if (consumeExpectedAddition(filepath)) {
+      console.log(`[watcher] add is our own move landing, ignoring: ${filepath}`)
+      return
+    }
+
     console.log(`[watcher] file added: ${filepath}`)
 
     // Check if this is the destination of a recent move
@@ -151,6 +162,16 @@ export function startWatcher(rootId: number, rootPath: string): void {
 
   watcher.on('unlink', async (filepath) => {
     if (!isAudio(filepath)) return
+
+    // The departing half of a move CrateCloud made itself. Returning here
+    // keeps it out of recentlyUnlinked, which matters most on the collision
+    // path: a file renamed to "Track (2).mp3" no longer matches
+    // findMoveCandidate's same-filename rule, so without this it would fall
+    // through to onFileDeleted and mark a live track missing.
+    if (consumeExpectedRemoval(filepath)) {
+      console.log(`[watcher] unlink is our own move leaving, ignoring: ${filepath}`)
+      return
+    }
 
     console.log(`[watcher] file removed: ${filepath}`)
 

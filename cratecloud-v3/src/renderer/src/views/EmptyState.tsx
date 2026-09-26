@@ -114,7 +114,7 @@ export function EmptyState({
             {[
               { icon: '⚡', label: 'Instant import', desc: 'Tracks appear immediately' },
               { icon: '♩', label: 'BPM + Key', desc: 'Auto-analyzed in background' },
-              { icon: '⊞', label: 'Smart organization', desc: 'Board, crates, and tags' }
+              { icon: '⊞', label: 'Smart organization', desc: 'Stages, crates, and tags' }
             ].map((f) => (
               <div
                 key={f.label}

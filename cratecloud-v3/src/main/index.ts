@@ -74,6 +74,8 @@ import {
   deleteSetting,
   getTracksByBoardId,
   findOrCreateTag,
+  setTagsForField,
+  renameTagAndCascade,
   getUnanalyzedTracks,
   setTrackArtworkHash,
   updateTrackFilepath,
@@ -90,6 +92,7 @@ import {
   ensureFolderForDirectory,
   getFolderIdByRelativePath,
   markFolderMissing,
+  deleteFolderCascade,
   folderEvents,
   getFolderTree,
   getFolderTrackCounts,
@@ -118,6 +121,7 @@ import {
   type SeratoLibraryLocation,
   type SeratoImportTally
 } from './serato/seratoImport'
+import { checkBuildStatus } from './staleBuild'
 
 // Raise file handle limit for large libraries
 try {
@@ -1566,7 +1570,24 @@ function registerLibraryRoot(path: string): RegisterRootResult {
   return { status: 'registered', rootId }
 }
 
+// Set by the analysis:stop IPC, cleared at the start of every run. Analysis
+// is a long, heavy job — librosa reads the whole file per track — and a DJ
+// who started it on a 5,000-track import needs a way out that is not "quit
+// the app".
+//
+// Checked BETWEEN batches rather than mid-track: a sidecar process already
+// reading a file is left to finish, because killing it buys a couple of
+// seconds and costs a half-written analysis. Stopping means "start no more",
+// which on a batch of four is at most a few seconds' wait.
+let phase2StopRequested = false
+
+export function requestPhase2Stop(): void {
+  phase2StopRequested = true
+}
+
 async function runPhase2Analysis(event: Electron.IpcMainInvokeEvent): Promise<void> {
+  phase2StopRequested = false
+
   // Only analyze tracks that Phase 1 did not already resolve
   // (tracks that had BPM/key tags skip librosa entirely)
   const unanalyzed = getUnanalyzedTracks() as Track[]
@@ -1574,7 +1595,8 @@ async function runPhase2Analysis(event: Electron.IpcMainInvokeEvent): Promise<vo
   if (unanalyzed.length === 0) {
     event.sender.send('library:analysis-complete', {
       analyzed: 0,
-      total: 0
+      total: 0,
+      stopped: false
     })
     return
   }
@@ -1584,6 +1606,8 @@ async function runPhase2Analysis(event: Electron.IpcMainInvokeEvent): Promise<vo
   const concurrency = 4 // librosa is heavy — keep this lower
 
   for (let i = 0; i < unanalyzed.length; i += concurrency) {
+    if (phase2StopRequested) break
+
     const batch = unanalyzed.slice(i, i + concurrency)
 
     await Promise.all(
@@ -1634,10 +1658,17 @@ async function runPhase2Analysis(event: Electron.IpcMainInvokeEvent): Promise<vo
     await new Promise((r) => setTimeout(r, 100))
   }
 
+  // `stopped` lets the renderer say "stopped at 340 of 5,000" rather than
+  // reporting a completed run that silently analysed a fraction of it. The
+  // tracks it did not reach keep analyzed_at null, so the next run picks
+  // them up exactly where this one left off.
   event.sender.send('library:analysis-complete', {
     analyzed: done,
-    total
+    total,
+    stopped: phase2StopRequested
   })
+
+  phase2StopRequested = false
 }
 
 let mainWindow: BrowserWindow | null = null
@@ -1986,6 +2017,20 @@ app.whenReady().then(() => {
   // with an external drive unplugged should still get a clean rescan of
   // everything that IS attached, and the skipped roots are reported back so
   // the renderer can say which were left out.
+  // Stops the Phase 2 analysis pass after the batch currently in flight.
+  // Safe to call when nothing is running — the flag is cleared at the start
+  // of every run, so a stale stop cannot kill the next one.
+  // Dev only. In a packaged app the bundles cannot change under a running
+  // process, so this would be answering a question nobody can ask.
+  ipcMain.handle('app:build-status', () =>
+    is.dev ? checkBuildStatus() : { stale: false, changed: [] }
+  )
+
+  ipcMain.handle('analysis:stop', () => {
+    requestPhase2Stop()
+    return { ok: true }
+  })
+
   ipcMain.handle('library:rescan', async (event) => {
     try {
       const roots = getAllRoots()
@@ -2273,8 +2318,23 @@ app.whenReady().then(() => {
   })
 
   // ── Finder/Explorer integration ─────────────────────────────────────────────
-  ipcMain.handle('fs:show-in-folder', (_event, filepath: string) => {
-    shell.showItemInFolder(filepath)
+  // shell.showItemInFolder returns void and stays silent when the path does
+  // not exist — Finder simply never opens. A missing file is the common case
+  // here (the row is still in the library, the file moved), so it is checked
+  // first and reported rather than looking like a dead button.
+  ipcMain.handle('fs:show-in-folder', async (_event, filepath: string) => {
+    try {
+      if (!filepath) return { ok: false, error: 'This track has no file path.' }
+      await stat(filepath)
+      shell.showItemInFolder(filepath)
+      return { ok: true }
+    } catch (err) {
+      const code = (err as NodeJS.ErrnoException).code
+      if (code === 'ENOENT') {
+        return { ok: false, error: 'The file is no longer at that location.' }
+      }
+      return { ok: false, error: (err as Error).message }
+    }
   })
 
   // ── Multi file import ────────────────────────────────────
@@ -2313,18 +2373,32 @@ app.whenReady().then(() => {
     artworkPathFor(hash, size)
   )
 
-  // Lets the user replace one track's cover from an image file. Stores it
-  // content-addressed like embedded art, so picking the same image for many
-  // tracks costs one file. Sets artwork_hash in the DB only — the audio
-  // file's embedded picture is not touched. No `error` on a failed result
-  // means the dialog was cancelled.
+  // Lets the user set a cover from an image file, for one track or for a
+  // whole selection. Stores it content-addressed like embedded art, so
+  // picking the same image for fifty tracks costs ONE file on disk and
+  // fifty rows pointing at it — which is what makes the bulk case cheap
+  // rather than fifty copies of the same JPEG.
+  //
+  // Sets artwork_hash in the DB only; the audio files' embedded pictures are
+  // not touched. No `error` on a failed result means the dialog was
+  // cancelled.
   ipcMain.handle(
     'artwork:pick',
-    async (_e, trackId: number): Promise<{ ok: boolean; hash?: string; error?: string }> => {
+    async (
+      _e,
+      target: number | number[]
+    ): Promise<{ ok: boolean; hash?: string; applied?: number; error?: string }> => {
       if (!mainWindow) return { ok: false }
+
+      const trackIds = Array.isArray(target) ? target : [target]
+      if (trackIds.length === 0) return { ok: false, error: 'No tracks selected.' }
+
       const { canceled, filePaths } = await dialog.showOpenDialog(mainWindow, {
         properties: ['openFile'],
-        title: 'Choose album artwork',
+        title:
+          trackIds.length === 1
+            ? 'Choose album artwork'
+            : `Choose album artwork for ${trackIds.length} tracks`,
         filters: [{ name: 'Images', extensions: ['jpg', 'jpeg', 'png'] }]
       })
       if (canceled || filePaths.length === 0) return { ok: false }
@@ -2334,10 +2408,13 @@ app.whenReady().then(() => {
         if (nativeImage.createFromBuffer(bytes).isEmpty()) {
           return { ok: false, error: 'That file is not a valid JPEG or PNG image.' }
         }
+        // Stored once, whatever the selection size.
         const hash = await storeArtwork(bytes)
         if (!hash) return { ok: false, error: 'Could not save the artwork.' }
-        setTrackArtworkHash(trackId, hash)
-        return { ok: true, hash }
+
+        for (const id of trackIds) setTrackArtworkHash(id, hash)
+
+        return { ok: true, hash, applied: trackIds.length }
       } catch (err) {
         console.error('artwork:pick failed:', err)
         return { ok: false, error: (err as Error).message }
@@ -2613,6 +2690,67 @@ app.whenReady().then(() => {
 
   // ── Create a new folder ──────────────────────────────────
 
+  // ── Deleting a folder ──────────────────────────────────────────────────
+  // Two modes, and the difference is the whole point of the dialog above it:
+  //
+  //   'library'  folder rows only. Files are not touched. Tracks survive,
+  //              unfiled, with every tag/crate/stage intact — that is
+  //              tracks.folder_id's ON DELETE SET NULL doing the work.
+  //   'trash'    the directory goes to the OS Trash (recoverable from
+  //              Finder), and the track rows go with it, since rows whose
+  //              files have been trashed are only a library full of dead
+  //              entries.
+  //
+  // shell.trashItem, never rm -rf: this is the same call db:delete-track
+  // already uses, and a mis-clicked folder is a DJ's music.
+  ipcMain.handle(
+    'fs:delete-folder',
+    async (_e, folderId: number, mode: 'library' | 'trash') => {
+      try {
+        const folder = getFolderTree().find((f) => f.id === folderId)
+        if (!folder) return { ok: false, error: 'Folder not found' }
+
+        // A library root is removed by un-registering it, not by deleting a
+        // folder row — doing it here would strand every track under a root
+        // the app still thinks it is watching.
+        if (folder.parent_folder_id == null) {
+          return {
+            ok: false,
+            error: 'This is a library folder. Remove it from Settings > Library instead.'
+          }
+        }
+
+        if (mode === 'trash') {
+          if (!folder.path) return { ok: false, error: 'Folder has no path on disk' }
+          try {
+            await shell.trashItem(folder.path)
+          } catch (err) {
+            // Already gone is a success for our purposes — the rows still
+            // need clearing, which is what the caller actually wanted.
+            const code = (err as NodeJS.ErrnoException).code
+            if (code !== 'ENOENT') {
+              // Logged as well as returned: trashItem's failures are
+              // environmental (a volume with no Trash, a permission the app
+              // was never granted) and the message is the only thing that
+              // says which. Losing it to a dismissed toast makes this
+              // look like the button simply does nothing.
+              console.error('[folders] trashItem failed for', folder.path, err)
+              return {
+                ok: false,
+                error: `Could not move to Trash: ${(err as Error).message}`
+              }
+            }
+          }
+        }
+
+        const removed = deleteFolderCascade(folderId, { deleteTracks: mode === 'trash' })
+        return { ok: true, ...removed }
+      } catch (err) {
+        return { ok: false, error: (err as Error).message }
+      }
+    }
+  )
+
   ipcMain.handle('fs:create-folder', async (_e, parentPath: string, folderName: string) => {
     try {
       if (!folderName.trim()) {
@@ -2750,6 +2888,29 @@ app.whenReady().then(() => {
   ipcMain.handle('tags:for-tracks', (_e, trackIds: number[]) => getTrackTagsForTracks(trackIds))
 
   ipcMain.handle('tags:tracks-by-tag', (_e, tagId: number) => getTagTracks(tagId))
+
+  // Replaces a track's tags for one field AND recomputes its derived column,
+  // in a single transaction. Returns the derived value so the renderer can
+  // write it to the file without reading back — and so the store and the row
+  // can never disagree about what the column says.
+  ipcMain.handle('tags:set-for-field', (_e, trackId: number, field: string, values: string[]) => {
+    try {
+      const derived = setTagsForField(trackId, field, values)
+      return { ok: true, derived }
+    } catch (err) {
+      return { ok: false, error: (err as Error).message }
+    }
+  })
+
+  // Renames a tag everywhere and re-derives every track carrying it. Merges
+  // into an existing tag of the same field if the new value collides.
+  ipcMain.handle('tags:rename', (_e, tagId: number, newValue: string) => {
+    try {
+      return { ok: true, ...renameTagAndCascade(tagId, newValue) }
+    } catch (err) {
+      return { ok: false, error: (err as Error).message }
+    }
+  })
 
   ipcMain.handle('tags:find-or-create', (_e, field: string, value: string, color: string) => {
     try {

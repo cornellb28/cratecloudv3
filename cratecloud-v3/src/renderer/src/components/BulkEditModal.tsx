@@ -1,6 +1,6 @@
-import React, { useEffect, useMemo, useState } from 'react'
+import React, { useEffect, useMemo, useRef, useState } from 'react'
 import { toast } from 'sonner'
-import { Check, ChevronLeft, ChevronRight, Undo2 } from 'lucide-react'
+import { Check, ChevronLeft, ChevronRight, Activity } from 'lucide-react'
 import { Dialog, DialogContent } from '@renderer/components/ui/dialog'
 import { Button } from '@renderer/components/ui/button'
 import { Badge } from '@renderer/components/ui/badge'
@@ -8,6 +8,10 @@ import { TagInput } from './TagInput'
 import { useLibraryStore } from '../store/useLibraryStore'
 import { useArtworkUrl } from '../hooks/useArtworkUrl'
 import { fieldToMetaKey, withTrackIdentity } from '../lib/tagMeta'
+import { StagePill } from './StagePill'
+import { reanalyzeTrack } from '../lib/reanalyze'
+import { flushStageWrites } from '../lib/stageCommit'
+import { STAGE_NOUN } from '../lib/stages'
 
 // ─── Types ───────────────────────────────────────────────
 
@@ -29,12 +33,6 @@ const TAG_FIELDS = [
   { field: 'label', label: 'Label', color: '#378add' }
 ]
 
-// Fields held as plain text until an explicit save.
-const TEXT_FIELDS = [
-  { field: 'bpm', label: 'BPM' },
-  { field: 'key_camelot', label: 'Key' }
-]
-
 const YEARS = Array.from(
   { length: new Date().getFullYear() - 1950 + 1 },
   (_, i) => new Date().getFullYear() - i
@@ -44,11 +42,19 @@ const ACCENT = '#7f77dd'
 
 type FileWrite = { filepath: string; meta: EditTagsMeta }
 
-// What the user asked to happen once the save lands.
-type SaveIntent = 'stay' | 'continue' | 'close'
+// How long typing has to stop before an autosave fires. Long enough that a
+// DJ typing a genre does not trigger a write per word — each save reaches the
+// audio FILE through edit_tags.py, not just the database — short enough that
+// leaving the modal a second later has already saved.
+const AUTOSAVE_MS = 900
 
-// A navigation the user asked for that is waiting on unsaved changes.
-type PendingNav = { kind: 'index'; index: number } | { kind: 'close' } | null
+// How long the "Saved" tick stays up before fading back to idle.
+const SAVED_FLASH_MS = 2000
+
+// There is no unsaved state to guard any more: edits save themselves, and
+// every way out of a track flushes first. This is only what the indicator
+// shows.
+type SaveState = 'idle' | 'saving' | 'saved' | 'error'
 
 // ─── Main component ───────────────────────────────────────
 
@@ -65,7 +71,11 @@ export function BulkEditModal({
   const [saving, setSaving] = useState(false)
   // Tracks whose text fields this session has written, for the progress bar.
   const [savedIds, setSavedIds] = useState<Set<number>>(new Set())
-  const [pendingNav, setPendingNav] = useState<PendingNav>(null)
+  const [saveState, setSaveState] = useState<SaveState>('idle')
+  const [analyzing, setAnalyzing] = useState(false)
+  // Tracks whose file could not be written this save, collected during it
+  // and reported once at the end rather than one popup per track.
+  const skippedFileWrites = useRef<Set<number>>(new Set())
 
   // Reset volatile state when the modal transitions to open, and clear typed
   // values whenever the displayed track changes — both adjusted during
@@ -79,7 +89,7 @@ export function BulkEditModal({
       setCheckedFields(new Set())
       setTextValues({})
       setSavedIds(new Set())
-      setPendingNav(null)
+      setSaveState('idle')
       setSaving(false)
     }
   }
@@ -122,48 +132,44 @@ export function BulkEditModal({
     })
   }
 
-  // ── Navigation, guarded ──────────────────────────────────
-  // Every way out of the current track funnels through here, so unsaved
-  // text edits can never be dropped silently the way they were when
-  // changing track just reset textValues.
-  function requestNav(next: PendingNav): void {
-    if (!next) return
-    if (isDirty) {
-      setPendingNav(next)
-      return
-    }
-    applyNav(next)
-  }
-
-  function applyNav(nav: NonNullable<PendingNav>): void {
-    setPendingNav(null)
-    if (nav.kind === 'close') onClose()
-    else setCurrentIndex(nav.index)
+  // ── Navigation ───────────────────────────────────────────
+  // Every way out of the current track flushes any pending edit first, so
+  // there is nothing left to warn about. The old "you have unsaved changes"
+  // bar is gone with it — a prompt is only worth showing when the answer is
+  // not already obvious, and here it always is.
+  async function flushThen(action: () => void): Promise<void> {
+    if (isDirty) await save({ bulk: false })
+    action()
   }
 
   const goPrev = (): void => {
-    if (!isFirst) requestNav({ kind: 'index', index: currentIndex - 1 })
+    if (!isFirst) void flushThen(() => setCurrentIndex(currentIndex - 1))
   }
   const goNext = (): void => {
-    if (!isLast) requestNav({ kind: 'index', index: currentIndex + 1 })
+    if (!isLast) void flushThen(() => setCurrentIndex(currentIndex + 1))
   }
-  const requestClose = (): void => requestNav({ kind: 'close' })
-
-  function revert(): void {
-    setTextValues({})
-    setPendingNav(null)
-  }
+  const requestClose = (): void => void flushThen(onClose)
 
   // ── Saving ───────────────────────────────────────────────
   // A bulk edit has to reach the file, not just the database. Everything is
   // accumulated first and sent as one batch job: one sidecar process for the
   // whole selection instead of one per track, with progress surfacing
   // through the background jobs panel.
+  //
+  // A track whose file is gone is written to the DATABASE but not to disk.
+  // Sending it to edit_tags.py produces `File not found: <path>` — a sidecar
+  // error surfaced as a popup, for a track the DJ may not even have realised
+  // was in the selection. The edit is still worth keeping: it is recorded in
+  // CrateCloud and will reach the file if it is ever relinked.
   function collectFileWrite(
     writes: Map<number, FileWrite>,
     track: Track,
     meta: EditTagsMeta
   ): void {
+    if (track.missing || !track.filepath) {
+      skippedFileWrites.current.add(track.id)
+      return
+    }
     const existing = writes.get(track.id)
     writes.set(track.id, {
       filepath: track.filepath,
@@ -171,16 +177,21 @@ export function BulkEditModal({
     })
   }
 
-  // textValues holds raw input strings; bpm has to become a number before it
-  // goes near a REAL column or edit_tags.py.
-  function columnValue(field: string, raw: string): string | number | null {
-    if (field === 'bpm') return parseFloat(raw) || null
+  // textValues holds raw input strings. Only 'year' reaches here now that
+  // BPM and key are measured rather than typed — the numeric coercion that
+  // used to live here went with the BPM input.
+  function columnValue(_field: string, raw: string): string | null {
     return raw || null
   }
 
-  async function save(intent: SaveIntent): Promise<void> {
+  // Autosave calls this with bulk: false — a DJ pausing mid-type must not
+  // trigger a write across fifty files. The explicit "Apply to all" button
+  // is the only thing that passes bulk: true.
+  async function save(options: { bulk: boolean } = { bulk: false }): Promise<void> {
     if (!currentTrack || saving) return
     setSaving(true)
+    setSaveState('saving')
+    skippedFileWrites.current = new Set()
 
     const fileWrites = new Map<number, FileWrite>()
     const pendingDbWrites: (Partial<Track> & { id: number })[] = []
@@ -208,7 +219,9 @@ export function BulkEditModal({
       if (editedFields.length > 0) applyToTrack(currentTrack, editedFields)
 
       // Every other selected track: only the fields whose checkbox is on.
-      const bulkFields = editedFields.filter((field) => checkedFields.has(field))
+      const bulkFields = options.bulk
+        ? editedFields.filter((field) => checkedFields.has(field))
+        : []
       if (bulkFields.length > 0) {
         for (const trackId of trackIds) {
           if (trackId === currentTrack.id) continue
@@ -221,7 +234,9 @@ export function BulkEditModal({
       // field onto every other selected track. TagInput already saved this
       // track's own badges — to its row and to its file — when they were
       // added, so this only has to replicate them onto the rest.
-      const checkedTagFields = TAG_FIELDS.filter(({ field }) => checkedFields.has(field))
+      const checkedTagFields = options.bulk
+        ? TAG_FIELDS.filter(({ field }) => checkedFields.has(field))
+        : []
       if (checkedTagFields.length > 0) {
         const currentTags = await window.api.tags.forTrack(currentTrack.id)
 
@@ -253,9 +268,30 @@ export function BulkEditModal({
         }
       }
 
+      // Stage, onto the rest of the selection. Its own path: updateBoardId
+      // rather than updateTrackMeta, and no file write at all.
+      if (options.bulk && isBulk && checkedFields.has('stage')) {
+        // Land this track's own debounced write first, so the value being
+        // copied is the one actually in the database.
+        await flushStageWrites()
+        const stageId = currentTrack.board_id
+        for (const trackId of trackIds) {
+          if (trackId === currentTrack.id) continue
+          updateTrack(trackId, { board_id: stageId })
+          const result = await window.api.db.updateBoardId(trackId, stageId)
+          if (!result.ok) {
+            setSaveState('error')
+            toast.error('Could not save stage', { description: result.error ?? 'Unknown error' })
+            return
+          }
+          savedNow.add(trackId)
+        }
+      }
+
       for (const write of pendingDbWrites) {
         const result = await window.api.db.updateTrackMeta(write)
         if (!result.ok) {
+          setSaveState('error')
           toast.error('Could not save changes', { description: result.error ?? 'Unknown error' })
           return
         }
@@ -266,6 +302,7 @@ export function BulkEditModal({
           await window.api.editTagsBatch(Array.from(fileWrites.values()))
         } catch (err) {
           console.error('[BulkEditModal] editTagsBatch failed:', err)
+          setSaveState('error')
           toast.error('Could not save to files', { description: (err as Error).message })
           return
         }
@@ -275,40 +312,99 @@ export function BulkEditModal({
       // only touched tag badges, which saved themselves on the way in.
       if (savedNow.size > 0) {
         setSavedIds((prev) => new Set([...prev, ...savedNow]))
-        toast.success(
-          savedNow.size === 1
-            ? 'Saved'
-            : `Saved ${savedNow.size} tracks`
-        )
+        const skipped = skippedFileWrites.current.size
+        // No toast for an ordinary autosave — the footer indicator is the
+        // feedback, and a toast per typing pause would be unusable. Bulk
+        // applies and file-write problems still speak up, because both are
+        // things the DJ would otherwise have no way of noticing.
+        if (options.bulk) {
+          toast.success(`Applied to ${savedNow.size} tracks`)
+        } else if (skipped > 0) {
+          toast.warning(
+            `${skipped} file${skipped === 1 ? '' : 's'} could not be written`,
+            { description: 'Not on disk. The change is saved in CrateCloud.' }
+          )
+        }
       }
       setTextValues({})
-      setPendingNav(null)
-
-      if (intent === 'close') onClose()
-      else if (intent === 'continue' && !isLast) setCurrentIndex(currentIndex + 1)
+      setSaveState('saved')
     } finally {
       setSaving(false)
     }
   }
 
+  // A file that is not on disk cannot be measured, so the button says that
+  // instead of offering an analysis that can only fail.
+  const fileMissing = currentTrack?.missing === 1
+
+  // Reuses the shared per-track routine, so this writes the same columns the
+  // ⋮ menu's Re-analyze and the BulkBar's do — and shows its progress on the
+  // track's card through the same store entry.
+  async function runAnalysis(): Promise<void> {
+    if (!currentTrack || analyzing) return
+    setAnalyzing(true)
+    try {
+      const outcome = await reanalyzeTrack(currentTrack.id)
+      if (outcome === 'failed') {
+        toast.error('Could not analyze this track')
+      } else if (outcome === 'skipped') {
+        toast.error('Nothing to analyze', { description: 'The file is missing.' })
+      }
+      // On success the store row gains bpm/key, so the stand-in rows are
+      // replaced by inputs carrying the measured values.
+    } finally {
+      setAnalyzing(false)
+    }
+  }
+
+  // ── Autosave ─────────────────────────────────────────────
+  // Fires once typing has been still for AUTOSAVE_MS. The timer is restarted
+  // by every keystroke, so a burst of typing costs one save rather than one
+  // per character — which matters because each save reaches the audio file
+  // through edit_tags.py, not just the database.
+  //
+  // The save is kicked off from the timer callback, not from the effect body:
+  // calling it inline is a cascading render (react-hooks/set-state-in-effect).
+  useEffect(() => {
+    if (!open || !isDirty || saving) return
+    const timer = setTimeout(() => {
+      void save({ bulk: false })
+    }, AUTOSAVE_MS)
+    return () => clearTimeout(timer)
+    // `save` is redeclared every render; depending on it would restart the
+    // timer constantly and nothing would ever autosave.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open, isDirty, saving, textValues])
+
+  // Lets the "Saved" tick fade back to idle instead of sitting there forever
+  // implying something just happened.
+  useEffect(() => {
+    if (saveState !== 'saved') return
+    const timer = setTimeout(() => setSaveState('idle'), SAVED_FLASH_MS)
+    return () => clearTimeout(timer)
+  }, [saveState])
+
   // ── Keyboard ─────────────────────────────────────────────
   // Arrow keys are ignored while focus is in a text field so they can move
-  // the caret. The save shortcuts are not: they are modified keys, so they
-  // cannot collide with typing, and being able to save without leaving the
-  // field is the whole point of them.
+  // the caret. The modified keys are not: they cannot collide with typing,
+  // and being able to leave the field without reaching for the mouse is the
+  // whole point of them.
   useEffect(() => {
     function handleKey(e: KeyboardEvent): void {
       if (!open) return
       const modified = e.metaKey || e.ctrlKey
 
+      // Both used to mean "save". Edits save themselves now, so these are
+      // navigation — each flushing first, like every other way out.
       if (modified && e.key === 'Enter') {
         e.preventDefault()
-        void save(isLast ? 'close' : 'continue')
+        if (isLast) requestClose()
+        else goNext()
         return
       }
       if (modified && e.key.toLowerCase() === 's') {
         e.preventDefault()
-        void save('close')
+        requestClose()
         return
       }
 
@@ -318,8 +414,7 @@ export function BulkEditModal({
 
       if (e.key === 'Escape') {
         e.preventDefault()
-        if (pendingNav) setPendingNav(null)
-        else requestClose()
+        requestClose()
         return
       }
       if (typing) return
@@ -349,9 +444,15 @@ export function BulkEditModal({
         // Genre tag input — and TagInput opens its dropdown on focus, so the
         // modal appeared with a suggestion list covering its own fields.
         onOpenAutoFocus={(e) => e.preventDefault()}
-        onEscapeKeyDown={(e) => e.preventDefault()} // handled above, so it can guard unsaved edits
+        // Escape is handled by the keydown listener above so it goes through
+        // requestClose, which flushes first.
+        onEscapeKeyDown={(e) => e.preventDefault()}
+        // Clicking away used to be blocked while there were unsaved edits.
+        // There are none now — the click closes, flushing whatever was typed
+        // on the way out.
         onInteractOutside={(e) => {
-          if (isDirty) e.preventDefault()
+          e.preventDefault()
+          requestClose()
         }}
         style={{
           background: '#13131b',
@@ -475,7 +576,46 @@ export function BulkEditModal({
             >
               {currentTrack.artist ?? 'Unknown artist'}
             </div>
-            <div style={{ display: 'flex', gap: '6px', flexWrap: 'wrap' }}>
+            <div style={{ display: 'flex', gap: '6px', flexWrap: 'wrap', alignItems: 'center' }}>
+              {/* The only way to set BPM and key. Offered whenever either is
+                  missing, because one pass fills both; hidden once they are
+                  known, where the ⋮ menu's Re-analyze is the deliberate way
+                  to redo it. */}
+              {(!currentTrack.bpm || !currentTrack.key_camelot) && (
+                <button
+                  type="button"
+                  onClick={() => void runAnalysis()}
+                  disabled={analyzing || fileMissing}
+                  title={
+                    fileMissing
+                      ? 'The file is not on disk, so it cannot be analyzed'
+                      : 'Measure BPM and key from the audio'
+                  }
+                  style={{
+                    display: 'inline-flex',
+                    alignItems: 'center',
+                    gap: '5px',
+                    background: 'none',
+                    border: `0.5px solid ${fileMissing ? '#3a2422' : '#3a3060'}`,
+                    borderRadius: '999px',
+                    color: fileMissing ? '#6a4a46' : analyzing ? '#5a5a70' : '#a09be8',
+                    fontSize: '10px',
+                    padding: '2px 9px',
+                    height: '20px',
+                    cursor: analyzing || fileMissing ? 'default' : 'pointer',
+                    fontFamily: 'inherit'
+                  }}
+                >
+                  <Activity size={11} />
+                  {fileMissing
+                    ? 'File missing'
+                    : analyzing
+                      ? 'Analyzing…'
+                      : currentTrack.bpm || currentTrack.key_camelot
+                        ? `Analyze for ${currentTrack.bpm ? 'key' : 'BPM'}`
+                        : 'Analyze BPM + key'}
+                </button>
+              )}
               {currentTrack.bpm && (
                 <Badge
                   variant="outline"
@@ -550,6 +690,22 @@ export function BulkEditModal({
             </div>
           </div>
 
+          {/* Stage. Cycling the pill saves THIS track straight away, the
+              way it does on a row or a card — the checkbox is only about
+              copying that stage onto the rest of the selection when you
+              save. Deliberately not routed through applyToTrack: a stage is
+              CrateCloud's own workflow column, not a tag, and nothing about
+              it belongs in the audio file. */}
+          <FieldRow
+            showCheckbox={isBulk}
+            checked={checkedFields.has('stage')}
+            onToggle={() => toggleField('stage')}
+            color={ACCENT}
+          >
+            <InlineLabel text={STAGE_NOUN} dirty={false} />
+            <StagePill track={currentTrack} variant="pill" size="md" />
+          </FieldRow>
+
           {TAG_FIELDS.map(({ field, label, color }) => (
             <FieldRow
               key={field}
@@ -564,31 +720,16 @@ export function BulkEditModal({
             </FieldRow>
           ))}
 
-          {TEXT_FIELDS.map(({ field, label }) => (
-            <FieldRow
-              key={field}
-              showCheckbox={isBulk}
-              checked={checkedFields.has(field)}
-              onToggle={() => toggleField(field)}
-              color={ACCENT}
-            >
-              <InlineLabel text={label} dirty={dirtyFields.includes(field)} />
-              <input
-                key={`${currentTrack.id}-${field}`}
-                defaultValue={(currentTrack[field as keyof Track] as string) ?? ''}
-                onChange={(e) =>
-                  setTextValues((prev) => ({ ...prev, [field]: e.target.value }))
-                }
-                style={fieldControlStyle(dirtyFields.includes(field))}
-                onFocus={(e) => (e.target.style.borderColor = ACCENT)}
-                onBlur={(e) =>
-                  (e.target.style.borderColor = dirtyFields.includes(field)
-                    ? ACCENT
-                    : '#252535')
-                }
-              />
-            </FieldRow>
-          ))}
+          {/* BPM and key are measured, not typed. An unanalysed track shows
+              the way to fill them rather than two empty boxes asking the DJ
+              to guess — nobody types a Camelot key from memory, and a hand-
+              entered BPM is exactly the kind of wrong value that survives
+              forever because nothing ever re-checks it. */}
+          {/* BPM and key are NOT edited here. They are measured, not typed —
+              nobody enters a Camelot key from memory, and a hand-typed BPM
+              is the kind of wrong value that survives forever because
+              nothing re-checks it. They live as badges in the header, with
+              the Analyze button that fills them. */}
 
           {/* Year — a select rather than free text, but the same row shape */}
           <FieldRow
@@ -621,61 +762,6 @@ export function BulkEditModal({
           </FieldRow>
         </div>
 
-        {/* ── Unsaved guard ────────────────────────── */}
-        {pendingNav && (
-          <div
-            style={{
-              display: 'flex',
-              alignItems: 'center',
-              justifyContent: 'space-between',
-              gap: '10px',
-              padding: '10px 16px',
-              background: '#2a2118',
-              borderTop: '0.5px solid #4a3a20',
-              flexShrink: 0
-            }}
-          >
-            <span style={{ fontSize: '11px', color: '#d8b87a' }}>
-              {dirtyFields.length} unsaved{' '}
-              {dirtyFields.length === 1 ? 'change' : 'changes'} on this track.
-            </span>
-            <div style={{ display: 'flex', gap: '6px', flexShrink: 0 }}>
-              <Button
-                variant="ghost"
-                size="sm"
-                className="text-xs"
-                onClick={() => setPendingNav(null)}
-                style={{ color: '#8a8aa0' }}
-              >
-                Keep editing
-              </Button>
-              <Button
-                variant="outline"
-                size="sm"
-                className="text-xs"
-                onClick={() => {
-                  const nav = pendingNav
-                  revert()
-                  applyNav(nav)
-                }}
-                style={{ borderColor: '#4a3a20', color: '#d8b87a' }}
-              >
-                Discard
-              </Button>
-              <Button
-                variant="outline"
-                size="sm"
-                className="text-xs"
-                disabled={saving}
-                onClick={() => void save(pendingNav.kind === 'close' ? 'close' : 'continue')}
-                style={{ borderColor: ACCENT, color: '#a09be8' }}
-              >
-                Save
-              </Button>
-            </div>
-          </div>
-        )}
-
         {/* ── Footer ───────────────────────────────── */}
         <div
           style={{
@@ -688,74 +774,47 @@ export function BulkEditModal({
             gap: '10px'
           }}
         >
+          {/* Left: what a bulk apply would do, if anything is ticked. */}
           <div style={{ fontSize: '11px', color: '#5a5a70', minWidth: 0 }}>
             {checkedFields.size > 0 ? (
               <span style={{ color: '#a09be8' }}>
-                Applying {checkedFields.size} field{checkedFields.size > 1 ? 's' : ''} to all{' '}
+                {checkedFields.size} field{checkedFields.size > 1 ? 's' : ''} ready to apply to all{' '}
                 {bulkCount}
               </span>
-            ) : isDirty ? (
-              <span style={{ display: 'inline-flex', alignItems: 'center', gap: '6px' }}>
-                <span
-                  style={{
-                    width: '6px',
-                    height: '6px',
-                    borderRadius: '50%',
-                    background: ACCENT
-                  }}
-                />
-                Unsaved
-              </span>
             ) : (
-              'No unsaved changes'
+              'Changes save as you type'
             )}
           </div>
 
-          <div style={{ display: 'flex', gap: '6px', flexShrink: 0 }}>
-            {isDirty && (
+          <div style={{ display: 'flex', alignItems: 'center', gap: '10px', flexShrink: 0 }}>
+            <SaveIndicator state={saveState} />
+
+            {/* The one thing that is NOT autosaved. Ticking a checkbox and
+                having fifty files rewritten under you a second later is not
+                a save, it is an accident — so this stays a deliberate act. */}
+            {checkedFields.size > 0 && (
               <Button
-                variant="ghost"
+                variant="outline"
                 size="sm"
                 className="text-xs"
-                onClick={revert}
                 disabled={saving}
-                style={{ color: '#6a6a80' }}
-                title="Discard this track's unsaved changes"
+                onClick={() => void save({ bulk: true })}
+                style={{ borderColor: ACCENT, color: '#a09be8' }}
+                title={`Apply the ticked fields to all ${bulkCount} selected tracks`}
               >
-                <Undo2 size={12} style={{ marginRight: '4px' }} />
-                Revert
+                Apply to all {bulkCount}
               </Button>
             )}
 
             <Button
-              variant="outline"
+              variant="ghost"
               size="sm"
               className="text-xs"
-              disabled={saving}
-              onClick={() => void save('close')}
-              title="Save and close (⌘S)"
+              onClick={requestClose}
+              style={{ color: '#8a8aa0' }}
+              title="Close (⌘S or Esc) — anything typed is saved first"
             >
-              {saving ? 'Saving…' : 'Save and close'}
-            </Button>
-
-            <Button
-              variant="outline"
-              size="sm"
-              className="text-xs"
-              disabled={saving || isLast}
-              onClick={() => void save('continue')}
-              style={{
-                borderColor: isLast ? '#252535' : ACCENT,
-                color: isLast ? '#3f3f4e' : '#a09be8'
-              }}
-              title={
-                isLast
-                  ? 'This is the last track in the selection'
-                  : 'Save and go to the next track (⌘↵)'
-              }
-            >
-              Save and continue
-              <ChevronRight size={12} style={{ marginLeft: '2px' }} />
+              Done
             </Button>
           </div>
         </div>
@@ -764,8 +823,10 @@ export function BulkEditModal({
   )
 }
 
-// Every field the modal writes on an explicit save.
-const EDITABLE_TEXT_FIELDS = [...TEXT_FIELDS.map((f) => f.field), 'year']
+// Every free-text field the modal writes. BPM and key are deliberately
+// absent: they are measured by the sidecar and shown as header badges, not
+// typed, so nothing here can put a hand-entered value into those columns.
+const EDITABLE_TEXT_FIELDS = ['year']
 
 // ─── Small pieces ─────────────────────────────────────────
 
@@ -904,3 +965,39 @@ function FieldRow({
     </div>
   )
 }
+
+// ─── SaveIndicator ────────────────────────────────────────
+// Replaces the Save buttons. It has to answer one question — "did that land?"
+// — without stealing attention while a DJ is typing, so idle is near-silent
+// and only the moments worth noticing get colour.
+function SaveIndicator({ state }: { state: 'idle' | 'saving' | 'saved' | 'error' }): React.JSX.Element | null {
+  if (state === 'idle') return null
+
+  const { text, color } =
+    state === 'saving'
+      ? { text: 'Saving…', color: '#6a6a80' }
+      : state === 'saved'
+        ? { text: '✓ Saved', color: '#1d9e75' }
+        : { text: '⚠ Not saved', color: '#d8695d' }
+
+  return (
+    <span
+      role="status"
+      aria-live="polite"
+      style={{
+        fontSize: '11px',
+        color,
+        whiteSpace: 'nowrap',
+        // Held at a fixed width so the footer's buttons do not shuffle
+        // sideways every time the text changes.
+        minWidth: '64px',
+        textAlign: 'right',
+        transition: 'color 0.2s ease'
+      }}
+    >
+      {text}
+    </span>
+  )
+}
+
+
