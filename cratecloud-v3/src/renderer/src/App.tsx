@@ -22,6 +22,7 @@ import { CrateView } from './views/CrateView'
 import { PasswordResetDialog } from './components/PasswordResetDialog'
 import { LAST_VIEW_KEY, restoreView, isRestorable } from './lib/lastView'
 import { StaleBuildBanner } from './components/StaleBuildBanner'
+import { useFileDrop } from './hooks/useFileDrop'
 
 const COLLAPSE_THRESHOLD = 900 // px
 const FOLDERS_REFETCH_DEBOUNCE_MS = 300
@@ -102,11 +103,33 @@ function App(): React.JSX.Element {
     return () => window.removeEventListener('resize', handleResize)
   }, [setSidebarCollapsed])
 
-  // A drop that misses every drop target should do nothing — without this,
-  // Electron's default behavior navigates the whole window to the dropped
-  // file. A real target's own preventDefault doesn't stop this from also
-  // firing (drag events still bubble), but by then it's a harmless no-op —
-  // this listener never calls into any import logic itself.
+  // ── Drop anywhere to import ──────────────────────────────────────────
+  // The whole window is a drop target. A more specific one — a folder card,
+  // the empty state — claims the drop first (useFileDrop stops propagation
+  // once it accepts), so this only ever sees drops that landed on nothing in
+  // particular.
+  //
+  // Lands the DJ in All Tracks afterwards: they dropped files to get them
+  // into the library, and the library is what they want to be looking at.
+  const handleShellDrop = useCallback(
+    async (paths: string[]): Promise<void> => {
+      await handleImportPaths(paths)
+      setActiveView('library')
+    },
+    // handleImportPaths is redeclared every render; depending on it would
+    // rebuild the handler constantly for no benefit.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [setActiveView]
+  )
+
+  const { isDragging: isDraggingOverShell, dropHandlers: shellDropHandlers } = useFileDrop({
+    onDrop: (paths) => void handleShellDrop(paths)
+  })
+
+  // Belt and braces against Electron navigating the window to a dropped
+  // file. The shell's own React handler above covers the app's surface; this
+  // catches anything outside it and any drag that never reaches React at
+  // all. It never calls into import logic itself.
   useEffect(() => {
     function preventDefault(e: DragEvent): void {
       e.preventDefault()
@@ -651,7 +674,9 @@ function App(): React.JSX.Element {
   // means once that settles.
   return (
     <div
+      {...shellDropHandlers}
       style={{
+        position: 'relative',
         padding: '1rem',
         fontFamily: 'monospace',
         color: '#e8e8f0',
@@ -662,6 +687,39 @@ function App(): React.JSX.Element {
         overflow: 'hidden'
       }}
     >
+      {/* Only shown for a drop that is NOT over a more specific target —
+          useFileDrop stops propagation as soon as one accepts, so a folder
+          card's own highlight and this never appear at once. Without it,
+          dropping onto empty space gives no sign anything will happen. */}
+      {isDraggingOverShell && (
+        <div
+          style={{
+            position: 'absolute',
+            inset: 0,
+            zIndex: 999,
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            flexDirection: 'column',
+            gap: '8px',
+            background: '#0e0e12e6',
+            border: '2px dashed #7f77dd',
+            borderRadius: '10px',
+            pointerEvents: 'none'
+          }}
+        >
+          <span style={{ fontSize: '30px' }} aria-hidden>
+            ⤓
+          </span>
+          <span style={{ fontSize: '14px', color: '#e8e8f0', fontFamily: 'inherit' }}>
+            Drop to add to your library
+          </span>
+          <span style={{ fontSize: '12px', color: '#6a6a80', fontFamily: 'inherit' }}>
+            Files or folders — they will appear in All Tracks
+          </span>
+        </div>
+      )}
+
       {/* <h2 style={{ marginBottom: '0.5rem' }}>CrateCloud v2</h2> */}
 
       {/* Hidden track count — for Playwright tests */}

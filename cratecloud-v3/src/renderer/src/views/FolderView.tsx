@@ -445,9 +445,41 @@ export function FolderView({ libraryRoots }: FolderViewProps): React.JSX.Element
   }, [])
 
   // Top level — no folder selected yet — show all registered library roots
+  // Built once and rendered in BOTH branches below.
+  //
+  // It used to be mounted only in the single-folder tree, which returns
+  // AFTER the root-picker early return — so clicking rename on a watched
+  // folder's card set the state and rendered nothing, and the dialog only
+  // appeared once you navigated into a folder and crossed the early return.
+  // Any dialog reachable from the picker has to live above it.
+  const renameDialog =
+    renameTargetId !== null
+      ? (() => {
+          const target = foldersById.get(renameTargetId)
+          if (!target) return null
+          const childCount = (childrenByParent.get(renameTargetId) ?? []).length
+          return (
+            <RenameFolderDialog
+              open
+              folderId={renameTargetId}
+              currentName={target.name}
+              trackCount={getTrackCount(renameTargetId)}
+              subfolderCount={childCount}
+              isWatchedFolder={target.parent_folder_id == null}
+              onClose={() => setRenameTargetId(null)}
+              onRenamed={() => {
+                setSelectedIds(new Set())
+                void reloadTracks()
+              }}
+            />
+          )
+        })()
+      : null
+
   if (currentFolderId === null) {
     return (
       <div style={{ flex: 1, display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
+        {renameDialog}
         <div style={{ flex: 1, overflowY: 'auto', padding: '20px 24px' }}>
           <h2
             style={{
@@ -842,29 +874,7 @@ export function FolderView({ libraryRoots }: FolderViewProps): React.JSX.Element
         />
       )}
 
-      {renameTargetId !== null &&
-        (() => {
-          // Resolved at render so the dialog shows the right folder's own
-          // name and counts, whether it came from the header or a card.
-          const target = foldersById.get(renameTargetId)
-          if (!target) return null
-          const childCount = (childrenByParent.get(renameTargetId) ?? []).length
-          return (
-            <RenameFolderDialog
-              open
-              folderId={renameTargetId}
-              currentName={target.name}
-              trackCount={getTrackCount(renameTargetId)}
-              subfolderCount={childCount}
-              isWatchedFolder={target.parent_folder_id == null}
-              onClose={() => setRenameTargetId(null)}
-              onRenamed={() => {
-                setSelectedIds(new Set())
-                void reloadTracks()
-              }}
-            />
-          )
-        })()}
+      {renameDialog}
 
       <RenameFilesDialog
         open={renamingFiles}

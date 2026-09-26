@@ -40,6 +40,9 @@ export function useFileDrop({ onDrop, accept = true }: UseFileDropOptions): UseF
       if (!hasFiles(e)) return
       e.preventDefault()
       if (!accept) return
+      // Same reason as the drop: a nested target owns the pointer, so the
+      // shell must not also light up behind it.
+      e.stopPropagation()
       depth.current++
       setIsDragging(true)
     },
@@ -68,7 +71,18 @@ export function useFileDrop({ onDrop, accept = true }: UseFileDropOptions): UseF
       e.preventDefault()
       depth.current = 0
       setIsDragging(false)
+
+      // A target that is not accepting must NOT claim the drop — it has to
+      // fall through to the app shell, which imports it. preventDefault
+      // above still stops Electron navigating to the file.
       if (!accept) return
+
+      // Claim it. The app shell is a drop target too (drop anywhere to
+      // import), and without this a drop onto a folder would run BOTH
+      // handlers — importing the files into the folder and then again as a
+      // top-level import. The most specific target that will actually act
+      // wins, which is the one the pointer is over.
+      e.stopPropagation()
 
       const files = Array.from(e.dataTransfer.files)
       if (files.length === 0) return
