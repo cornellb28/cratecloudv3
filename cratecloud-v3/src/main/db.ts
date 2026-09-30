@@ -1471,6 +1471,54 @@ export function repointFolderSubtree(
   return { foldersUpdated, tracksUpdated }
 }
 
+// Deletes a tag everywhere and re-derives every track that carried it.
+//
+// The ON DELETE CASCADE on track_tags removes the memberships on its own,
+// but nothing recomputes tracks.<field> — so without this the badge would
+// disappear while the derived column kept showing it, which is exactly the
+// drift the migration had to go and reconcile by hand.
+//
+// Only touches the derived column for a tag-backed field. A tag in some
+// other namespace has no column to recompute, and blindly writing one would
+// mean interpolating an arbitrary field name into SQL.
+export function deleteTagAndCascade(tagId: number): {
+  deleted: boolean
+  field: string
+  value: string
+  tracksUpdated: number
+} {
+  const tag = db.prepare('SELECT id, field, value FROM tags WHERE id = ?').get(tagId) as
+    | { id: number; field: string; value: string }
+    | undefined
+  if (!tag) return { deleted: false, field: '', value: '', tracksUpdated: 0 }
+
+  let tracksUpdated = 0
+
+  const run = db.transaction(() => {
+    // Captured BEFORE the delete — afterwards the pivot rows are gone and
+    // there is nothing left to say which tracks were affected.
+    const affected = db
+      .prepare('SELECT DISTINCT track_id FROM track_tags WHERE tag_id = ?')
+      .all(tagId)
+      .map((r) => (r as { track_id: number }).track_id)
+
+    db.prepare('DELETE FROM tags WHERE id = ?').run(tagId)
+
+    if (isTagBackedField(tag.field)) {
+      for (const trackId of affected) {
+        const derived = deriveFieldValue(trackId, tag.field)
+        db.prepare(
+          `UPDATE tracks SET ${tag.field} = @value, updated_at = datetime('now') WHERE id = @id`
+        ).run({ id: trackId, value: derived })
+      }
+    }
+    tracksUpdated = affected.length
+  })
+  run()
+
+  return { deleted: true, field: tag.field, value: tag.value, tracksUpdated }
+}
+
 export function getTrackTags(trackId: number): Tag[] {
   return stmts.getTrackTags.all(trackId) as Tag[]
 }
@@ -2033,6 +2081,18 @@ export function getTracksByColumn(column: string): Track[] {
 // freshly mkdir'd directory becomes visible to FolderView the same way a
 // moved track's destination does, instead of staying invisible until a
 // full re-import walks it.
+// Tells the renderer to refetch folders AND their track counts.
+//
+// ensureFolderTree only emits when a folder row is created or revived, which
+// is correct for structure but misses the other thing the Folders view shows:
+// how many tracks are in each folder. Importing one file into a folder that
+// already exists changes no rows in `folders` and every count under it — so
+// without this the Folders view kept showing pre-import numbers until the
+// app was reloaded.
+export function notifyFoldersChanged(): void {
+  folderEvents.emit('changed')
+}
+
 export function ensureFolderForDirectory(dirPath: string): number | null {
   const roots = (db.prepare('SELECT * FROM library_roots').all() as LibraryRoot[]).sort(
     (a, b) => b.path.length - a.path.length

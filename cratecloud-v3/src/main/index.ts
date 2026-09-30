@@ -76,6 +76,7 @@ import {
   findOrCreateTag,
   setTagsForField,
   renameTagAndCascade,
+  deleteTagAndCascade,
   getUnanalyzedTracks,
   setTrackArtworkHash,
   updateTrackFilepath,
@@ -90,6 +91,7 @@ import {
   getAllRoots,
   ensureFolderTree,
   ensureFolderForDirectory,
+  notifyFoldersChanged,
   getFolderIdByRelativePath,
   markFolderMissing,
   deleteFolderCascade,
@@ -2118,12 +2120,24 @@ app.whenReady().then(() => {
     try {
       // Phase 1
       const fastResult = await readTagsFast(filepath)
-      // TODO: optionally resolve against a registered root if the file lives under one
       const singleStat = await stat(filepath).catch(() => null)
+
+      // Resolve the file against a registered root if it lives under one.
+      // Without this a dropped file came in with folder_id null: it appeared
+      // in All Tracks and NOWHERE in Folders, and no folders:changed fired,
+      // so the Folders view stayed stale until the app was reloaded.
+      //
+      // Returns null when the file is outside every library folder, which is
+      // still a valid import — it just has no folder to belong to. Dropping
+      // one file does not register its parent directory as a watched folder;
+      // that would turn a single track dragged out of ~/Downloads into a
+      // watched library of everything in there.
+      const folderId = ensureFolderForDirectory(dirname(filepath))
+
       const trackData = buildTrackData(
         filepath,
         fastResult,
-        null,
+        folderId,
         singleStat ? normalizeMtime(singleStat.mtimeMs) : null
       )
 
@@ -2145,6 +2159,9 @@ app.whenReady().then(() => {
 
       let trackId: number
       if (match) {
+        // relinkTrack repoints filepath; updateTrackFilepath inside it
+        // recomputes folder_id from the new path, so the folder follows the
+        // file here the same way it does for a move.
         relinkTrack(match.id, filepath)
         trackId = match.id
         console.log(`[import] relinked via reconcile: ${match.filepath} → ${filepath}`)
@@ -2168,6 +2185,11 @@ app.whenReady().then(() => {
         failed: 0,
         filepath: basename(filepath)
       })
+
+      // And that a folder's track count moved. ensureFolderTree above only
+      // emits when it CREATES a folder row, so importing into a folder that
+      // already exists would otherwise leave every count stale until reload.
+      if (folderId !== null) notifyFoldersChanged()
 
       // Phase 2 - analyze this one file immediately
       // Single file is fast enough to do inline
@@ -3047,6 +3069,16 @@ app.whenReady().then(() => {
 
   // Renames a tag everywhere and re-derives every track carrying it. Merges
   // into an existing tag of the same field if the new value collides.
+  // Removes a tag from the library entirely and re-derives every track that
+  // carried it. Distinct from tags:remove, which only unlinks ONE track.
+  ipcMain.handle('tags:delete', (_e, tagId: number) => {
+    try {
+      return { ok: true, ...deleteTagAndCascade(tagId) }
+    } catch (err) {
+      return { ok: false, error: (err as Error).message }
+    }
+  })
+
   ipcMain.handle('tags:rename', (_e, tagId: number, newValue: string) => {
     try {
       return { ok: true, ...renameTagAndCascade(tagId, newValue) }

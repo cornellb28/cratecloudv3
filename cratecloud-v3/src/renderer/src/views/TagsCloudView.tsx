@@ -1,6 +1,9 @@
 import React, { useState } from 'react'
+import { toast } from 'sonner'
+import { Pencil, Trash2 } from 'lucide-react'
 import { useLibraryStore } from '../store/useLibraryStore'
 import { Badge } from '@renderer/components/ui/badge'
+import { TagEditDialog } from '../components/TagEditDialog'
 
 // Fields in alphabetical order
 const FIELD_ORDER = [
@@ -32,6 +35,68 @@ export function TagsCloudView({ onTagSelect }: TagsCloudViewProps): React.JSX.El
 
   // Which accordion sections are open — comment open by default
   const [openFields, setOpenFields] = useState<Set<string>>(new Set(['comment']))
+
+  const [hoveredTagId, setHoveredTagId] = useState<number | null>(null)
+  // The tag being renamed or deleted, with the track count it had when the
+  // dialog opened — the dialog says how many tracks a change will touch, and
+  // recomputing that mid-dialog would make the number move under the DJ.
+  const [editing, setEditing] = useState<{
+    tag: Tag
+    count: number
+    mode: 'rename' | 'delete'
+  } | null>(null)
+
+  // Both operations change tracks, so the whole library slice is refetched
+  // rather than patched — a rename can merge two tags and a delete can clear
+  // a derived column on any number of rows.
+  async function refreshAfterChange(): Promise<void> {
+    const store = useLibraryStore.getState()
+    const [allTracks, allTags] = await Promise.all([
+      window.api.db.allTracks(),
+      window.api.tags.all()
+    ])
+    store.setTracks(allTracks)
+    store.setTags(allTags)
+    const byTrack = await window.api.tags.forTracks(allTracks.map((t) => t.id))
+    store.setAllTrackTags(byTrack)
+  }
+
+  async function handleRename(newValue: string): Promise<void> {
+    if (!editing) return
+    const result = await window.api.tags.rename(editing.tag.id, newValue)
+    if (!result.ok) {
+      toast.error('Could not rename the tag', { description: result.error })
+      return
+    }
+    await refreshAfterChange()
+    toast.success(
+      result.mergedInto
+        ? `Merged into “${newValue}”`
+        : `Renamed to “${newValue}”`,
+      {
+        description: result.tracksUpdated
+          ? `${result.tracksUpdated} track${result.tracksUpdated === 1 ? '' : 's'} updated.`
+          : undefined
+      }
+    )
+    setEditing(null)
+  }
+
+  async function handleDelete(): Promise<void> {
+    if (!editing) return
+    const result = await window.api.tags.delete(editing.tag.id)
+    if (!result.ok) {
+      toast.error('Could not delete the tag', { description: result.error })
+      return
+    }
+    await refreshAfterChange()
+    toast.success(`Deleted “${editing.tag.value}”`, {
+      description: result.tracksUpdated
+        ? `Removed from ${result.tracksUpdated} track${result.tracksUpdated === 1 ? '' : 's'}.`
+        : undefined
+    })
+    setEditing(null)
+  }
 
   function toggleField(field: string): void {
     setOpenFields((prev) => {
@@ -141,8 +206,13 @@ export function TagsCloudView({ onTagSelect }: TagsCloudViewProps): React.JSX.El
                   {fieldTags.map((tag) => {
                     const count = tagCounts.get(tag.id) ?? 0
                     return (
-                      <Badge
+                      <span
                         key={tag.id}
+                        style={{ display: 'inline-flex', alignItems: 'center', gap: '2px' }}
+                        onMouseEnter={() => setHoveredTagId(tag.id)}
+                        onMouseLeave={() => setHoveredTagId(null)}
+                      >
+                      <Badge
                         variant="outline"
                         onClick={() => onTagSelect(tag)}
                         style={{
@@ -176,6 +246,27 @@ export function TagsCloudView({ onTagSelect }: TagsCloudViewProps): React.JSX.El
                           </span>
                         )}
                       </Badge>
+
+                      {/* Shown on hover, not always: a cloud of hundreds of
+                          tags with two controls each is unreadable. */}
+                      {hoveredTagId === tag.id && (
+                        <>
+                          <IconAction
+                            label={`Rename "${tag.value}"`}
+                            onClick={() => setEditing({ tag, count, mode: 'rename' })}
+                          >
+                            <Pencil size={11} />
+                          </IconAction>
+                          <IconAction
+                            label={`Delete "${tag.value}"`}
+                            danger
+                            onClick={() => setEditing({ tag, count, mode: 'delete' })}
+                          >
+                            <Trash2 size={11} />
+                          </IconAction>
+                        </>
+                      )}
+                      </span>
                     )
                   })}
                 </div>
@@ -184,6 +275,62 @@ export function TagsCloudView({ onTagSelect }: TagsCloudViewProps): React.JSX.El
           )
         })}
       </div>
+
+      {editing && (
+        <TagEditDialog
+          open
+          mode={editing.mode}
+          tag={editing.tag}
+          trackCount={editing.count}
+          onRename={(value) => void handleRename(value)}
+          onDelete={() => void handleDelete()}
+          onClose={() => setEditing(null)}
+        />
+      )}
     </div>
+  )
+}
+
+// A 16px action beside a tag. Small on purpose — it sits inside a wrapping
+// row of badges and must not change their line height.
+function IconAction({
+  label,
+  onClick,
+  danger = false,
+  children
+}: {
+  label: string
+  onClick: () => void
+  danger?: boolean
+  children: React.ReactNode
+}): React.JSX.Element {
+  return (
+    <button
+      type="button"
+      title={label}
+      aria-label={label}
+      onClick={(e) => {
+        // The badge beside this opens the tag's page on click; without this
+        // the rename button would do that too.
+        e.stopPropagation()
+        onClick()
+      }}
+      style={{
+        display: 'inline-flex',
+        alignItems: 'center',
+        justifyContent: 'center',
+        width: '16px',
+        height: '16px',
+        borderRadius: '3px',
+        background: 'none',
+        border: 'none',
+        color: danger ? '#d8695d' : '#6a6a80',
+        cursor: 'pointer',
+        padding: 0,
+        fontFamily: 'inherit'
+      }}
+    >
+      {children}
+    </button>
   )
 }

@@ -300,6 +300,9 @@ const api = {
     setForField: (trackId: number, field: string, values: string[]) =>
       ipcRenderer.invoke('tags:set-for-field', trackId, field, values),
     rename: (tagId: number, newValue: string) => ipcRenderer.invoke('tags:rename', tagId, newValue),
+    // Removes the tag from the library entirely, re-deriving every track
+    // that carried it. `remove` above only unlinks one track.
+    delete: (tagId: number) => ipcRenderer.invoke('tags:delete', tagId),
     remove: (trackId: number, tagId: number) => ipcRenderer.invoke('tags:remove', trackId, tagId),
     checkCandidates: (candidates: string[], field: string) =>
       ipcRenderer.invoke('tags:check-candidates', candidates, field),

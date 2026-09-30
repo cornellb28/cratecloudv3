@@ -202,6 +202,16 @@ declare global {
           field: string,
           values: string[]
         ) => Promise<{ ok: boolean; derived?: string | null; error?: string }>
+        // Removes the tag from the library entirely and re-derives every
+        // track that carried it. `remove` only unlinks a single track.
+        delete: (tagId: number) => Promise<{
+          ok: boolean
+          deleted?: boolean
+          field?: string
+          value?: string
+          tracksUpdated?: number
+          error?: string
+        }>
         // Renames a tag everywhere and re-derives every track carrying it.
         // Merges into an existing tag of the same field on a collision.
         rename: (

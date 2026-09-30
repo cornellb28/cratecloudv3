@@ -624,6 +624,18 @@ function App(): React.JSX.Element {
     // Same staleness gap as handleImport — a dropped folder can register a
     // brand-new root, and libraryRoots only otherwise refreshes at launch.
     if (dirs.length > 0) await reloadRoots()
+
+    // Folders and their counts, unconditionally. main emits folders:changed
+    // when it CREATES a folder row, which covers a new subtree — but a
+    // re-import into folders that already exist changes only the counts, and
+    // those come from the same slice. Refetching here is one query and
+    // removes the "why do I have to reload to see it" case entirely.
+    const [tree, counts] = await Promise.all([
+      window.api.folders.tree(),
+      window.api.db.folderTrackCounts()
+    ])
+    setFolderData(tree, counts)
+
     setAnalyzing(false)
 
     if (skipped.length > 0) {
